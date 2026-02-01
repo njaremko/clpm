@@ -29,30 +29,26 @@ curl -fsSL https://github.com/clpm/clpm/releases/download/v0.1.0/clpm-bootstrap.
 ## Quick Start
 
 ```bash
+# Check your environment (will report issues if not configured)
+clpm doctor
+
+# Configure a registry (example values)
+clpm registry add --name main --url https://github.com/clpm/clpm-registry.git --trust ed25519:...
+
 # Create a new project
 clpm new myproject --bin
 cd myproject
 
-# Edit clpm.project to add dependencies
-cat > clpm.project << 'EOF'
-(:project
-  :name "myproject"
-  :version "0.1.0"
-  :systems ("myproject")
-  :depends
-    ((:dep :system "alexandria" :constraint (:semver "^1.4.0"))
-     (:dep :system "bordeaux-threads" :constraint (:semver "^0.8.0")))
-  :registries
-    ((:git :url "https://github.com/clpm/clpm-registry.git"
-           :name "main"
-           :trust "ed25519:...")))
-EOF
+# Add dependencies (updates clpm.project and clpm.lock)
+clpm add alexandria@^1.4.0
 
-# Install dependencies
+# Install + activate, then run commands
 clpm install
+clpm test
+clpm run
 
-# Start REPL with project loaded
-clpm repl
+# Produce a distributable executable in dist/
+clpm package
 ```
 
 ## Project File Format
@@ -90,15 +86,24 @@ The `clpm.project` file is a data-only S-expression:
 
 | Command | Description |
 |---------|-------------|
+| `clpm help <cmd>` | Show command-specific help |
+| `clpm doctor` | Check environment and configuration |
 | `clpm new <name> --bin\|--lib [--dir <path>]` | Create a new project scaffold |
 | `clpm init [name]` | Initialize new project |
+| `clpm add <dep>[@<constraint>]` | Add a dependency |
+| `clpm remove <dep>` | Remove a dependency |
+| `clpm registry <add\|list\|update> ...` | Manage global registries |
 | `clpm resolve` | Resolve dependencies and write lockfile |
 | `clpm fetch` | Download dependencies |
 | `clpm build` | Build dependencies |
 | `clpm install` | Resolve, fetch, and build |
 | `clpm update [sys...]` | Update dependencies |
 | `clpm repl` | Start SBCL with project loaded |
-| `clpm run <script>` | Run a project script |
+| `clpm run [-- <args...>]` | Run the project entrypoint |
+| `clpm exec -- <cmd...>` | Run a command in the project env |
+| `clpm test` | Run project tests |
+| `clpm package` | Build a distributable executable |
+| `clpm clean [--dist]` | Remove project-local outputs |
 | `clpm gc` | Garbage collect store |
 
 ### Global Options

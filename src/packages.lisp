@@ -302,7 +302,9 @@
            #:cmd-test
            #:cmd-package
            #:cmd-clean
-           #:cmd-gc))
+           #:cmd-gc
+           #:cmd-help
+           #:cmd-doctor))
 
 (defpackage #:clpm
   (:use #:cl #:clpm.commands #:clpm.errors)

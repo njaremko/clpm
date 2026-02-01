@@ -1150,3 +1150,244 @@ Manifest schema:
         (when source-path
           (push (cons system-id source-path) paths))))
     (nreverse paths)))
+
+;;; help command
+
+(defun print-command-help (command &key subcommand)
+  "Print help for a COMMAND (keyword) and optional SUBCOMMAND (string)."
+  (labels ((p (fmt &rest args)
+             (apply #'format t (concatenate 'string fmt "~%") args)))
+    (case command
+      (:help
+       (p "Usage: clpm help <command> [subcommand]")
+       (p "")
+       (p "Examples:")
+       (p "  clpm help new")
+       (p "  clpm help registry add")
+       0)
+      (:doctor
+       (p "Usage: clpm doctor")
+       (p "")
+       (p "Checks:")
+       (p "  - SBCL version >= 2.0.0")
+       (p "  - ASDF version >= 3.3.0")
+       (p "  - Downloader present (curl/wget/powershell)")
+       (p "  - tar present")
+       (p "  - Registries configured (global config and/or current project)")
+       0)
+      (:new
+       (p "Usage: clpm new <name> --bin|--lib [--dir <path>]")
+       (p "")
+       (p "Options:")
+       (p "  --bin         Create an executable project scaffold")
+       (p "  --lib         Create a library project scaffold")
+       (p "  --dir <path>  Destination directory (default: current dir)")
+       0)
+      (:init
+       (p "Usage: clpm init [name]")
+       (p "")
+       (p "Creates clpm.project in the current directory.")
+       0)
+      (:add
+       (p "Usage: clpm add [--dev|--test] [--path <dir> | --git <url> --ref <ref>] <dep>[@<constraint>]")
+       (p "")
+       (p "Examples:")
+       (p "  clpm add alexandria")
+       (p "  clpm add alexandria@^1.4.0")
+       (p "  clpm add --path ../my-lib my-lib")
+       (p "  clpm add --git https://example.invalid/repo.git --ref main my-lib")
+       (p "")
+       (p "Options:")
+       (p "  --dev         Add to :dev-depends")
+       (p "  --test        Add to :test-depends")
+       (p "  --install     Run 'clpm install' after updating manifests")
+       (p "  --path <dir>  Use a local path dependency")
+       (p "  --git <url>   Use a git dependency")
+       (p "  --ref <ref>   Git ref (branch/tag/commit) to resolve")
+       0)
+      (:remove
+       (p "Usage: clpm remove [--dev|--test] <dep>")
+       (p "")
+       (p "Options:")
+       (p "  --dev   Remove from :dev-depends")
+       (p "  --test  Remove from :test-depends")
+       0)
+      (:registry
+       (p "Usage: clpm registry <add|list|update> [options]")
+       (p "")
+       (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
+         (cond
+           ((and sub (string= sub "add"))
+            (p "Usage: clpm registry add --name <name> --url <git-url> --trust <ed25519:key-id>")
+            (p "")
+            (p "Example:")
+            (p "  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:abcd...")
+            0)
+           ((and sub (string= sub "list"))
+            (p "Usage: clpm registry list")
+            0)
+           ((and sub (string= sub "update"))
+            (p "Usage: clpm registry update [name ...]")
+            0)
+           (t
+            (p "Subcommands:")
+            (p "  add      Add or update a configured registry")
+            (p "  list     List configured registries")
+            (p "  update   Update cloned registries (optionally by name)")
+            0))))
+      (:resolve
+       (p "Usage: clpm resolve")
+       (p "")
+       (p "Resolves dependencies and writes clpm.lock deterministically.")
+       0)
+      (:fetch
+       (p "Usage: clpm fetch [--offline]")
+       (p "")
+       (p "Downloads dependencies specified in clpm.lock.")
+       0)
+      (:build
+       (p "Usage: clpm build")
+       (p "")
+       (p "Builds dependencies specified in clpm.lock into the store.")
+       0)
+      (:install
+       (p "Usage: clpm install")
+       (p "")
+       (p "Runs resolve + fetch + build and activates the project.")
+       0)
+      (:update
+       (p "Usage: clpm update [system ...]")
+       (p "")
+       (p "Updates dependency selections and rewrites clpm.lock.")
+       0)
+      (:repl
+       (p "Usage: clpm repl [system]")
+       (p "")
+       (p "Starts SBCL with the project environment loaded.")
+       0)
+      (:run
+       (p "Usage: clpm run [-- <args...>]")
+       (p "")
+       (p "Runs the entrypoint configured in clpm.project :run.")
+       0)
+      (:exec
+       (p "Usage: clpm exec -- <cmd...>")
+       (p "")
+       (p "Runs a command in the project environment (after activation).")
+       0)
+      (:test
+       (p "Usage: clpm test")
+       (p "")
+       (p "Builds test dependencies and runs configured ASDF test systems.")
+       0)
+      (:package
+       (p "Usage: clpm package")
+       (p "")
+       (p "Builds a distributable executable in dist/ based on clpm.project :package.")
+       0)
+      (:clean
+       (p "Usage: clpm clean [--dist]")
+       (p "")
+       (p "Removes project-local outputs. Use --dist to remove dist/ as well.")
+       0)
+      (:gc
+       (p "Usage: clpm gc [--dry-run]")
+       (p "")
+       (p "Garbage collects unreferenced store entries.")
+       0)
+      (t
+       (log-error "Unknown command: ~A" command)
+       1))))
+
+(defun cmd-help (&rest args)
+  "Print command-specific help."
+  (let* ((cmd-name (first args))
+         (subcmd (second args)))
+    (unless (and (stringp cmd-name) (plusp (length cmd-name)))
+      (log-error "Usage: clpm help <command> [subcommand]")
+      (return-from cmd-help 1))
+    (let ((command (intern (string-upcase cmd-name) :keyword)))
+      (print-command-help command :subcommand subcmd))))
+
+;;; doctor command
+
+(defun cmd-doctor ()
+  "Check the local environment for running CLPM."
+  (let ((failures 0))
+    (labels ((ok (fmt &rest args)
+               (apply #'format t (concatenate 'string "ok: " fmt "~%") args))
+             (note-warn (fmt &rest args)
+               (apply #'format t (concatenate 'string "warn: " fmt "~%") args))
+             (bad (fmt &rest args)
+               (incf failures)
+               (apply #'format t (concatenate 'string "error: " fmt "~%") args)))
+
+      ;; SBCL version
+      (let* ((min-sbcl "2.0.0")
+             (sbcl (clpm.platform:sbcl-version)))
+        (if (clpm.solver.version:version>= sbcl min-sbcl)
+            (ok "sbcl ~A (>= ~A)" sbcl min-sbcl)
+            (bad "sbcl ~A is too old (need >= ~A)" sbcl min-sbcl)))
+
+      ;; ASDF version
+      (let* ((min-asdf "3.3.0")
+             (asdf (handler-case
+                       (clpm.platform:asdf-version)
+                     (error (c)
+                       (declare (ignore c))
+                       nil))))
+        (cond
+          ((null asdf)
+           (bad "asdf not available (need >= ~A)" min-asdf))
+          ((clpm.solver.version:version>= asdf min-asdf)
+           (ok "asdf ~A (>= ~A)" asdf min-asdf))
+          (t
+           (bad "asdf ~A is too old (need >= ~A)" asdf min-asdf))))
+
+      ;; Downloader
+      (let ((downloader (handler-case
+                            (clpm.platform:find-downloader)
+                          (error (c)
+                            (declare (ignore c))
+                            nil))))
+        (if downloader
+            (ok "downloader: ~A" downloader)
+            (bad "no downloader found (need curl or wget)")))
+
+      ;; tar
+      (let ((tar (handler-case
+                     (clpm.platform:find-tar)
+                   (error (c)
+                     (declare (ignore c))
+                     nil))))
+        (if tar
+            (ok "tar: ~A" tar)
+            (bad "tar not found")))
+
+      ;; Registries configured: global config and/or current project.
+      (let ((registries
+              (handler-case
+                  (multiple-value-bind (project-root manifest-path lock-path)
+                      (clpm.project:find-project-root)
+                    (declare (ignore project-root lock-path))
+                    (if manifest-path
+                        (let ((project (clpm.project:read-project-file manifest-path)))
+                          (multiple-value-bind (merged-registries build-options)
+                              (clpm.config:merge-project-config project)
+                            (declare (ignore build-options))
+                            merged-registries))
+                        (clpm.config:config-registries (clpm.config:read-config))))
+                (error (c)
+                  (note-warn "Failed to read config/project registries: ~A" c)
+                  nil))))
+        (if (and (listp registries) (plusp (length registries)))
+            (ok "registries: ~D configured" (length registries))
+            (bad "no registries configured (run: clpm registry add ...)")))
+
+      (if (zerop failures)
+          (progn
+            (format t "~&doctor: OK~%")
+            0)
+          (progn
+            (format t "~&doctor: FAILED (~D issue~:P)~%" failures)
+            1)))))

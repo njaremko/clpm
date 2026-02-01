@@ -23,6 +23,8 @@ clpm ~A - Common Lisp Package Manager
 Usage: clpm [options] <command> [args]
 
 Commands:
+  help [cmd]      Show help for a command
+  doctor          Check your environment
   new <name> ...   Create a new project
   init [name]      Initialize new project
   add <dep> ...    Add a dependency
@@ -50,10 +52,11 @@ Options:
   --version        Show version
 
 Examples:
+  clpm doctor
+  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:example-key-id
   clpm new myproject --bin
   clpm init myproject
   clpm add alexandria@^1.4.0
-  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:example-key-id
   clpm install
   clpm repl
   clpm update alexandria
@@ -71,24 +74,43 @@ Returns (values command command-args options)."
   (let ((command nil)
         (command-args '())
         (options '())
+        (end-of-options nil)
         (i 0))
     (loop while (< i (length args)) do
       (let ((arg (nth i args)))
         (cond
+          (end-of-options
+           (push arg command-args))
+          ((and command (string= arg "--"))
+           ;; After a command is chosen, treat `--` as an "end of options"
+           ;; sentinel for forwarding args verbatim (e.g. `clpm exec -- <cmd...>`).
+           (setf end-of-options t)
+           (push arg command-args))
           ;; Global options
           ((or (string= arg "-v") (string= arg "--verbose"))
            (push :verbose options))
           ((or (string= arg "-j") (string= arg "--jobs"))
            (incf i)
-           (when (< i (length args))
-             (let ((n (parse-integer (nth i args) :junk-allowed t)))
-               (when n (push (cons :jobs n) options)))))
+           (when (>= i (length args))
+             (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                       "Missing value for ~A" arg))
+           (let* ((raw (nth i args))
+                  (n (ignore-errors (parse-integer raw :junk-allowed nil))))
+             (unless (and (integerp n) (plusp n))
+               (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                         "Invalid value for --jobs: ~A" raw))
+             (push (cons :jobs n) options)))
           ((string= arg "--offline")
            (push :offline options))
           ((string= arg "--insecure")
            (push :insecure options))
           ((or (string= arg "-h") (string= arg "--help"))
-           (return-from parse-args (values :help nil nil)))
+           (if command
+               (return-from parse-args
+                 (values :help
+                         (list (string-downcase (symbol-name command)))
+                         options))
+               (return-from parse-args (values :help nil nil))))
           ((string= arg "--version")
            (return-from parse-args (values :version nil nil)))
           ;; Command
@@ -130,11 +152,16 @@ This function must not call `sb-ext:exit` so it can be used from tests."
           ;; Dispatch command
           (case command
             (:help
-             (print-usage)
-             0)
+             (if command-args
+                 (apply #'clpm.commands:cmd-help command-args)
+                 (progn
+                   (print-usage)
+                   0)))
             (:version
              (print-version)
              0)
+            (:doctor
+             (clpm.commands:cmd-doctor))
             (:init
              (clpm.commands:cmd-init
               :name (first command-args)))
@@ -177,8 +204,13 @@ This function must not call `sb-ext:exit` so it can be used from tests."
              (format *error-output* "Unknown command: ~A~%" command)
              (print-usage)
              1))))
+    (clpm.errors:clpm-error (c)
+      (clpm.errors:format-error c)
+      (cond
+        ((typep c 'clpm.errors:clpm-resolve-error) 2)
+        (t 1)))
     (error (c)
-      (format *error-output* "~&Fatal error: ~A~%" c)
+      (format *error-output* "~&internal error: ~A~%" c)
       (when *verbose*
         (format *error-output* "~&Backtrace:~%")
         (sb-debug:print-backtrace :stream *error-output* :count 20))
