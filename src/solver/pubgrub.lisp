@@ -341,9 +341,11 @@ Prefers lockfile selection, then highest version."
              :name (clpm.registry:registry-name reg)
              :kind :git
              :url (clpm.registry:registry-url reg)
+             :trust (clpm.registry:registry-trust-key reg)
              :commit (clpm.registry:git-rev-parse
                       (clpm.registry:registry-local-path
-                       (clpm.registry:registry-name reg))))
+                       (clpm.registry:registry-name reg)))
+             :signature (clpm.registry:registry-snapshot-sig-sha256 reg))
             (clpm.project:lockfile-registries lock)))
     ;; Add resolved systems
     (dolist (sys (resolution-systems resolution))

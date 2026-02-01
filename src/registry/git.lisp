@@ -10,6 +10,7 @@
   (url nil :type (or null string))
   (path nil :type (or null pathname))  ; local path to cloned registry
   (trust-key nil :type (or null string))
+  (snapshot-sig-sha256 nil :type (or null string))
   (snapshot nil))
 
 (defstruct snapshot
@@ -159,10 +160,13 @@ Modifies REGISTRY in place."
     (when (registry-trust-key registry)
       (if (and (boundp 'clpm.commands:*insecure*)
                (symbol-value 'clpm.commands:*insecure*))
-          (clpm.commands::log-info
-           "WARNING: --insecure: skipping snapshot signature verification for registry ~A"
-           (registry-name registry))
-          (verify-snapshot-signature local-path (registry-trust-key registry))))
+          (progn
+            (setf (registry-snapshot-sig-sha256 registry) nil)
+            (clpm.commands::log-info
+             "WARNING: --insecure: skipping snapshot signature verification for registry ~A"
+             (registry-name registry)))
+          (setf (registry-snapshot-sig-sha256 registry)
+                (verify-snapshot-signature local-path (registry-trust-key registry)))))
     ;; Parse snapshot
     (let ((form (clpm.io.sexp:read-registry-snapshot snapshot-path)))
       (setf (registry-snapshot registry) (parse-snapshot form)))
@@ -179,34 +183,91 @@ Modifies REGISTRY in place."
         (:provides (setf (snapshot-provides snap) val))))
     snap))
 
+(defun read-file-bytes (path)
+  "Read PATH as an octet vector."
+  (with-open-file (s path :element-type '(unsigned-byte 8))
+    (let ((data (make-array (file-length s) :element-type '(unsigned-byte 8))))
+      (read-sequence data s)
+      data)))
+
+(defun resolve-trust-key-path (repo-path trust-key)
+  "Return (values key-id key-path) for TRUST-KEY and REPO-PATH."
+  (let* ((key-id-info (clpm.crypto.ed25519:parse-key-id trust-key))
+         (key-id (cdr key-id-info))
+         (key-path (merge-pathnames (format nil "~A.pub" key-id)
+                                    (clpm.platform:keys-dir))))
+    (unless (uiop:file-exists-p key-path)
+      ;; Try embedded key in registry
+      (setf key-path (merge-pathnames (format nil "registry/keys/~A.pub" key-id)
+                                      repo-path)))
+    (unless (uiop:file-exists-p key-path)
+      (error 'clpm.errors:clpm-signature-error
+             :message "Public key not found"
+             :key-id key-id))
+    (values key-id key-path)))
+
+(defun signature-sha256-hex (signature)
+  "Compute SHA-256 hex digest of Ed25519 SIGNATURE bytes."
+  (clpm.crypto.sha256:bytes-to-hex
+   (clpm.crypto.sha256:sha256 (clpm.crypto.ed25519::signature-bytes signature))))
+
+(defun verify-registry-file-signature (repo-path file-path sig-path trust-key)
+  "Verify FILE-PATH against SIG-PATH using TRUST-KEY.
+
+Returns the SHA-256 hex digest of the detached signature bytes on success.
+Signals CLPM-SIGNATURE-ERROR on any failure."
+  (unless (uiop:file-exists-p sig-path)
+    (error 'clpm.errors:clpm-signature-error
+           :message "Signature file not found"
+           :file sig-path))
+  (multiple-value-bind (key-id key-path)
+      (resolve-trust-key-path repo-path trust-key)
+    (handler-case
+        (let* ((key (clpm.crypto.ed25519:load-public-key key-path))
+               (sig (clpm.crypto.ed25519::read-detached-signature sig-path))
+               (msg (read-file-bytes file-path)))
+          (unless key
+            (error 'clpm.errors:clpm-signature-error
+                   :message "Could not load public key"
+                   :file key-path
+                   :key-id key-id))
+          (unless (clpm.crypto.ed25519:verify-signature msg sig key)
+            (error 'clpm.errors:clpm-signature-error
+                   :message "Signature verification failed"
+                   :file file-path
+                   :key-id key-id))
+          (signature-sha256-hex sig))
+      (clpm.errors:clpm-signature-error (c)
+        (error c))
+      (error (c)
+        (error 'clpm.errors:clpm-signature-error
+               :message (format nil "~A" c)
+               :file file-path
+               :key-id key-id)))))
+
 (defun verify-snapshot-signature (repo-path trust-key)
   "Verify snapshot signature.
-Signals error if invalid."
+
+Returns the SHA-256 hex digest of the detached signature bytes on success.
+Signals CLPM-SIGNATURE-ERROR if invalid."
   (let ((snapshot-path (merge-pathnames "registry/snapshot.sxp" repo-path))
         (sig-path (merge-pathnames "registry/snapshot.sig" repo-path)))
-    (unless (uiop:file-exists-p sig-path)
-      (error 'clpm.errors:clpm-signature-error
-             :message "Signature file not found"
-             :file sig-path))
-    ;; Load key and verify
-    (let* ((key-id-info (clpm.crypto.ed25519:parse-key-id trust-key))
-           (key-id (cdr key-id-info))
-           (key-path (merge-pathnames (format nil "~A.pub" key-id)
-                                      (clpm.platform:keys-dir))))
-      (unless (uiop:file-exists-p key-path)
-        ;; Try embedded key in registry
-        (setf key-path (merge-pathnames (format nil "registry/keys/~A.pub" key-id)
-                                        repo-path)))
-      (unless (uiop:file-exists-p key-path)
-        (error 'clpm.errors:clpm-signature-error
-               :message "Public key not found"
-               :key-id key-id))
-      ;; Verify
-      (unless (clpm.crypto.ed25519:verify-file-signature snapshot-path sig-path key-path)
-        (error 'clpm.errors:clpm-signature-error
-               :message "Signature verification failed"
-               :file snapshot-path
-               :key-id key-id)))))
+    (verify-registry-file-signature repo-path snapshot-path sig-path trust-key)))
+
+(defun verify-release-metadata-signature (repo-path package-name version trust-key)
+  "Verify release metadata signature for PACKAGE-NAME@VERSION.
+
+Signals CLPM-SIGNATURE-ERROR if invalid."
+  (let ((release-path (merge-pathnames
+                       (format nil "registry/packages/~A/~A/release.sxp"
+                               package-name version)
+                       repo-path))
+        (sig-path (merge-pathnames
+                   (format nil "registry/packages/~A/~A/release.sig"
+                           package-name version)
+                   repo-path)))
+    (verify-registry-file-signature repo-path release-path sig-path trust-key)
+    t))
 
 ;;; Release metadata loading
 
@@ -219,6 +280,11 @@ Signals error if invalid."
                         local-path)))
     (unless (uiop:file-exists-p release-path)
       (return-from get-release-metadata nil))
+    (when (registry-trust-key registry)
+      (unless (and (boundp 'clpm.commands:*insecure*)
+                   (symbol-value 'clpm.commands:*insecure*))
+        (verify-release-metadata-signature local-path package-name version
+                                           (registry-trust-key registry))))
     (let ((form (clpm.io.sexp:read-release-metadata release-path)))
       (parse-release-metadata form))))
 

@@ -148,6 +148,7 @@
            #:locked-registry-kind
            #:locked-registry-url
            #:locked-registry-commit
+           #:locked-registry-trust
            #:locked-registry-signature
            #:read-project-file
            #:write-project-file
@@ -165,6 +166,7 @@
            #:registry-url
            #:registry-path
            #:registry-trust-key
+           #:registry-snapshot-sig-sha256
            #:registry-snapshot
            #:registry-local-path
            #:snapshot

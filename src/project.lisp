@@ -49,6 +49,7 @@
   (kind :git :type keyword)
   (url nil :type (or null string))
   (commit nil :type (or null string))
+  (trust nil :type (or null string))
   (signature nil :type (or null string)))
 
 (defstruct locked-system
@@ -194,6 +195,7 @@
         (:kind (setf (locked-registry-kind reg) val))
         (:url (setf (locked-registry-url reg) val))
         (:commit (setf (locked-registry-commit reg) val))
+        (:trust (setf (locked-registry-trust reg) val))
         (:signature (setf (locked-registry-signature reg) val))))
     reg))
 
@@ -257,6 +259,7 @@
     :kind ,(locked-registry-kind reg)
     :url ,(locked-registry-url reg)
     :commit ,(locked-registry-commit reg)
+    :trust ,(locked-registry-trust reg)
     :signature ,(locked-registry-signature reg)))
 
 (defun serialize-locked-system (sys)
