@@ -57,6 +57,7 @@
                    :systems '("roundtrip")
                    :run '(:system "roundtrip" :function "roundtrip::main")
                    :test '(:systems ("roundtrip/test"))
+                   :package '(:output "dist/roundtrip" :system "roundtrip" :function "roundtrip::main")
                    :depends (list dep1 dep2)
                    :dev-depends (list dev1)
                    :test-depends (list test1)

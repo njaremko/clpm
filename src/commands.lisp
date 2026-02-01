@@ -125,6 +125,10 @@
                                (list :system name
                                      :function (format nil "~A::main" name)))
                         :test (list :systems (list (format nil "~A/test" name)))
+                        :package (when (eq kind :bin)
+                                   (list :output (format nil "dist/~A" name)
+                                         :system name
+                                         :function (format nil "~A::main" name)))
                         :scripts nil)))
           (clpm.project:write-project-file project manifest-path))
 
@@ -877,6 +881,117 @@ Uses clpm.project :test metadata:
                                            :timeout 600000)
               (declare (ignore output error-output))
               exit-code)))))))
+
+;;; package command
+
+(defun cmd-package (&rest args)
+  "Build a distributable executable according to clpm.project :package metadata.
+
+Manifest schema:
+  :package (:output \"dist/<name>\" :system \"<system>\" :function \"<package>::<fn>\")"
+  (declare (ignore args))
+  (multiple-value-bind (project-root manifest-path lock-path)
+      (clpm.project:find-project-root)
+    (unless manifest-path
+      (log-error "No clpm.project found")
+      (return-from cmd-package 1))
+    (let* ((project (clpm.project:read-project-file manifest-path))
+           (pkg (clpm.project:project-package project)))
+      (unless pkg
+        (log-error "No :package entry configured in clpm.project")
+        (return-from cmd-package 1))
+      (let ((output (getf pkg :output))
+            (system (getf pkg :system))
+            (fn-spec (getf pkg :function)))
+        (unless (and (stringp output) (stringp system) (stringp fn-spec))
+          (log-error "Invalid :package entry: expected (:output <string> :system <string> :function <string>)")
+          (return-from cmd-package 1))
+
+        ;; Ensure lockfile + activation config exist.
+        (let ((config-path (merge-pathnames ".clpm/asdf-config.lisp" project-root)))
+          (when (or (null lock-path)
+                    (not (uiop:file-exists-p config-path)))
+            (log-info "Ensuring project is installed before packaging...")
+            (let ((rc (uiop:with-current-directory (project-root)
+                        (cmd-install))))
+              (unless (zerop rc)
+                (return-from cmd-package rc)))
+            (setf lock-path (merge-pathnames "clpm.lock" project-root)))
+          (unless (and lock-path (uiop:file-exists-p lock-path))
+            (log-error "Missing clpm.lock - run 'clpm install' first")
+            (return-from cmd-package 1))
+          (unless (uiop:file-exists-p config-path)
+            (log-error "Missing activation config - run 'clpm install' first")
+            (return-from cmd-package 1))
+
+          (multiple-value-bind (pkg-name fn-name)
+              (parse-function-spec fn-spec)
+            (unless (and pkg-name fn-name)
+              (log-error "Invalid :package :function: expected <package>::<fn>, got ~S" fn-spec)
+              (return-from cmd-package 1))
+
+            (let* ((expanded-output (clpm.platform:expand-path output))
+                   (output-path (uiop:ensure-pathname expanded-output
+                                                     :defaults project-root
+                                                     :want-existing nil
+                                                     :want-file t))
+                   (lock-sha256
+                     (clpm.crypto.sha256:bytes-to-hex
+                      (clpm.crypto.sha256:sha256-file lock-path)))
+                   (meta-path (make-pathname :name (format nil "~A.meta"
+                                                          (pathname-name output-path))
+                                             :type "sxp"
+                                             :defaults output-path))
+                   (pkg-key (intern (string-upcase pkg-name) :keyword))
+                   (fn-key (intern (string-upcase fn-name) :keyword))
+                   (main-sym (intern "CLPM-PACKAGE-MAIN" "CL-USER"))
+                   (args-var (intern "CLPM-PACKAGE-ARGS" "CL-USER"))
+                   (result-var (intern "CLPM-PACKAGE-RESULT" "CL-USER"))
+                   (defun-form
+                     `(defun ,main-sym ()
+                        (let* ((,args-var (uiop:command-line-arguments))
+                               (,result-var (uiop:symbol-call ,pkg-key ,fn-key ,args-var)))
+                          (sb-ext:exit :code (if (integerp ,result-var) ,result-var 0)))))
+                   (save-form
+                     `(sb-ext:save-lisp-and-die ,(namestring output-path)
+                                                :toplevel ',main-sym
+                                                :executable t
+                                                :compression t))
+                   (defun-str
+                     (with-standard-io-syntax
+                       (let ((*package* (find-package "CL-USER")))
+                         (prin1-to-string defun-form))))
+                   (save-str
+                     (with-standard-io-syntax
+                       (let ((*package* (find-package "CL-USER")))
+                         (prin1-to-string save-form))))
+                   (sbcl-args (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
+                                    "--load" (namestring config-path)
+                                    "--eval" (format nil "(asdf:load-system ~S)" system)
+                                    "--eval" defun-str
+                                    "--eval" save-str)))
+              (ensure-directories-exist output-path)
+
+              (log-info "Packaging ~A -> ~A" system (namestring output-path))
+              (multiple-value-bind (out err rc)
+                  (clpm.platform:run-program sbcl-args
+                                             :directory project-root
+                                             :output :interactive
+                                             :error-output :interactive
+                                             :timeout 600000)
+                (declare (ignore out err))
+                (unless (zerop rc)
+                  (log-error "Packaging failed (exit code ~D)" rc)
+                  (return-from cmd-package rc)))
+
+              (clpm.io.sexp:write-canonical-sexp-to-file
+               `(:package-meta
+                 :lock-sha256 ,lock-sha256
+                 :sbcl-version ,(clpm.platform:sbcl-version)
+                 :platform ,(clpm.platform:platform-triple))
+               meta-path)
+              (log-info "Wrote package metadata: ~A" (namestring meta-path))
+              0)))))))
 
 ;;; gc command
 

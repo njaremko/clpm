@@ -37,6 +37,7 @@ Commands:
   run              Run the project entrypoint
   exec -- <cmd...> Run a command in the project env
   test             Run project tests
+  package          Build a distributable executable
   gc               Garbage collect store
 
 Options:
@@ -163,6 +164,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
              (apply #'clpm.commands:cmd-exec command-args))
             (:test
              (apply #'clpm.commands:cmd-test command-args))
+            (:package
+             (apply #'clpm.commands:cmd-package command-args))
             (:gc
              (clpm.commands:cmd-gc
               :dry-run (member "--dry-run" command-args
