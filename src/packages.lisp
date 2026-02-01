@@ -266,6 +266,7 @@
 (defpackage #:clpm
   (:use #:cl #:clpm.commands #:clpm.errors)
   (:export #:main
+           #:run-cli
            #:*verbose*
            #:*offline*
            #:*insecure*

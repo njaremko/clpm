@@ -118,6 +118,14 @@
 (format t "    Platform: ~A~%" (clpm.platform:platform-triple))
 (format t "    SBCL: ~A~%" (clpm.platform:sbcl-version))
 
+;;; Test CLI runner
+
+(format t "Testing CLI runner...~%")
+
+(let ((exit-code (clpm:run-cli '("--version"))))
+  (assert (eql exit-code 0)))
+(format t "  CLI runner PASSED~%")
+
 ;;; Done
 
 (format t "~%All tests PASSED!~%")

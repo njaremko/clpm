@@ -103,8 +103,10 @@ Returns (values command command-args options)."
 
 ;;; Main entry point
 
-(defun main (&optional (args (uiop:command-line-arguments)))
-  "Main entry point for CLPM."
+(defun run-cli (args)
+  "Run CLPM with ARGS and return an integer exit code.
+
+This function must not call `sb-ext:exit` so it can be used from tests."
   (handler-case
       (multiple-value-bind (command command-args options)
           (parse-args args)
@@ -115,47 +117,49 @@ Returns (values command command-args options)."
               (clpm.commands:*insecure* *insecure*)
               (clpm.commands:*jobs* *jobs*))
           ;; Dispatch command
-          (let ((exit-code
-                  (case command
-                    (:help
-                     (print-usage)
-                     0)
-                    (:version
-                     (print-version)
-                     0)
-                    (:init
-                     (clpm.commands:cmd-init
-                      :name (first command-args)))
-                    (:resolve
-                     (clpm.commands:cmd-resolve))
-                    (:fetch
-                     (clpm.commands:cmd-fetch))
-                    (:build
-                     (clpm.commands:cmd-build))
-                    (:install
-                     (clpm.commands:cmd-install))
-                    (:update
-                     (apply #'clpm.commands:cmd-update command-args))
-                    (:repl
-                     (clpm.commands:cmd-repl
-                      :load-system (first command-args)))
-                    (:run
-                     (apply #'clpm.commands:cmd-run command-args))
-                    (:gc
-                     (clpm.commands:cmd-gc
-                      :dry-run (member "--dry-run" command-args
-                                       :test #'string=)))
-                    (t
-                     (format *error-output* "Unknown command: ~A~%" command)
-                     (print-usage)
-                     1))))
-            (sb-ext:exit :code exit-code))))
+          (case command
+            (:help
+             (print-usage)
+             0)
+            (:version
+             (print-version)
+             0)
+            (:init
+             (clpm.commands:cmd-init
+              :name (first command-args)))
+            (:resolve
+             (clpm.commands:cmd-resolve))
+            (:fetch
+             (clpm.commands:cmd-fetch))
+            (:build
+             (clpm.commands:cmd-build))
+            (:install
+             (clpm.commands:cmd-install))
+            (:update
+             (apply #'clpm.commands:cmd-update command-args))
+            (:repl
+             (clpm.commands:cmd-repl
+              :load-system (first command-args)))
+            (:run
+             (apply #'clpm.commands:cmd-run command-args))
+            (:gc
+             (clpm.commands:cmd-gc
+              :dry-run (member "--dry-run" command-args
+                               :test #'string=)))
+            (t
+             (format *error-output* "Unknown command: ~A~%" command)
+             (print-usage)
+             1))))
     (error (c)
       (format *error-output* "~&Fatal error: ~A~%" c)
       (when *verbose*
         (format *error-output* "~&Backtrace:~%")
         (sb-debug:print-backtrace :stream *error-output* :count 20))
-      (sb-ext:exit :code 1))))
+      1)))
+
+(defun main (&optional (args (uiop:command-line-arguments)))
+  "Main entry point for CLPM."
+  (sb-ext:exit :code (run-cli args)))
 
 ;;; Build standalone executable
 
