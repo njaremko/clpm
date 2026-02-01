@@ -157,7 +157,12 @@ Modifies REGISTRY in place."
              :file snapshot-path))
     ;; Verify signature if trust key is set
     (when (registry-trust-key registry)
-      (verify-snapshot-signature local-path (registry-trust-key registry)))
+      (if (and (boundp 'clpm.commands:*insecure*)
+               (symbol-value 'clpm.commands:*insecure*))
+          (clpm.commands::log-info
+           "WARNING: --insecure: skipping snapshot signature verification for registry ~A"
+           (registry-name registry))
+          (verify-snapshot-signature local-path (registry-trust-key registry))))
     ;; Parse snapshot
     (let ((form (clpm.io.sexp:read-registry-snapshot snapshot-path)))
       (setf (registry-snapshot registry) (parse-snapshot form)))
