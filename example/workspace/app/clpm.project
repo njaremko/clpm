@@ -1,0 +1,14 @@
+(:project
+  :name "app"
+  :version "0.1.0"
+  :systems ("app")
+  :run (:system "app" :function "app::main")
+  :test (:systems ("app/test"))
+  :package (:output "dist/app" :system "app" :function "app::main")
+  :depends ((:dep :system "lib-a"
+            :constraint (:path "../lib-a")))
+  :dev-depends ()
+  :test-depends ()
+  :registries ()
+  :scripts ())
+

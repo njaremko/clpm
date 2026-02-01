@@ -1365,24 +1365,45 @@ Manifest schema:
             (bad "tar not found")))
 
       ;; Registries configured: global config and/or current project.
-      (let ((registries
-              (handler-case
-                  (multiple-value-bind (project-root manifest-path lock-path)
-                      (clpm.project:find-project-root)
-                    (declare (ignore project-root lock-path))
-                    (if manifest-path
-                        (let ((project (clpm.project:read-project-file manifest-path)))
-                          (multiple-value-bind (merged-registries build-options)
-                              (clpm.config:merge-project-config project)
-                            (declare (ignore build-options))
-                            merged-registries))
-                        (clpm.config:config-registries (clpm.config:read-config))))
-                (error (c)
-                  (note-warn "Failed to read config/project registries: ~A" c)
-                  nil))))
-        (if (and (listp registries) (plusp (length registries)))
-            (ok "registries: ~D configured" (length registries))
-            (bad "no registries configured (run: clpm registry add ...)")))
+      (let ((registries nil)
+            (needs-registry-p nil))
+        (handler-case
+            (multiple-value-bind (project-root manifest-path lock-path)
+                (clpm.project:find-project-root)
+              (declare (ignore project-root lock-path))
+              (labels ((dep-needs-registry-p (dep)
+                         (let ((c (clpm.project:dependency-constraint dep)))
+                           (cond
+                             ((null c) t)
+                             ((and (consp c) (member (car c) '(:path :git) :test #'eq))
+                              nil)
+                             (t t))))
+                       (project-needs-registry-p (project)
+                         (or (some #'dep-needs-registry-p
+                                   (or (clpm.project:project-depends project) '()))
+                             (some #'dep-needs-registry-p
+                                   (or (clpm.project:project-dev-depends project) '()))
+                             (some #'dep-needs-registry-p
+                                   (or (clpm.project:project-test-depends project) '())))))
+                (if manifest-path
+                    (let ((project (clpm.project:read-project-file manifest-path)))
+                      (setf needs-registry-p (project-needs-registry-p project))
+                      (multiple-value-bind (merged-registries build-options)
+                          (clpm.config:merge-project-config project)
+                        (declare (ignore build-options))
+                        (setf registries merged-registries)))
+                    (setf registries (clpm.config:config-registries (clpm.config:read-config))))))
+          (error (c)
+            (note-warn "Failed to read config/project registries: ~A" c)
+            (setf registries nil
+                  needs-registry-p nil)))
+        (cond
+          ((and (listp registries) (plusp (length registries)))
+           (ok "registries: ~D configured" (length registries)))
+          (needs-registry-p
+           (bad "no registries configured (run: clpm registry add ...)"))
+          (t
+           (note-warn "no registries configured"))))
 
       (if (zerop failures)
           (progn

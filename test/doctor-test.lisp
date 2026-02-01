@@ -61,8 +61,9 @@
              (multiple-value-bind (code stdout stderr)
                  (run-cli-captured '("doctor"))
                (declare (ignore stderr))
-               ;; With a fresh CLPM_HOME, no registries are configured, so doctor must fail.
-               (assert-eql 1 code)
+               ;; With a fresh CLPM_HOME, no registries are configured; this is a warning,
+               ;; but doctor should still succeed if the rest of the environment is OK.
+               (assert-eql 0 code)
                (assert-contains stdout "sbcl")
                (assert-contains stdout "asdf")
                (assert-contains stdout "downloader")

@@ -278,66 +278,118 @@ For pinned/local sources, registry is NIL."
   "Find release candidates for SYSTEM-ID satisfying CONSTRAINT."
   (let ((pinned-source (constraint-pinned-source constraint)))
     (when pinned-source
-      (case (car pinned-source)
-        (:path
-         (let* ((raw (or (and (<= 2 (length pinned-source))
-                              (stringp (second pinned-source))
-                              (second pinned-source))
-                         (getf (cdr pinned-source) :path)))
-                (expanded (clpm.platform:expand-path raw))
-                (pn (uiop:ensure-pathname expanded
-                                          :defaults (uiop:getcwd)
-                                          :want-existing nil))
-                (abs (uiop:ensure-directory-pathname pn)))
-           (unless (uiop:directory-exists-p abs)
-             (signal-conflict state system-id constraint
-                              (format nil "Path does not exist: ~A"
-                                      (namestring abs))))
-           (let* ((tru (uiop:ensure-directory-pathname (truename abs)))
-                  (tree-sha256 (clpm.crypto.sha256:bytes-to-hex
-                                (clpm.crypto.sha256:sha256-tree tru)))
-                  (release-ref (format nil "local:~A@~A" system-id tree-sha256))
-                  (meta (or (gethash release-ref (solver-state-extra-release-metadata state))
-                            (setf (gethash release-ref (solver-state-extra-release-metadata state))
-                                  (clpm.registry::make-release-metadata
-                                   :name system-id
-                                   :version (format nil "0.0.0+path.~A"
-                                                    (subseq tree-sha256 0 12))
-                                   :source (list :path
-                                                 :path (namestring tru)
-                                                 :tree-sha256 tree-sha256)
-                                   :artifact-sha256 nil
-                                   :systems (list system-id)
-                                   :system-deps nil)))))
-             (return-from find-candidates (list (cons release-ref meta))))))
-        (:git
-         (let* ((url (getf (cdr pinned-source) :url))
-                (commit (getf (cdr pinned-source) :commit))
-                (ref (or commit (getf (cdr pinned-source) :ref))))
-           (unless url
-             (signal-conflict state system-id constraint
-                              "Missing :url for :git constraint"))
-           (unless ref
-             (signal-conflict state system-id constraint
-                              "Missing :ref for :git constraint"))
-           (let* ((commit (or commit (clpm.fetch:resolve-git-ref url ref)))
-                  (short (subseq commit 0 (min 12 (length commit))))
-                  (release-ref (format nil "git:~A@~A" system-id commit))
-                  (meta (or (gethash release-ref (solver-state-extra-release-metadata state))
-                            (setf (gethash release-ref (solver-state-extra-release-metadata state))
-                                  (clpm.registry::make-release-metadata
-                                   :name system-id
-                                   :version (format nil "0.0.0+git.~A" short)
-                                   :source (list :git
-                                                 :url url
-                                                 :commit commit)
-                                   :artifact-sha256 nil
-                                   :systems (list system-id)
-                                   :system-deps nil)))))
-             (return-from find-candidates (list (cons release-ref meta))))))
-        (t
-         (signal-conflict state system-id constraint
-                          (format nil "Unknown pinned source: ~S" pinned-source))))))
+      (labels ((project->system-deps (project)
+                 (let* ((systems (or (clpm.project:project-systems project) '()))
+                        (deps (or (clpm.project:project-depends project) '()))
+                        (dep-pairs
+                          (mapcar (lambda (d)
+                                    (cons (clpm.project:dependency-system d)
+                                          (clpm.project:dependency-constraint d)))
+                                  deps)))
+                   (values systems
+                           (mapcar (lambda (sys)
+                                     (cons sys dep-pairs))
+                                   systems))))
+               (read-pinned-project (root-dir)
+                 (let ((manifest (merge-pathnames "clpm.project"
+                                                  (uiop:ensure-directory-pathname root-dir))))
+                   (when (uiop:file-exists-p manifest)
+                     (handler-case
+                         (clpm.project:read-project-file manifest)
+                       (error (c)
+                         (signal-conflict state system-id constraint
+                                          (format nil "Failed to read ~A: ~A"
+                                                  (namestring manifest) c))))))))
+        (case (car pinned-source)
+          (:path
+           (let* ((raw (or (and (<= 2 (length pinned-source))
+                                (stringp (second pinned-source))
+                                (second pinned-source))
+                           (getf (cdr pinned-source) :path)))
+                  (expanded (clpm.platform:expand-path raw))
+                  (pn (uiop:ensure-pathname expanded
+                                            :defaults (uiop:getcwd)
+                                            :want-existing nil))
+                  (abs (uiop:ensure-directory-pathname pn)))
+             (unless (uiop:directory-exists-p abs)
+               (signal-conflict state system-id constraint
+                                (format nil "Path does not exist: ~A"
+                                        (namestring abs))))
+             (let* ((tru (uiop:ensure-directory-pathname (truename abs)))
+                    (tree-sha256 (clpm.crypto.sha256:bytes-to-hex
+                                  (clpm.crypto.sha256:sha256-tree tru)))
+                    (release-ref (format nil "local:~A@~A" system-id tree-sha256))
+                    (dep-project (read-pinned-project tru)))
+               (multiple-value-bind (proj-systems proj-system-deps)
+                   (if dep-project
+                       (project->system-deps dep-project)
+                       (values nil nil))
+                 (when (and dep-project proj-systems
+                            (not (member system-id proj-systems :test #'string=)))
+                   (signal-conflict state system-id constraint
+                                    (format nil "Path project does not provide system ~A (systems: ~{~A~^, ~})"
+                                            system-id proj-systems)))
+                 (let* ((systems (or proj-systems (list system-id)))
+                        (meta (or (gethash release-ref (solver-state-extra-release-metadata state))
+                                  (setf (gethash release-ref (solver-state-extra-release-metadata state))
+                                        (clpm.registry::make-release-metadata
+                                         :name system-id
+                                         :version (format nil "0.0.0+path.~A"
+                                                          (subseq tree-sha256 0 12))
+                                         :source (list :path
+                                                       :path (namestring tru)
+                                                       :tree-sha256 tree-sha256)
+                                         :artifact-sha256 nil
+                                         :systems systems
+                                         :system-deps proj-system-deps)))))
+                   (return-from find-candidates (list (cons release-ref meta))))))))
+          (:git
+           (let* ((url (getf (cdr pinned-source) :url))
+                  (commit (getf (cdr pinned-source) :commit))
+                  (ref (or commit (getf (cdr pinned-source) :ref))))
+             (unless url
+               (signal-conflict state system-id constraint
+                                "Missing :url for :git constraint"))
+             (unless ref
+               (signal-conflict state system-id constraint
+                                "Missing :ref for :git constraint"))
+             (let* ((commit (or commit (clpm.fetch:resolve-git-ref url ref)))
+                    (short (subseq commit 0 (min 12 (length commit))))
+                    (release-ref (format nil "git:~A@~A" system-id commit))
+                    (meta (or (gethash release-ref (solver-state-extra-release-metadata state))
+                              (setf (gethash release-ref (solver-state-extra-release-metadata state))
+                                    (clpm.store:with-temp-dir (tmp)
+                                      (let* ((clone-dir (merge-pathnames "repo/" tmp))
+                                             (tree-sha256 nil))
+                                        (clpm.fetch:fetch-git url clone-dir :commit commit)
+                                        (setf tree-sha256
+                                              (clpm.crypto.sha256:bytes-to-hex
+                                               (clpm.crypto.sha256:sha256-tree clone-dir)))
+                                        (let ((dep-project (read-pinned-project clone-dir)))
+                                          (multiple-value-bind (proj-systems proj-system-deps)
+                                              (if dep-project
+                                                  (project->system-deps dep-project)
+                                                  (values nil nil))
+                                            (when (and dep-project proj-systems
+                                                       (not (member system-id proj-systems :test #'string=)))
+                                              (signal-conflict state system-id constraint
+                                                               (format nil "Git project does not provide system ~A (systems: ~{~A~^, ~})"
+                                                                       system-id proj-systems)))
+                                            (let ((systems (or proj-systems (list system-id))))
+                                              (clpm.registry::make-release-metadata
+                                               :name system-id
+                                               :version (format nil "0.0.0+git.~A" short)
+                                               :source (list :git
+                                                             :url url
+                                                             :commit commit
+                                                             :tree-sha256 tree-sha256)
+                                               :artifact-sha256 nil
+                                               :systems systems
+                                               :system-deps proj-system-deps))))))))))
+               (return-from find-candidates (list (cons release-ref meta))))))
+          (t
+           (signal-conflict state system-id constraint
+                            (format nil "Unknown pinned source: ~S" pinned-source)))))))
 
   (let ((index (solver-state-index state))
         (candidates '()))

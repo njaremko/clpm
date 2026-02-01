@@ -1,0 +1,12 @@
+(:project
+  :name "lib-a"
+  :version "0.1.0"
+  :systems ("lib-a")
+  :test (:systems ("lib-a/test"))
+  :depends ((:dep :system "lib-b"
+            :constraint (:path "../lib-b")))
+  :dev-depends ()
+  :test-depends ()
+  :registries ()
+  :scripts ())
+

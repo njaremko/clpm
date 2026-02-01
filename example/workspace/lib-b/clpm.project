@@ -1,0 +1,11 @@
+(:project
+  :name "lib-b"
+  :version "0.1.0"
+  :systems ("lib-b")
+  :test (:systems ("lib-b/test"))
+  :depends ()
+  :dev-depends ()
+  :test-depends ()
+  :registries ()
+  :scripts ())
+
