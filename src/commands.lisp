@@ -993,6 +993,37 @@ Manifest schema:
               (log-info "Wrote package metadata: ~A" (namestring meta-path))
               0)))))))
 
+;;; clean command
+
+(defun cmd-clean (&rest args)
+  "Clean project-local outputs."
+  (let ((clean-dist nil)
+        (rest args))
+    (loop while rest do
+      (let ((arg (pop rest)))
+        (cond
+          ((string= arg "--dist")
+           (setf clean-dist t))
+          (t
+           (log-error "Unknown option: ~A" arg)
+           (log-error "Usage: clpm clean [--dist]")
+           (return-from cmd-clean 1)))))
+    (multiple-value-bind (project-root manifest-path lock-path)
+        (clpm.project:find-project-root)
+      (declare (ignore manifest-path lock-path))
+      (unless project-root
+        (log-error "No clpm.project found")
+        (return-from cmd-clean 1))
+      (let ((clpm-dir (merge-pathnames ".clpm/" project-root))
+            (dist-dir (merge-pathnames "dist/" project-root)))
+        (when (uiop:directory-exists-p clpm-dir)
+          (log-info "Removing ~A" (namestring clpm-dir))
+          (uiop:delete-directory-tree clpm-dir :validate t))
+        (when (and clean-dist (uiop:directory-exists-p dist-dir))
+          (log-info "Removing ~A" (namestring dist-dir))
+          (uiop:delete-directory-tree dist-dir :validate t))
+        0))))
+
 ;;; gc command
 
 (defun cmd-gc (&key dry-run)

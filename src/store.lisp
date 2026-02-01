@@ -209,26 +209,130 @@ MANIFEST is build metadata plist."
 
 ;;; Garbage collection
 
+(defun %projects-index-path ()
+  (merge-pathnames "projects.sxp" (clpm.platform:data-dir)))
+
+(defun %read-project-index-roots (path)
+  "Read PATH as a projects index and return (values roots found-p)."
+  (if (not (uiop:file-exists-p path))
+      (values nil nil)
+      (handler-case
+          (let* ((form (clpm.io.sexp:read-safe-sexp-from-file path))
+                 (plist (cdr form)))
+            (unless (and (consp form) (eq (car form) :projects)
+                         (eql (getf plist :format) 1))
+              (return-from %read-project-index-roots (values nil nil)))
+            (let ((roots (getf plist :roots)))
+              (unless (listp roots)
+                (return-from %read-project-index-roots (values nil nil)))
+              (values (remove-duplicates
+                       (remove-if-not #'stringp roots)
+                       :test #'string=)
+                      t)))
+        (error ()
+          (values nil nil)))))
+
+(defun %mark-strings (strings table)
+  (when (listp strings)
+    (dolist (s strings)
+      (when (stringp s)
+        (setf (gethash s table) t)))))
+
+(defun %mark-from-lockfile (lock-path source-table artifact-table)
+  (handler-case
+      (let* ((form (clpm.io.sexp:read-lockfile lock-path))
+             (resolved (getf (cdr form) :resolved)))
+        (when (listp resolved)
+          (dolist (sys resolved)
+            (when (and (consp sys) (eq (car sys) :system))
+              (let* ((release (getf (cdr sys) :release))
+                     (tree-sha256 (when (listp release)
+                                    (getf release :tree-sha256)))
+                     (artifact-sha256 (when (listp release)
+                                        (getf release :artifact-sha256))))
+                (when (stringp tree-sha256)
+                  (setf (gethash tree-sha256 source-table) t))
+                (when (stringp artifact-sha256)
+                  (setf (gethash artifact-sha256 artifact-table) t)))))))
+    (error ()
+      nil)))
+
+(defun %mark-from-env (env-path source-table artifact-table build-table)
+  (handler-case
+      (let* ((form (clpm.io.sexp:read-safe-sexp-from-file env-path))
+             (plist (cdr form)))
+        (when (and (consp form) (eq (car form) :env) (listp plist))
+          (%mark-strings (getf plist :source-tree-sha256s) source-table)
+          (%mark-strings (getf plist :artifact-sha256s) artifact-table)
+          (%mark-strings (getf plist :build-ids) build-table)))
+    (error ()
+      nil)))
+
+(defun %dir-leaf-name (dir)
+  (let* ((dir (uiop:ensure-directory-pathname dir))
+         (parts (pathname-directory dir)))
+    (car (last parts))))
+
 (defun gc-store (&key dry-run)
   "Garbage collect unreferenced store entries.
 If DRY-RUN is true, only report what would be deleted.
 Returns list of paths that were (or would be) deleted."
   (let ((deleted '())
-        (referenced (make-hash-table :test 'equal)))
-    ;; Mark phase: collect all referenced hashes from lockfiles
-    ;; TODO: scan all known lockfiles
-    ;; For now, this is a placeholder
+        (source-table (make-hash-table :test 'equal))
+        (artifact-table (make-hash-table :test 'equal))
+        (build-table (make-hash-table :test 'equal)))
 
-    ;; Sweep phase: delete unreferenced entries
-    (dolist (subdir '("sources/sha256/" "artifacts/sha256/" "builds/"))
-      (let ((base (merge-pathnames subdir (clpm.platform:store-dir))))
+    ;; Mark phase: scan real roots from the global projects index.
+    (multiple-value-bind (roots found-p)
+        (%read-project-index-roots (%projects-index-path))
+      (unless found-p
+        ;; Without a roots index we can't safely determine reachability.
+        (return-from gc-store nil))
+
+      (dolist (root roots)
+        (let* ((root-dir (uiop:ensure-directory-pathname root))
+               (lock-path (merge-pathnames "clpm.lock" root-dir))
+               (env-path (merge-pathnames ".clpm/env.sexp" root-dir)))
+          (when (uiop:file-exists-p lock-path)
+            (%mark-from-lockfile lock-path source-table artifact-table))
+          (when (uiop:file-exists-p env-path)
+            (%mark-from-env env-path source-table artifact-table build-table)))))
+
+    ;; Sweep phase: delete unreferenced entries.
+    (let ((store (clpm.platform:store-dir)))
+      ;; Sources
+      (let ((base (merge-pathnames "sources/sha256/" store)))
         (when (uiop:directory-exists-p base)
-          (dolist (entry (directory (merge-pathnames "*" base)))
-            (let ((hash (file-namestring (uiop:pathname-directory-pathname entry))))
-              (unless (gethash hash referenced)
-                (push entry deleted)
-                (unless dry-run
-                  (uiop:delete-directory-tree entry :validate t))))))))
+          (dolist (entry (clpm.io.fs:list-directory-entries base))
+            (when (uiop:directory-pathname-p entry)
+              (let ((tree-sha256 (%dir-leaf-name entry)))
+                (when (and (stringp tree-sha256)
+                           (not (gethash tree-sha256 source-table)))
+                  (push entry deleted)
+                  (unless dry-run
+                    (uiop:delete-directory-tree entry :validate t))))))))
+      ;; Artifacts
+      (let ((base (merge-pathnames "artifacts/sha256/" store)))
+        (when (uiop:directory-exists-p base)
+          (dolist (entry (clpm.io.fs:list-directory-entries base))
+            (unless (uiop:directory-pathname-p entry)
+              (let ((artifact-sha256 (file-namestring entry)))
+                (when (and (stringp artifact-sha256)
+                           (not (gethash artifact-sha256 artifact-table)))
+                  (push entry deleted)
+                  (unless dry-run
+                    (ignore-errors (delete-file entry)))))))))
+      ;; Builds
+      (let ((base (merge-pathnames "builds/" store)))
+        (when (uiop:directory-exists-p base)
+          (dolist (entry (clpm.io.fs:list-directory-entries base))
+            (when (uiop:directory-pathname-p entry)
+              (let ((build-id (%dir-leaf-name entry)))
+                (when (and (stringp build-id)
+                           (not (gethash build-id build-table)))
+                  (push entry deleted)
+                  (unless dry-run
+                    (uiop:delete-directory-tree entry :validate t)))))))))
 
     deleted))
 

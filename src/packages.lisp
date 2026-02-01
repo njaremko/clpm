@@ -301,6 +301,7 @@
            #:cmd-exec
            #:cmd-test
            #:cmd-package
+           #:cmd-clean
            #:cmd-gc))
 
 (defpackage #:clpm

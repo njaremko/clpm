@@ -53,21 +53,24 @@
 
 (defun cache-dir ()
   "Return CLPM cache directory."
-  (case *os-type*
-    ((:linux :freebsd :openbsd :netbsd)
-     (let ((xdg (uiop:getenv "XDG_CACHE_HOME")))
-       (if xdg
-           (merge-pathnames "clpm/" (uiop:ensure-directory-pathname xdg))
-           (merge-pathnames ".cache/clpm/" (home-dir)))))
-    (:darwin
-     (merge-pathnames "Library/Caches/clpm/" (home-dir)))
-    (:windows
-     (let ((localappdata (uiop:getenv "LOCALAPPDATA")))
-       (if localappdata
-           (merge-pathnames "clpm/cache/" (uiop:ensure-directory-pathname localappdata))
-           (merge-pathnames ".clpm/cache/" (home-dir)))))
-    (t
-     (merge-pathnames ".clpm/cache/" (home-dir)))))
+  (let ((override (uiop:getenv "CLPM_HOME")))
+    (if override
+        (merge-pathnames "cache/" (uiop:ensure-directory-pathname override))
+        (case *os-type*
+          ((:linux :freebsd :openbsd :netbsd)
+           (let ((xdg (uiop:getenv "XDG_CACHE_HOME")))
+             (if xdg
+                 (merge-pathnames "clpm/" (uiop:ensure-directory-pathname xdg))
+                 (merge-pathnames ".cache/clpm/" (home-dir)))))
+          (:darwin
+           (merge-pathnames "Library/Caches/clpm/" (home-dir)))
+          (:windows
+           (let ((localappdata (uiop:getenv "LOCALAPPDATA")))
+             (if localappdata
+                 (merge-pathnames "clpm/cache/" (uiop:ensure-directory-pathname localappdata))
+                 (merge-pathnames ".clpm/cache/" (home-dir)))))
+          (t
+           (merge-pathnames ".clpm/cache/" (home-dir)))))))
 
 (defun config-dir ()
   "Return CLPM config directory."
