@@ -191,7 +191,7 @@ Supports .tar.gz, .tgz, .tar, .zip"
 (defun fetch-artifact (source expected-sha256 &key (verify t))
   "Fetch artifact according to SOURCE specification.
 SOURCE is a plist like (:tarball :url ... :sha256 ...) or (:git :url ... :commit ...)
-Returns path to stored artifact/source.
+Returns (values source-path tree-sha256).
 If VERIFY is true, verifies hash matches EXPECTED-SHA256."
   (let ((kind (car source)))
     (clpm.store:with-temp-dir (tmp)
@@ -235,7 +235,9 @@ If VERIFY is true, verifies hash matches EXPECTED-SHA256."
            (unless (uiop:directory-exists-p path)
              (error 'clpm.errors:clpm-fetch-error
                     :message (format nil "Path does not exist: ~A" path)))
-           path))))))
+	           (let ((actual-hash (clpm.crypto.sha256:bytes-to-hex
+	                               (clpm.crypto.sha256:sha256-tree path))))
+	             (values path actual-hash))))))))
 
 (defun verify-and-store (artifact-path expected-sha256)
   "Verify artifact hash and store in content-addressed store.
@@ -251,7 +253,7 @@ Returns path in store."
 
 ;;; Fetch all dependencies from lockfile
 
-(defun fetch-lockfile-deps (lockfile &key (parallel nil))
+(defun fetch-lockfile-deps (lockfile &key lockfile-path (parallel nil))
   "Fetch all dependencies specified in LOCKFILE.
 If PARALLEL, fetch multiple in parallel (not yet implemented).
 Returns list of (system-id . source-path) pairs."
@@ -270,8 +272,21 @@ Returns list of (system-id . source-path) pairs."
               (push (cons system-id existing) results)
               ;; Need to fetch
               (let ((source-spec (locked-source-to-spec source)))
-                (let ((path (fetch-artifact source-spec artifact-sha256)))
+                (multiple-value-bind (path fetched-tree-sha256)
+                    (fetch-artifact source-spec artifact-sha256)
+                  (when (and fetched-tree-sha256 (null tree-sha256))
+                    (setf (clpm.project:locked-release-tree-sha256 release)
+                          fetched-tree-sha256))
                   (push (cons system-id path) results)))))))
+    ;; If we backfilled tree hashes, persist them to disk.
+    (when lockfile-path
+      (let* ((lockfile-path (uiop:ensure-pathname lockfile-path
+                                                  :want-file t
+                                                  :want-existing nil))
+             (tmp-path (merge-pathnames "clpm.lock.tmp"
+                                        (uiop:pathname-directory-pathname lockfile-path))))
+        (clpm.project:write-lock-file lockfile tmp-path)
+        (rename-file tmp-path lockfile-path)))
     (nreverse results)))
 
 (defun locked-source-to-spec (locked-source)

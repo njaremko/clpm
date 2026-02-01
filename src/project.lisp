@@ -152,10 +152,18 @@
            (:commit (setf (locked-source-commit src) val)))))
       (:path
        (setf (locked-source-kind src) :path)
-       (loop for (key val) on (cdr form) by #'cddr do
-         (case key
-           (:path (setf (locked-source-path src) val))
-           (:tree-sha256 (setf (locked-source-sha256 src) val))))))
+       ;; Support both:
+       ;;   (:path "<path>" :tree-sha256 "...")
+       ;; and
+       ;;   (:path :path "<path>" :tree-sha256 "...")
+       (let ((rest (cdr form)))
+         (when (and rest (stringp (first rest)))
+           (setf (locked-source-path src) (first rest))
+           (setf rest (rest rest)))
+         (loop for (key val) on rest by #'cddr do
+           (case key
+             (:path (setf (locked-source-path src) val))
+             (:tree-sha256 (setf (locked-source-sha256 src) val)))))))
     src))
 
 (defun parse-locked-release (form)

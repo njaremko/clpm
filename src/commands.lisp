@@ -97,26 +97,41 @@
       (return-from cmd-fetch 1))
     (log-info "Fetching dependencies...")
     (let ((lockfile (clpm.project:read-lock-file lock-path)))
-      (when *offline*
-        (log-error "Offline mode - checking store only")
-        ;; In offline mode, just verify all are present
-        (dolist (locked (clpm.project:lockfile-resolved lockfile))
-          (let* ((release (clpm.project:locked-system-release locked))
-                 (tree-sha256 (clpm.project:locked-release-tree-sha256 release)))
-            (unless (and tree-sha256
-                         (clpm.store:source-exists-p tree-sha256))
-              (log-error "Missing in store: ~A"
-                         (clpm.project:locked-system-id locked))
-              (return-from cmd-fetch 1))))
-        (return-from cmd-fetch 0))
-      ;; Fetch all
-      (handler-case
-          (let ((results (clpm.fetch:fetch-lockfile-deps lockfile)))
-            (log-info "Fetched ~D dependencies" (length results)))
-        (error (c)
-          (log-error "~A" c)
-          (return-from cmd-fetch 1))))
-    0))
+      (let ((missing-tree-before
+              (count-if (lambda (locked)
+                          (null (clpm.project:locked-release-tree-sha256
+                                 (clpm.project:locked-system-release locked))))
+                        (clpm.project:lockfile-resolved lockfile))))
+        (when *offline*
+          (log-error "Offline mode - checking store only")
+          ;; In offline mode, just verify all are present
+          (dolist (locked (clpm.project:lockfile-resolved lockfile))
+            (let* ((release (clpm.project:locked-system-release locked))
+                   (tree-sha256 (clpm.project:locked-release-tree-sha256 release)))
+              (unless (and tree-sha256
+                           (clpm.store:source-exists-p tree-sha256))
+                (log-error "Missing in store: ~A"
+                           (clpm.project:locked-system-id locked))
+                (return-from cmd-fetch 1))))
+          (return-from cmd-fetch 0))
+        ;; Fetch all
+        (handler-case
+            (let ((results (clpm.fetch:fetch-lockfile-deps
+                            lockfile
+                            :lockfile-path lock-path)))
+              (let ((missing-tree-after
+                      (count-if (lambda (locked)
+                                  (null (clpm.project:locked-release-tree-sha256
+                                         (clpm.project:locked-system-release locked))))
+                                (clpm.project:lockfile-resolved lockfile))))
+                (when (and (plusp missing-tree-before)
+                           (< missing-tree-after missing-tree-before))
+                  (log-info "Updated clpm.lock with source tree hashes")))
+              (log-info "Fetched ~D dependencies" (length results)))
+          (error (c)
+            (log-error "~A" c)
+            (return-from cmd-fetch 1))))
+      0)))
 
 ;;; build command
 

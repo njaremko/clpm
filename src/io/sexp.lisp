@@ -23,6 +23,7 @@ Only keywords, strings, numbers, and lists thereof are allowed."
   (labels ((check (x)
              (cond
                ((null x) t)
+               ((eq x t) t)
                ((keywordp x) t)
                ((stringp x) t)
                ((integerp x) t)
@@ -49,7 +50,9 @@ Only keywords, strings, numbers, and lists thereof are allowed."
   "Read a single S-expression safely from STREAM.
 *read-eval* is bound to nil and the result is validated."
   (let ((*read-eval* nil)
-        (*package* (find-package "KEYWORD")))
+        ;; Read keywords normally (they are prefixed with : in the file) while
+        ;; allowing literal NIL and T to be read as CL:NIL and CL:T.
+        (*package* (find-package "COMMON-LISP")))
     (handler-case
         (let ((form (read stream nil :eof)))
           (when (eq form :eof)
