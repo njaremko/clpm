@@ -158,6 +158,77 @@
 
 ;;; Archive extraction
 
+(defun windows-drive-prefix-p (path)
+  "Return true if PATH starts with a Windows drive prefix like C:."
+  (and (>= (length path) 2)
+       (char= (char path 1) #\:)
+       (let ((c (char path 0)))
+         (or (and (char>= c #\A) (char<= c #\Z))
+             (and (char>= c #\a) (char<= c #\z))))))
+
+(defun unsafe-archive-entry-p (entry)
+  "Return true if ENTRY is unsafe to extract."
+  (let ((entry (string-trim '(#\Space #\Tab #\Newline #\Return) entry)))
+    (cond
+      ((zerop (length entry)) nil)
+      ;; Absolute paths.
+      ((char= (char entry 0) #\/) t)
+      ((char= (char entry 0) #\\) t)
+      ;; Windows drive prefixes.
+      ((windows-drive-prefix-p entry) t)
+      ;; Path traversal.
+      ((find ".." (uiop:split-string entry :separator '(#\/ #\\))
+             :test #'string=)
+       t)
+      (t nil))))
+
+(defun validate-archive-entries (archive-path entries)
+  "Validate archive ENTRIES are safe to extract.
+Signals CLPM-FETCH-ERROR if any entry is unsafe."
+  (dolist (entry entries)
+    (when (unsafe-archive-entry-p entry)
+      (error 'clpm.errors:clpm-fetch-error
+             :message (format nil "Unsafe archive entry: ~A" entry)
+             :url (namestring archive-path)))))
+
+(defun validate-tar-contents (archive-path &key (gzip nil))
+  "Validate tar (optionally gzip) contents before extracting."
+  (let ((tar (clpm.platform:find-tar)))
+    (unless tar
+      (error 'clpm.errors:clpm-fetch-error
+             :message "tar not found in PATH"))
+    (let ((args (if gzip
+                    (list tar "-tzf" (namestring archive-path))
+                    (list tar "-tf" (namestring archive-path)))))
+      (multiple-value-bind (lines error-output exit-code)
+          (clpm.platform:run-program args :output :lines :error-output :string)
+        (declare (ignore error-output))
+        (unless (zerop exit-code)
+          (error 'clpm.errors:clpm-fetch-error
+                 :message "tar listing failed"
+                 :url (namestring archive-path)
+                 :status exit-code))
+        (validate-archive-entries archive-path lines)))))
+
+(defun validate-zip-contents (archive-path)
+  "Validate zip contents before extracting."
+  (let ((unzip (clpm.platform:which "unzip")))
+    (unless unzip
+      (error 'clpm.errors:clpm-fetch-error
+             :message "unzip not found in PATH"))
+    (multiple-value-bind (lines error-output exit-code)
+        (clpm.platform:run-program
+         (list unzip "-Z1" (namestring archive-path))
+         :output :lines
+         :error-output :string)
+      (declare (ignore error-output))
+      (unless (zerop exit-code)
+        (error 'clpm.errors:clpm-fetch-error
+               :message "unzip listing failed"
+               :url (namestring archive-path)
+               :status exit-code))
+      (validate-archive-entries archive-path lines))))
+
 (defun extract-archive (archive-path dest-dir)
   "Extract archive at ARCHIVE-PATH to DEST-DIR.
 Supports .tar.gz, .tgz, .tar, .zip"
@@ -188,6 +259,7 @@ Supports .tar.gz, .tgz, .tar, .zip"
     (unless tar
       (error 'clpm.errors:clpm-fetch-error
              :message "tar not found in PATH"))
+    (validate-tar-contents archive-path :gzip t)
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program
          (list tar "-xzf" (namestring archive-path)
@@ -204,6 +276,7 @@ Supports .tar.gz, .tgz, .tar, .zip"
     (unless tar
       (error 'clpm.errors:clpm-fetch-error
              :message "tar not found in PATH"))
+    (validate-tar-contents archive-path :gzip nil)
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program
          (list tar "-xf" (namestring archive-path)
@@ -218,15 +291,17 @@ Supports .tar.gz, .tgz, .tar, .zip"
   "Extract .zip archive."
   (let ((unzip (clpm.platform:which "unzip")))
     (if unzip
-        (multiple-value-bind (output error-output exit-code)
-            (clpm.platform:run-program
-             (list unzip "-q" (namestring archive-path)
-                   "-d" (namestring dest-dir)))
-          (declare (ignore output))
-          (unless (zerop exit-code)
-            (error 'clpm.errors:clpm-fetch-error
-                   :message (format nil "unzip failed: ~A" error-output)
-                   :status exit-code)))
+        (progn
+          (validate-zip-contents archive-path)
+          (multiple-value-bind (output error-output exit-code)
+              (clpm.platform:run-program
+               (list unzip "-q" (namestring archive-path)
+                     "-d" (namestring dest-dir)))
+            (declare (ignore output))
+            (unless (zerop exit-code)
+              (error 'clpm.errors:clpm-fetch-error
+                     :message (format nil "unzip failed: ~A" error-output)
+                     :status exit-code))))
         ;; Try PowerShell on Windows
         #+windows
         (let ((cmd (format nil "Expand-Archive -Path '~A' -DestinationPath '~A'"
