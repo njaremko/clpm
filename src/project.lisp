@@ -176,6 +176,13 @@
         (:source (setf (locked-release-source rel) (parse-locked-source val)))
         (:artifact-sha256 (setf (locked-release-artifact-sha256 rel) val))
         (:tree-sha256 (setf (locked-release-tree-sha256 rel) val))))
+    ;; Backward/forward compat: allow tree hash to live on :source for :path.
+    (when (and (null (locked-release-tree-sha256 rel))
+               (locked-release-source rel)
+               (eq (locked-source-kind (locked-release-source rel)) :path)
+               (locked-source-sha256 (locked-release-source rel)))
+      (setf (locked-release-tree-sha256 rel)
+            (locked-source-sha256 (locked-release-source rel))))
     rel))
 
 (defun parse-locked-registry (form)
@@ -275,10 +282,35 @@
 
 ;;; File I/O
 
+(defun normalize-project-path-dependencies (project manifest-path)
+  "Normalize (:path ...) dependency constraints in PROJECT relative to MANIFEST-PATH.
+
+The manifest format allows relative paths; internally we store absolute,
+directory pathnames (as strings) for determinism."
+  (let* ((manifest-path (uiop:ensure-pathname manifest-path :want-file t))
+         (base-dir (uiop:pathname-directory-pathname manifest-path)))
+    (labels ((normalize-dep (dep)
+               (let ((c (dependency-constraint dep)))
+                 (when (and (consp c) (eq (car c) :path))
+                   (let* ((raw (cadr c))
+                          (expanded (clpm.platform:expand-path raw))
+                          (pn (uiop:ensure-pathname expanded
+                                                    :defaults base-dir
+                                                    :want-existing nil))
+                          (abs (uiop:ensure-directory-pathname pn))
+                          (tru (uiop:ensure-directory-pathname (truename abs))))
+                     (setf (dependency-constraint dep)
+                           (list :path (namestring tru))))))
+                dep))
+      (setf (project-depends project) (mapcar #'normalize-dep (project-depends project))
+            (project-dev-depends project) (mapcar #'normalize-dep (project-dev-depends project))
+            (project-test-depends project) (mapcar #'normalize-dep (project-test-depends project))))
+    project))
+
 (defun read-project-file (path)
   "Read a clpm.project file and return a project struct."
   (let ((form (clpm.io.sexp:read-manifest path)))
-    (parse-manifest form)))
+    (normalize-project-path-dependencies (parse-manifest form) path)))
 
 (defun write-project-file (project path)
   "Write a project struct to a clpm.project file."

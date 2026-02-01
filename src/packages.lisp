@@ -66,6 +66,7 @@
            #:ensure-directories
            #:run-program
            #:which
+           #:expand-path
            #:find-downloader
            #:find-git
            #:find-tar))
@@ -215,6 +216,7 @@
            #:range-lo-inclusive-p
            #:range-hi
            #:range-hi-inclusive-p
+           #:constraint-pinned-source
            #:parse-constraint
            #:constraint-satisfies-p
            #:constraint-intersect

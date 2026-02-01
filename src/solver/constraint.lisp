@@ -174,10 +174,17 @@ Forms:
         (exact-constraint (cadr form)))
        (:git
         (make-constraint :pinned-source form))
-       (:path
-        (make-constraint :pinned-source form))
-       (t
-        (error "Unknown constraint form: ~S" form))))))
+        (:path
+        (let* ((raw (cadr form))
+               (expanded (clpm.platform:expand-path raw))
+               (pn (uiop:ensure-pathname expanded
+                                         :defaults (uiop:getcwd)
+                                         :want-existing nil))
+               (abs (uiop:ensure-directory-pathname pn))
+               (tru (uiop:ensure-directory-pathname (truename abs))))
+          (make-constraint :pinned-source (list :path (namestring tru)))))
+        (t
+         (error "Unknown constraint form: ~S" form))))))
 
 (defun parse-semver-constraint (spec)
   "Parse a semver constraint specification string."

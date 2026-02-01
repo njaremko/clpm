@@ -218,26 +218,41 @@ If VERIFY is true, verifies hash matches EXPECTED-SHA256."
              (extract-archive artifact-file extract-dir)
              ;; Find extracted directory (often has one top-level dir)
              (let ((contents (directory (merge-pathnames "*" extract-dir))))
-               (if (and (= (length contents) 1)
-                        (uiop:directory-pathname-p (first contents)))
-                   (clpm.store:store-source (first contents) nil)
-                   (clpm.store:store-source extract-dir nil))))))
+               (let ((source-dir (if (and (= (length contents) 1)
+                                          (uiop:directory-pathname-p (first contents)))
+                                     (first contents)
+                                     extract-dir)))
+                 (multiple-value-bind (store-path tree-sha256)
+                     (clpm.store:store-source source-dir nil)
+                   (declare (ignore store-path))
+                   (values (clpm.store:get-source-path tree-sha256) tree-sha256)))))))
         (:git
          (let* ((url (getf (cdr source) :url))
                 (commit (getf (cdr source) :commit))
                 (clone-dir (merge-pathnames "repo/" tmp)))
            (fetch-git url clone-dir :commit commit)
            ;; Store source
-           (clpm.store:store-source clone-dir nil)))
+           (multiple-value-bind (store-path tree-sha256)
+               (clpm.store:store-source clone-dir nil)
+             (declare (ignore store-path))
+             (values (clpm.store:get-source-path tree-sha256) tree-sha256))))
         (:path
-         ;; Local path - just verify and return
-         (let ((path (second source)))
-           (unless (uiop:directory-exists-p path)
+         ;; Local path - hash and store like any other source.
+         (let* ((path (or (second source)
+                          (getf (cdr source) :path)))
+                (expanded (clpm.platform:expand-path path))
+                (pn (uiop:ensure-pathname expanded
+                                          :defaults (uiop:getcwd)
+                                          :want-existing nil))
+                (abs (uiop:ensure-directory-pathname pn)))
+           (unless (uiop:directory-exists-p abs)
              (error 'clpm.errors:clpm-fetch-error
-                    :message (format nil "Path does not exist: ~A" path)))
-	           (let ((actual-hash (clpm.crypto.sha256:bytes-to-hex
-	                               (clpm.crypto.sha256:sha256-tree path))))
-	             (values path actual-hash))))))))
+                    :message (format nil "Path does not exist: ~A" (namestring abs))))
+           (let ((tru (uiop:ensure-directory-pathname (truename abs))))
+             (multiple-value-bind (store-path tree-sha256)
+                 (clpm.store:store-source tru expected-sha256)
+             (declare (ignore store-path))
+             (values (clpm.store:get-source-path tree-sha256) tree-sha256)))))))))
 
 (defun verify-and-store (artifact-path expected-sha256)
   "Verify artifact hash and store in content-addressed store.
@@ -273,7 +288,10 @@ Returns list of (system-id . source-path) pairs."
               ;; Need to fetch
               (let ((source-spec (locked-source-to-spec source)))
                 (multiple-value-bind (path fetched-tree-sha256)
-                    (fetch-artifact source-spec artifact-sha256)
+                    (fetch-artifact source-spec
+                                   (if (eq (clpm.project:locked-source-kind source) :path)
+                                       tree-sha256
+                                       artifact-sha256))
                   (when (and fetched-tree-sha256 (null tree-sha256))
                     (setf (clpm.project:locked-release-tree-sha256 release)
                           fetched-tree-sha256))

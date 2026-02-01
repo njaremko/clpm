@@ -33,7 +33,7 @@
     ;; Set up output translations
     (format s "(asdf:initialize-output-translations~%")
     (format s " '(:output-translations~%")
-    (format s "   (t (~S **/ *.*.*))~%" (namestring (build-spec-output-dir spec)))
+    (format s "   (t (~S :**/ :*.*.*))~%" (namestring (build-spec-output-dir spec)))
     (format s "   :ignore-inherited-configuration))~%~%")
     ;; Set compile policy
     (let ((opts (build-spec-compile-options spec)))
@@ -77,7 +77,7 @@
       (dolist (entry build-cache-dirs)
         (let ((source-dir (car entry))
               (cache-dir (cdr entry)))
-          (format s "   ((~S **/ *.*.*) (~S **/ *.*.*))"
+          (format s "   ((~S :**/ :*.*.*) (~S :**/ :*.*.*))"
                   (namestring source-dir) (namestring cache-dir))))
       (format s "   :ignore-inherited-configuration))~%"))))
 
