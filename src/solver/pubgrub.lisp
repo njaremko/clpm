@@ -535,16 +535,19 @@ Prefers lockfile selection, then highest version."
                :clpm-version "0.1.0")))
     ;; Add registries
     (dolist (reg registries)
-      (push (clpm.project:make-locked-registry
-             :name (clpm.registry:registry-name reg)
-             :kind :git
-             :url (clpm.registry:registry-url reg)
-             :trust (clpm.registry:registry-trust-key reg)
-             :commit (clpm.registry:git-rev-parse
-                      (clpm.registry:registry-local-path
-                       (clpm.registry:registry-name reg)))
-             :signature (clpm.registry:registry-snapshot-sig-sha256 reg))
-            (clpm.project:lockfile-registries lock)))
+      (let ((kind (clpm.registry:registry-kind reg)))
+        (push (clpm.project:make-locked-registry
+               :name (clpm.registry:registry-name reg)
+               :kind kind
+               :url (clpm.registry:registry-url reg)
+               :trust (clpm.registry:registry-trust-key reg)
+               :commit (when (eq kind :git)
+                         (clpm.registry:git-rev-parse
+                          (clpm.registry:registry-local-path
+                           (clpm.registry:registry-name reg))))
+               :signature (when (eq kind :git)
+                            (clpm.registry:registry-snapshot-sig-sha256 reg)))
+              (clpm.project:lockfile-registries lock))))
     ;; Add resolved systems
     (dolist (sys (resolution-systems resolution))
       (let* ((source (getf sys :source))
@@ -553,13 +556,16 @@ Prefers lockfile selection, then highest version."
              (tree-sha256 (or (getf sys :tree-sha256)
                               (and (consp source)
                                    (getf source-plist :tree-sha256))))
+             (source-sha256 (and (consp source)
+                                 (getf source-plist :sha256)))
              (locked-source
                (case kind
                  (:tarball
                   (clpm.project:make-locked-source
                    :kind :tarball
                    :url (getf source-plist :url)
-                   :sha256 (getf source-plist :sha256)))
+                   :sha256 source-sha256
+                   :sha1 (getf source-plist :sha1)))
                  (:git
                   (clpm.project:make-locked-source
                    :kind :git
@@ -580,7 +586,8 @@ Prefers lockfile selection, then highest version."
                          :name (getf sys :name)
                          :version (getf sys :version)
                          :source locked-source
-                         :artifact-sha256 (getf sys :artifact-sha256)
+                         :artifact-sha256 (or (getf sys :artifact-sha256)
+                                              source-sha256)
                          :tree-sha256 tree-sha256)
                :deps (cdr (assoc (getf sys :system)
                                  (resolution-graph resolution)

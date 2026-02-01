@@ -1047,10 +1047,11 @@ Manifest schema:
         (refs (nth-value 0 (clpm.config:merge-project-config project))))
     (dolist (ref refs)
       (let* ((name (clpm.project:registry-ref-name ref))
+             (kind (clpm.project:registry-ref-kind ref))
              (url (clpm.project:registry-ref-url ref))
              (trust (clpm.project:registry-ref-trust ref)))
         (log-verbose "Loading registry: ~A" name)
-        (push (clpm.registry:clone-registry name url :trust-key trust)
+        (push (clpm.registry:clone-registry name url :trust-key trust :kind kind)
               registries)))
     (nreverse registries)))
 
@@ -1080,19 +1081,36 @@ Manifest schema:
       ((string= subcommand "add")
        (let ((name nil)
              (url nil)
-             (trust nil))
+             (trust nil)
+             (kind :git))
          (loop while rest do
            (let ((arg (pop rest)))
              (cond
                ((string= arg "--name") (setf name (pop rest)))
                ((string= arg "--url") (setf url (pop rest)))
                ((string= arg "--trust") (setf trust (pop rest)))
+               ((string= arg "--quicklisp") (setf kind :quicklisp))
                (t
                 (log-error "Unknown option: ~A" arg)
                 (return-from cmd-registry 1)))))
-         (unless (and name url trust)
-           (log-error "Missing required options: --name, --url, --trust")
-           (return-from cmd-registry 1))
+         (when (eq kind :quicklisp)
+           (unless name
+             (setf name "quicklisp"))
+           (unless url
+             (setf url "https://beta.quicklisp.org/dist/quicklisp.txt"))
+           (setf trust nil))
+         (case kind
+           (:git
+            (unless (and name url trust)
+              (log-error "Missing required options: --name, --url, --trust")
+              (return-from cmd-registry 1)))
+           (:quicklisp
+            (unless (and name url)
+              (log-error "Missing required options: --name, --url")
+              (return-from cmd-registry 1)))
+           (t
+            (log-error "Unknown registry kind: ~S" kind)
+            (return-from cmd-registry 1)))
          (let* ((cfg (clpm.config:read-config))
                 (regs (clpm.config:config-registries cfg))
                 (existing (find name regs
@@ -1100,12 +1118,13 @@ Manifest schema:
                                 :test #'string=)))
            (if existing
                (progn
-                 (setf (clpm.project:registry-ref-url existing) url
+                 (setf (clpm.project:registry-ref-kind existing) kind
+                       (clpm.project:registry-ref-url existing) url
                        (clpm.project:registry-ref-trust existing) trust)
                  (log-info "Updated registry: ~A" name))
                (progn
                  (push (clpm.project::make-registry-ref
-                        :kind :git
+                        :kind kind
                         :name name
                         :url url
                         :trust trust)
@@ -1127,7 +1146,8 @@ Manifest schema:
                    (let ((reg (clpm.registry:clone-registry
                                name
                                (clpm.project:registry-ref-url ref)
-                               :trust-key (clpm.project:registry-ref-trust ref))))
+                               :trust-key (clpm.project:registry-ref-trust ref)
+                               :kind (clpm.project:registry-ref-kind ref))))
                      (clpm.registry:update-registry reg))
                  (error (c)
                    (log-error "Failed to update registry ~A: ~A" name c)
@@ -1216,13 +1236,15 @@ Manifest schema:
        (p "Usage: clpm registry <add|list|update> [options]")
        (p "")
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
-         (cond
-           ((and sub (string= sub "add"))
-            (p "Usage: clpm registry add --name <name> --url <git-url> --trust <ed25519:key-id>")
-            (p "")
-            (p "Example:")
-            (p "  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:abcd...")
-            0)
+	         (cond
+	           ((and sub (string= sub "add"))
+	            (p "Usage: clpm registry add --name <name> --url <git-url> --trust <ed25519:key-id>")
+	            (p "   or: clpm registry add --quicklisp [--name quicklisp] [--url <dist-url>]")
+	            (p "")
+	            (p "Example:")
+	            (p "  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:abcd...")
+	            (p "  clpm registry add --quicklisp")
+	            0)
            ((and sub (string= sub "list"))
             (p "Usage: clpm registry list")
             0)

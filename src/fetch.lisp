@@ -18,13 +18,9 @@
 
 (defun fetch-with-curl (url dest-path &key progress)
   "Fetch URL using curl."
-  (let ((args (list "curl" "-fsSL")))
-    (when progress
-      (push "-#" args))
-    (push "-o" args)
-    (push (namestring dest-path) args)
-    (push url args)
-    (setf args (nreverse args))
+  (let ((args (append (list "curl" "-fsSL")
+                      (when progress (list "-#"))
+                      (list "-o" (namestring dest-path) url))))
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program args)
       (declare (ignore output))
@@ -36,13 +32,9 @@
 
 (defun fetch-with-wget (url dest-path &key progress)
   "Fetch URL using wget."
-  (let ((args (list "wget")))
-    (unless progress
-      (push "-q" args))
-    (push "-O" args)
-    (push (namestring dest-path) args)
-    (push url args)
-    (setf args (nreverse args))
+  (let ((args (append (list "wget")
+                      (unless progress (list "-q"))
+                      (list "-O" (namestring dest-path) url))))
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program args)
       (declare (ignore output))
@@ -323,42 +315,62 @@ Supports .tar.gz, .tgz, .tar, .zip"
 
 (defun fetch-artifact (source expected-sha256 &key (verify t))
   "Fetch artifact according to SOURCE specification.
-SOURCE is a plist like (:tarball :url ... :sha256 ...) or (:git :url ... :commit ...)
-Returns (values source-path tree-sha256).
-If VERIFY is true, verifies hash matches EXPECTED-SHA256."
+SOURCE is a plist like (:tarball :url ... :sha256 ... :sha1 ...) or (:git :url ... :commit ...)
+Returns (values source-path tree-sha256 artifact-sha256).
+If VERIFY is true, verifies the tarball against an expected hash when available."
   (let ((kind (car source)))
     (clpm.store:with-temp-dir (tmp)
       (ecase kind
         (:tarball
          (let* ((url (getf (cdr source) :url))
+                (expected-sha256 (or expected-sha256 (getf (cdr source) :sha256)))
+                (expected-sha1 (getf (cdr source) :sha1))
                 (artifact-file (merge-pathnames "artifact.tar.gz" tmp)))
            ;; Download
            (fetch-url url artifact-file)
-           ;; Verify hash
+           ;; Verify hashes (if available) before extracting.
            (when verify
-             (let ((actual-hash (clpm.crypto.sha256:bytes-to-hex
-                                 (clpm.crypto.sha256:sha256-file artifact-file))))
-               (unless (string-equal actual-hash expected-sha256)
-                 (error 'clpm.errors:clpm-hash-mismatch-error
-                        :expected expected-sha256
-                        :actual actual-hash
-                        :artifact url))))
-           ;; Store artifact
-           (clpm.store:store-artifact artifact-file expected-sha256)
-           ;; Extract and store source
-           (let ((extract-dir (merge-pathnames "extract/" tmp)))
-             (ensure-directories-exist extract-dir)
-             (extract-archive artifact-file extract-dir)
-             ;; Find extracted directory (often has one top-level dir)
-             (let ((contents (directory (merge-pathnames "*" extract-dir))))
-               (let ((source-dir (if (and (= (length contents) 1)
-                                          (uiop:directory-pathname-p (first contents)))
-                                     (first contents)
-                                     extract-dir)))
-                 (multiple-value-bind (store-path tree-sha256)
-                     (clpm.store:store-source source-dir nil)
-                   (declare (ignore store-path))
-                   (values (clpm.store:get-source-path tree-sha256) tree-sha256)))))))
+             (unless (or (stringp expected-sha256) (stringp expected-sha1))
+               (error 'clpm.errors:clpm-fetch-error
+                      :message "Missing expected hash for tarball source"
+                      :url url))
+             (when (stringp expected-sha1)
+               (let ((actual-sha1 (clpm.crypto.sha256:bytes-to-hex
+                                   (clpm.crypto.sha1:sha1-file artifact-file))))
+                 (unless (string-equal actual-sha1 expected-sha1)
+                   (error 'clpm.errors:clpm-hash-mismatch-error
+                          :expected expected-sha1
+                          :actual actual-sha1
+                          :artifact url))))
+             (when (stringp expected-sha256)
+               (let ((actual-sha256 (clpm.crypto.sha256:bytes-to-hex
+                                     (clpm.crypto.sha256:sha256-file artifact-file))))
+                 (unless (string-equal actual-sha256 expected-sha256)
+                   (error 'clpm.errors:clpm-hash-mismatch-error
+                          :expected expected-sha256
+                          :actual actual-sha256
+                          :artifact url)))))
+           ;; Compute artifact SHA-256 for storage and lockfile backfills.
+           (let ((artifact-sha256 (clpm.crypto.sha256:bytes-to-hex
+                                   (clpm.crypto.sha256:sha256-file artifact-file))))
+             ;; Store artifact (store uses SHA-256 addressing).
+             (clpm.store:store-artifact artifact-file artifact-sha256)
+             ;; Extract and store source
+             (let ((extract-dir (merge-pathnames "extract/" tmp)))
+               (ensure-directories-exist extract-dir)
+               (extract-archive artifact-file extract-dir)
+               ;; Find extracted directory (often has one top-level dir)
+               (let ((contents (directory (merge-pathnames "*" extract-dir))))
+                 (let ((source-dir (if (and (= (length contents) 1)
+                                            (uiop:directory-pathname-p (first contents)))
+                                       (first contents)
+                                       extract-dir)))
+                   (multiple-value-bind (store-path tree-sha256)
+                       (clpm.store:store-source source-dir nil)
+                     (declare (ignore store-path))
+                     (values (clpm.store:get-source-path tree-sha256)
+                             tree-sha256
+                             artifact-sha256))))))))
         (:git
          (let* ((url (getf (cdr source) :url))
                 (commit (getf (cdr source) :commit))
@@ -368,7 +380,7 @@ If VERIFY is true, verifies hash matches EXPECTED-SHA256."
            (multiple-value-bind (store-path tree-sha256)
                (clpm.store:store-source clone-dir nil)
              (declare (ignore store-path))
-             (values (clpm.store:get-source-path tree-sha256) tree-sha256))))
+             (values (clpm.store:get-source-path tree-sha256) tree-sha256 nil))))
         (:path
          ;; Local path - hash and store like any other source.
          (let* ((path (or (second source)
@@ -384,8 +396,8 @@ If VERIFY is true, verifies hash matches EXPECTED-SHA256."
            (let ((tru (uiop:ensure-directory-pathname (truename abs))))
              (multiple-value-bind (store-path tree-sha256)
                  (clpm.store:store-source tru expected-sha256)
-             (declare (ignore store-path))
-             (values (clpm.store:get-source-path tree-sha256) tree-sha256)))))))))
+               (declare (ignore store-path))
+               (values (clpm.store:get-source-path tree-sha256) tree-sha256 nil)))))))))
 
 (defun verify-and-store (artifact-path expected-sha256)
   "Verify artifact hash and store in content-addressed store.
@@ -432,17 +444,21 @@ Returns list of (system-id . source-path) pairs sorted by system-id."
       (labels ((fetch-task (task)
                  (destructuring-bind (system-id release source-spec expected old-tree-sha256)
                      task
-                   (multiple-value-bind (path fetched-tree-sha256)
+                   (multiple-value-bind (path fetched-tree-sha256 fetched-artifact-sha256)
                        (fetch-artifact source-spec expected)
-                     (values system-id path release old-tree-sha256 fetched-tree-sha256)))))
+                     (values system-id path release old-tree-sha256
+                             fetched-tree-sha256 fetched-artifact-sha256)))))
         (if (or (<= jobs 1) (<= (length tasks) 1))
             ;; Sequential.
             (dolist (task tasks)
-              (multiple-value-bind (system-id path release old-tree-sha256 fetched-tree-sha256)
+              (multiple-value-bind (system-id path release old-tree-sha256
+                                    fetched-tree-sha256 fetched-artifact-sha256)
                   (fetch-task task)
                 (push (cons system-id path) fetched-results)
-                (when (and fetched-tree-sha256 (null old-tree-sha256))
-                  (push (cons release fetched-tree-sha256) updates))))
+                (when (or fetched-tree-sha256 fetched-artifact-sha256)
+                  (push (list release old-tree-sha256
+                              fetched-tree-sha256 fetched-artifact-sha256)
+                        updates))))
             ;; Parallel.
             (let ((queue tasks)
                   (queue-mutex (sb-thread:make-mutex :name "clpm.fetch.queue"))
@@ -463,12 +479,15 @@ Returns list of (system-id . source-path) pairs sorted by system-id."
                                (lambda ()
                                  (loop for task = (pop-task) while task do
                                    (handler-case
-                                       (multiple-value-bind (system-id path release old-tree-sha256 fetched-tree-sha256)
+                                       (multiple-value-bind (system-id path release old-tree-sha256
+                                                             fetched-tree-sha256 fetched-artifact-sha256)
                                            (fetch-task task)
                                          (sb-thread:with-mutex (result-mutex)
                                            (push (cons system-id path) fetched-results)
-                                           (when (and fetched-tree-sha256 (null old-tree-sha256))
-                                             (push (cons release fetched-tree-sha256) updates))))
+                                           (when (or fetched-tree-sha256 fetched-artifact-sha256)
+                                             (push (list release old-tree-sha256
+                                                         fetched-tree-sha256 fetched-artifact-sha256)
+                                                   updates))))
                                      (error (c)
                                        (record-error c)
                                        (return)))))
@@ -478,9 +497,44 @@ Returns list of (system-id . source-path) pairs sorted by system-id."
                   (when err
                     (error err))))))
 
-      ;; Apply tree-sha256 backfills to the lockfile struct.
-      (dolist (pair updates)
-        (setf (clpm.project:locked-release-tree-sha256 (car pair)) (cdr pair)))
+      ;; Apply backfills (and verify consistency) to the lockfile struct.
+      (dolist (u updates)
+        (destructuring-bind (release old-tree-sha256 fetched-tree-sha256 fetched-artifact-sha256)
+            u
+          ;; tree-sha256
+          (when (stringp fetched-tree-sha256)
+            (cond
+              ((null old-tree-sha256)
+               (setf (clpm.project:locked-release-tree-sha256 release) fetched-tree-sha256))
+              ((not (string= old-tree-sha256 fetched-tree-sha256))
+               (error 'clpm.errors:clpm-hash-mismatch-error
+                      :expected old-tree-sha256
+                      :actual fetched-tree-sha256
+                      :artifact "source tree"))))
+          ;; artifact-sha256 (for tarballs)
+          (when (stringp fetched-artifact-sha256)
+            (let ((existing (clpm.project:locked-release-artifact-sha256 release)))
+              (cond
+                ((null existing)
+                 (setf (clpm.project:locked-release-artifact-sha256 release)
+                       fetched-artifact-sha256))
+                ((not (string= existing fetched-artifact-sha256))
+                 (error 'clpm.errors:clpm-hash-mismatch-error
+                        :expected existing
+                        :actual fetched-artifact-sha256
+                        :artifact "artifact"))))
+            ;; Also backfill locked-source :sha256 for :tarball sources.
+            (let ((src (clpm.project:locked-release-source release)))
+              (when (and src (eq (clpm.project:locked-source-kind src) :tarball))
+                (let ((src-sha256 (clpm.project:locked-source-sha256 src)))
+                  (cond
+                    ((null src-sha256)
+                     (setf (clpm.project:locked-source-sha256 src) fetched-artifact-sha256))
+                    ((not (string= src-sha256 fetched-artifact-sha256))
+                     (error 'clpm.errors:clpm-hash-mismatch-error
+                            :expected src-sha256
+                            :actual fetched-artifact-sha256
+                            :artifact "tarball sha256")))))))))
 
       ;; Persist lockfile (may include tree hash backfills).
       (when lockfile-path
@@ -502,7 +556,8 @@ Returns list of (system-id . source-path) pairs sorted by system-id."
       (:tarball
        (list :tarball
              :url (clpm.project:locked-source-url locked-source)
-             :sha256 (clpm.project:locked-source-sha256 locked-source)))
+             :sha256 (clpm.project:locked-source-sha256 locked-source)
+             :sha1 (clpm.project:locked-source-sha1 locked-source)))
       (:git
        (list :git
              :url (clpm.project:locked-source-url locked-source)

@@ -32,35 +32,39 @@ SOURCE-PATHS is alist of (system-id . source-path)."
                :task-map (make-hash-table :test 'equal)))
         (system-to-task (make-hash-table :test 'equal)))
     ;; Create tasks for each unique release
-    (let ((seen-releases (make-hash-table :test 'equal)))
-      (dolist (sys (clpm.solver:resolution-systems resolution))
-        (let* ((release-ref (getf sys :release-ref))
-               (system-id (getf sys :system)))
-          (unless (gethash release-ref seen-releases)
-            (setf (gethash release-ref seen-releases) t)
-            ;; Find source path
-            (let* ((source-entry (assoc system-id source-paths :test #'string=))
-                   (source-path (when source-entry (cdr source-entry)))
-                   ;; Find locked info
-                   (locked-sys (find system-id
-                                     (clpm.project:lockfile-resolved lockfile)
-                                     :key #'clpm.project:locked-system-id
-                                     :test #'string=))
-                   (locked-rel (when locked-sys
-                                 (clpm.project:locked-system-release locked-sys)))
-                   (task (make-build-task
-                          :id release-ref
-                          :system-id system-id
-                          :release-name (getf sys :name)
-                          :release-version (getf sys :version)
-                          :source-path source-path
-                          :tree-sha256 (when locked-rel
-                                         (clpm.project:locked-release-tree-sha256
-                                          locked-rel))
-                          :systems (list system-id))))
-              (push task (build-plan-tasks plan))
-              (setf (gethash release-ref (build-plan-task-map plan)) task)
-              (setf (gethash system-id system-to-task) task))))))
+    (dolist (sys (clpm.solver:resolution-systems resolution))
+      (let* ((release-ref (getf sys :release-ref))
+             (system-id (getf sys :system))
+             (task (gethash release-ref (build-plan-task-map plan))))
+        ;; Create task if first time we see this release.
+        (unless task
+          ;; Find source path
+          (let* ((source-entry (assoc system-id source-paths :test #'string=))
+                 (source-path (when source-entry (cdr source-entry)))
+                 ;; Find locked info
+                 (locked-sys (find system-id
+                                   (clpm.project:lockfile-resolved lockfile)
+                                   :key #'clpm.project:locked-system-id
+                                   :test #'string=))
+                 (locked-rel (when locked-sys
+                               (clpm.project:locked-system-release locked-sys))))
+            (setf task
+                  (make-build-task
+                   :id release-ref
+                   :system-id system-id
+                   :release-name (getf sys :name)
+                   :release-version (getf sys :version)
+                   :source-path source-path
+                   :tree-sha256 (when locked-rel
+                                  (clpm.project:locked-release-tree-sha256
+                                   locked-rel))
+                   :systems '()))
+            (push task (build-plan-tasks plan))
+            (setf (gethash release-ref (build-plan-task-map plan)) task)))
+
+        ;; Map every system-id to the task for its release.
+        (setf (gethash system-id system-to-task) task)
+        (pushnew system-id (build-task-systems task) :test #'string=)))
     ;; Set up dependencies
     (dolist (task (build-plan-tasks plan))
       (let ((system-id (build-task-system-id task)))
@@ -76,6 +80,10 @@ SOURCE-PATHS is alist of (system-id . source-path)."
                 (pushnew (build-task-id dep-task)
                          (build-task-depends-on task)
                          :test #'string=)))))))
+    ;; Deterministic system build ordering within a release.
+    (dolist (task (build-plan-tasks plan))
+      (setf (build-task-systems task)
+            (sort (copy-list (build-task-systems task)) #'string<)))
     ;; Compute topological order
     (setf (build-plan-order plan) (topological-sort-plan plan))
     plan))

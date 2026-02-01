@@ -2,16 +2,24 @@
 
 (in-package #:clpm.registry)
 
+;; Forward declarations (defined in registry/quicklisp.lisp).
+(declaim (ftype (function (&rest t) t)
+                clone-quicklisp-registry
+                update-quicklisp-registry
+                load-quicklisp-registry-snapshot))
+
 ;;; Registry structures
 
 (defstruct registry
   "A CLPM registry."
   (name nil :type (or null string))
+  (kind :git :type keyword)
   (url nil :type (or null string))
   (path nil :type (or null pathname))  ; local path to cloned registry
   (trust-key nil :type (or null string))
   (snapshot-sig-sha256 nil :type (or null string))
-  (snapshot nil))
+  (snapshot nil)
+  (release-table (make-hash-table :test 'equal)))
 
 (defstruct snapshot
   "A registry snapshot."
@@ -106,34 +114,55 @@
 
 ;;; Registry operations
 
-(defun clone-registry (name url &key trust-key)
-  "Clone a registry from URL.
+(defun clone-registry (name url &key trust-key (kind :git))
+  "Clone or load a registry from URL.
+
+KIND is one of:
+- :git       A CLPM git registry.
+- :quicklisp A Quicklisp dist registry (distinfo URL).
+
 Returns a registry struct."
   (let* ((local-path (registry-local-path name))
          (reg (make-registry :name name
+                             :kind kind
                              :url url
                              :path local-path
                              :trust-key trust-key)))
-    (if (uiop:directory-exists-p local-path)
-        ;; Already exists, just load
-        (load-registry-snapshot reg)
-        ;; Clone fresh
-        (progn
-          (ensure-directories-exist local-path)
-          (git-clone url local-path)
-          (load-registry-snapshot reg)))
+    (case kind
+      (:git
+       (if (uiop:directory-exists-p local-path)
+           ;; Already exists, just load
+           (load-registry-snapshot reg)
+           ;; Clone fresh
+           (progn
+             (ensure-directories-exist local-path)
+             (git-clone url local-path)
+             (load-registry-snapshot reg))))
+      (:quicklisp
+       ;; Download dist metadata if missing, then load.
+       (clone-quicklisp-registry reg))
+      (t
+       (error 'clpm.errors:clpm-parse-error
+              :message (format nil "Unknown registry kind: ~S" kind))))
     reg))
 
 (defun update-registry (registry)
   "Update a registry by pulling latest changes.
 Returns updated registry."
-  (let ((local-path (registry-local-path (registry-name registry))))
-    (unless (uiop:directory-exists-p local-path)
-      (error 'clpm.errors:clpm-fetch-error
-             :message (format nil "Registry ~A not cloned" (registry-name registry))))
-    (git-pull local-path)
-    (load-registry-snapshot registry)
-    registry))
+  (case (registry-kind registry)
+    (:git
+     (let ((local-path (registry-local-path (registry-name registry))))
+       (unless (uiop:directory-exists-p local-path)
+         (error 'clpm.errors:clpm-fetch-error
+                :message (format nil "Registry ~A not cloned" (registry-name registry))))
+       (git-pull local-path)
+       (load-registry-snapshot registry)
+       registry))
+    (:quicklisp
+     (update-quicklisp-registry registry))
+    (t
+     (error 'clpm.errors:clpm-parse-error
+            :message (format nil "Unknown registry kind: ~S" (registry-kind registry))))))
 
 (defun load-registry (name)
   "Load an already-cloned registry by name.
@@ -141,6 +170,7 @@ Returns registry struct or nil if not found."
   (let ((local-path (registry-local-path name)))
     (when (uiop:directory-exists-p local-path)
       (let ((reg (make-registry :name name
+                                :kind :git
                                 :path local-path)))
         (load-registry-snapshot reg)
         reg))))
@@ -150,27 +180,34 @@ Returns registry struct or nil if not found."
 (defun load-registry-snapshot (registry)
   "Load and parse the snapshot for REGISTRY.
 Modifies REGISTRY in place."
-  (let* ((local-path (registry-local-path (registry-name registry)))
-         (snapshot-path (merge-pathnames "registry/snapshot.sxp" local-path)))
-    (unless (uiop:file-exists-p snapshot-path)
-      (error 'clpm.errors:clpm-parse-error
-             :message "Snapshot file not found"
-             :file snapshot-path))
-    ;; Verify signature if trust key is set
-    (when (registry-trust-key registry)
-      (if (and (boundp 'clpm.commands:*insecure*)
-               (symbol-value 'clpm.commands:*insecure*))
-          (progn
-            (setf (registry-snapshot-sig-sha256 registry) nil)
-            (clpm.commands::log-info
-             "WARNING: --insecure: skipping snapshot signature verification for registry ~A"
-             (registry-name registry)))
-          (setf (registry-snapshot-sig-sha256 registry)
-                (verify-snapshot-signature local-path (registry-trust-key registry)))))
-    ;; Parse snapshot
-    (let ((form (clpm.io.sexp:read-registry-snapshot snapshot-path)))
-      (setf (registry-snapshot registry) (parse-snapshot form)))
-    registry))
+  (case (registry-kind registry)
+    (:git
+     (let* ((local-path (registry-local-path (registry-name registry)))
+            (snapshot-path (merge-pathnames "registry/snapshot.sxp" local-path)))
+       (unless (uiop:file-exists-p snapshot-path)
+         (error 'clpm.errors:clpm-parse-error
+                :message "Snapshot file not found"
+                :file snapshot-path))
+       ;; Verify signature if trust key is set
+       (when (registry-trust-key registry)
+         (if (and (boundp 'clpm.commands:*insecure*)
+                  (symbol-value 'clpm.commands:*insecure*))
+             (progn
+               (setf (registry-snapshot-sig-sha256 registry) nil)
+               (clpm.commands::log-info
+                "WARNING: --insecure: skipping snapshot signature verification for registry ~A"
+                (registry-name registry)))
+             (setf (registry-snapshot-sig-sha256 registry)
+                   (verify-snapshot-signature local-path (registry-trust-key registry)))))
+       ;; Parse snapshot
+       (let ((form (clpm.io.sexp:read-registry-snapshot snapshot-path)))
+         (setf (registry-snapshot registry) (parse-snapshot form)))
+       registry))
+    (:quicklisp
+     (load-quicklisp-registry-snapshot registry))
+    (t
+     (error 'clpm.errors:clpm-parse-error
+            :message (format nil "Unknown registry kind: ~S" (registry-kind registry))))))
 
 (defun parse-snapshot (form)
   "Parse a snapshot form into a snapshot struct."
@@ -273,20 +310,29 @@ Signals CLPM-SIGNATURE-ERROR if invalid."
 
 (defun get-release-metadata (registry package-name version)
   "Get release metadata for PACKAGE-NAME@VERSION from REGISTRY."
-  (let* ((local-path (registry-local-path (registry-name registry)))
-         (release-path (merge-pathnames
-                        (format nil "registry/packages/~A/~A/release.sxp"
-                                package-name version)
-                        local-path)))
-    (unless (uiop:file-exists-p release-path)
-      (return-from get-release-metadata nil))
-    (when (registry-trust-key registry)
-      (unless (and (boundp 'clpm.commands:*insecure*)
-                   (symbol-value 'clpm.commands:*insecure*))
-        (verify-release-metadata-signature local-path package-name version
-                                           (registry-trust-key registry))))
-    (let ((form (clpm.io.sexp:read-release-metadata release-path)))
-      (parse-release-metadata form))))
+  (case (registry-kind registry)
+    (:git
+     (let* ((local-path (registry-local-path (registry-name registry)))
+            (release-path (merge-pathnames
+                           (format nil "registry/packages/~A/~A/release.sxp"
+                                   package-name version)
+                           local-path)))
+       (unless (uiop:file-exists-p release-path)
+         (return-from get-release-metadata nil))
+       (when (registry-trust-key registry)
+         (unless (and (boundp 'clpm.commands:*insecure*)
+                      (symbol-value 'clpm.commands:*insecure*))
+           (verify-release-metadata-signature local-path package-name version
+                                              (registry-trust-key registry))))
+       (let ((form (clpm.io.sexp:read-release-metadata release-path)))
+         (parse-release-metadata form))))
+    (:quicklisp
+     (let* ((release-ref (format nil "~A@~A" package-name version))
+            (meta (gethash release-ref (registry-release-table registry))))
+       meta))
+    (t
+     (error 'clpm.errors:clpm-parse-error
+            :message (format nil "Unknown registry kind: ~S" (registry-kind registry))))))
 
 (defun parse-release-source (form)
   "Parse a release source form."
@@ -294,7 +340,8 @@ Signals CLPM-SIGNATURE-ERROR if invalid."
     (:tarball
      (list :tarball
            :url (getf (cdr form) :url)
-           :sha256 (getf (cdr form) :sha256)))
+           :sha256 (getf (cdr form) :sha256)
+           :sha1 (getf (cdr form) :sha1)))
     (:git
      (list :git
            :url (getf (cdr form) :url)

@@ -74,6 +74,7 @@
   (kind :tarball :type keyword)  ; :tarball, :git, :path
   (url nil :type (or null string))
   (sha256 nil :type (or null string))
+  (sha1 nil :type (or null string))
   (commit nil :type (or null string))
   (path nil :type (or null string)))
 
@@ -97,6 +98,13 @@
     (cond
       ((and (consp form) (eq (car form) :git))
        (setf (registry-ref-kind ref) :git)
+       (loop for (key val) on (cdr form) by #'cddr do
+         (case key
+           (:url (setf (registry-ref-url ref) val))
+           (:name (setf (registry-ref-name ref) val))
+           (:trust (setf (registry-ref-trust ref) val)))))
+      ((and (consp form) (eq (car form) :quicklisp))
+       (setf (registry-ref-kind ref) :quicklisp)
        (loop for (key val) on (cdr form) by #'cddr do
          (case key
            (:url (setf (registry-ref-url ref) val))
@@ -150,7 +158,8 @@
        (loop for (key val) on (cdr form) by #'cddr do
          (case key
            (:url (setf (locked-source-url src) val))
-           (:sha256 (setf (locked-source-sha256 src) val)))))
+           (:sha256 (setf (locked-source-sha256 src) val))
+           (:sha1 (setf (locked-source-sha1 src) val)))))
       (:git
        (setf (locked-source-kind src) :git)
        (loop for (key val) on (cdr form) by #'cddr do
@@ -242,7 +251,8 @@
   (case (locked-source-kind src)
     (:tarball
      `(:tarball :url ,(locked-source-url src)
-                :sha256 ,(locked-source-sha256 src)))
+                :sha256 ,(locked-source-sha256 src)
+                :sha1 ,(locked-source-sha1 src)))
     (:git
      `(:git :url ,(locked-source-url src)
             :commit ,(locked-source-commit src)))

@@ -23,6 +23,13 @@
            (:url (setf (clpm.project:registry-ref-url ref) val))
            (:name (setf (clpm.project:registry-ref-name ref) val))
            (:trust (setf (clpm.project:registry-ref-trust ref) val)))))
+      ((and (consp form) (eq (car form) :quicklisp))
+       (setf (clpm.project:registry-ref-kind ref) :quicklisp)
+       (loop for (key val) on (cdr form) by #'cddr do
+         (case key
+           (:url (setf (clpm.project:registry-ref-url ref) val))
+           (:name (setf (clpm.project:registry-ref-name ref) val))
+           (:trust (setf (clpm.project:registry-ref-trust ref) val)))))
       (t
        (error 'clpm.errors:clpm-parse-error
               :message (format nil "Unknown registry format: ~S" form))))
@@ -92,4 +99,3 @@ Merge rules:
          (project-build (clpm.project:project-build-options project))
          (merged-build (plist-merge global-build project-build)))
     (values merged-registries merged-build)))
-

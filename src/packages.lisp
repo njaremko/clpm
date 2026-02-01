@@ -46,6 +46,12 @@
            #:bytes-to-hex
            #:hex-to-bytes))
 
+(defpackage #:clpm.crypto.sha1
+  (:use #:cl)
+  (:export #:sha1
+           #:sha1-stream
+           #:sha1-file))
+
 (defpackage #:clpm.crypto.sha512
   (:use #:cl)
   (:export #:sha512
@@ -146,6 +152,7 @@
            #:locked-source-kind
            #:locked-source-url
            #:locked-source-sha256
+           #:locked-source-sha1
            #:locked-source-commit
            #:locked-source-path
            #:make-locked-system
@@ -171,6 +178,7 @@
   (:use #:cl #:clpm.io.sexp #:clpm.crypto.sha256 #:clpm.crypto.ed25519 #:clpm.errors)
   (:export #:registry
            #:registry-name
+           #:registry-kind
            #:registry-url
            #:registry-path
            #:registry-trust-key

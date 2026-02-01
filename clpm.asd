@@ -21,7 +21,8 @@
      (:module "crypto"
       :serial t
       :components
-      ((:file "sha256")
+      ((:file "sha1")
+       (:file "sha256")
        (:file "sha512")
        (:file "ed25519")))
      (:file "platform")
@@ -31,7 +32,8 @@
      (:module "registry"
       :serial t
       :components
-      ((:file "git")))
+      ((:file "git")
+       (:file "quicklisp")))
      (:module "solver"
       :serial t
       :components
