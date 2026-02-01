@@ -16,7 +16,8 @@
      (:module "io"
       :serial t
       :components
-      ((:file "sexp")))
+      ((:file "sexp")
+       (:file "fs")))
      (:module "crypto"
       :serial t
       :components

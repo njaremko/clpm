@@ -229,21 +229,7 @@ Returns a 32-byte array."
   "Compute deterministic SHA-256 hash of a directory tree.
 Files are hashed in lexicographic order by path with metadata."
   (let ((ctx (make-sha256-ctx))
-        (files '()))
-    ;; Collect all files
-    (labels ((collect (dir prefix)
-               (let ((entries (sort (directory (merge-pathnames "*.*" dir))
-                                    #'string< :key #'namestring)))
-                 (dolist (entry entries)
-                   (let ((name (file-namestring entry)))
-                     (unless (member name exclude :test #'string=)
-                       (if (uiop:directory-pathname-p entry)
-                           (collect entry (concatenate 'string prefix name "/"))
-                           (push (cons (concatenate 'string prefix name) entry)
-                                 files))))))))
-      (collect directory ""))
-    ;; Sort by path
-    (setf files (sort files #'string< :key #'car))
+        (files (clpm.io.fs:walk-files directory :exclude exclude)))
     ;; Hash each file with metadata
     (dolist (file-entry files)
       (let* ((rel-path (car file-entry))

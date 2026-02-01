@@ -24,10 +24,11 @@
 ;;; Directory paths following XDG conventions
 
 (defun home-dir ()
-  "Return user home directory."
-  (or (uiop:getenv "HOME")
-      (uiop:getenv "USERPROFILE")
-      (user-homedir-pathname)))
+  "Return user home directory as a directory pathname."
+  (uiop:ensure-directory-pathname
+   (or (uiop:getenv "HOME")
+       (uiop:getenv "USERPROFILE")
+       (user-homedir-pathname))))
 
 (defun data-dir ()
   "Return CLPM data directory."

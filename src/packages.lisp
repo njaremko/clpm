@@ -29,6 +29,11 @@
            #:read-registry-snapshot
            #:read-release-metadata))
 
+(defpackage #:clpm.io.fs
+  (:use #:cl)
+  (:export #:list-directory-entries
+           #:walk-files))
+
 (defpackage #:clpm.crypto.sha256
   (:use #:cl)
   (:export #:sha256

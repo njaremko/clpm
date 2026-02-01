@@ -103,15 +103,15 @@ Signals error if tree hash doesn't match."
 
 (defun copy-directory-tree (source dest)
   "Copy directory tree from SOURCE to DEST."
-  (ensure-directories-exist dest)
-  (dolist (entry (directory (merge-pathnames "*.*" source)))
-    (let* ((name (file-namestring entry))
-           (dest-entry (merge-pathnames name dest)))
-      (cond
-        ((uiop:directory-pathname-p entry)
-         (copy-directory-tree entry (uiop:ensure-directory-pathname dest-entry)))
-        (t
-         (uiop:copy-file entry dest-entry))))))
+  (let ((source (uiop:ensure-directory-pathname source))
+        (dest (uiop:ensure-directory-pathname dest)))
+    (ensure-directories-exist dest)
+    (dolist (entry (clpm.io.fs:walk-files source))
+      (let* ((rel-path (car entry))
+             (src-path (cdr entry))
+             (dest-path (merge-pathnames rel-path dest)))
+        (ensure-directories-exist dest-path)
+        (uiop:copy-file src-path dest-path)))))
 
 ;;; Get paths
 
