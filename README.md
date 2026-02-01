@@ -123,6 +123,13 @@ registry/
         release.sig ; Signature
 ```
 
+### Key and Signature Encodings
+
+- `registry/keys/<key-id>.pub`: ASCII hex encoding of the 32-byte Ed25519 public key (64 hex chars) with an optional trailing newline.
+- `registry/snapshot.sig` and `registry/packages/.../release.sig`: detached signature over the corresponding `.sxp` file, encoded as either:
+  - ASCII base64 of the 64-byte signature (padding/newlines allowed), or
+  - ASCII hex of the 64-byte signature (128 hex chars).
+
 ### Snapshot Format
 
 ```lisp

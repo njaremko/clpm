@@ -26,7 +26,10 @@
 
 (defun load-public-key (path)
   "Load an Ed25519 public key from a file.
-Supports PEM format and raw 32-byte keys."
+Supports:
+- Raw 32-byte keys
+- ASCII hex (64 hex chars) + optional newline
+- PEM format"
   (with-open-file (stream path :element-type '(unsigned-byte 8)
                                :if-does-not-exist nil)
     (unless stream
@@ -38,18 +41,33 @@ Supports PEM format and raw 32-byte keys."
         ;; Raw 32-byte key
         ((= size 32)
          (make-public-key :bytes data))
-        ;; PEM format - try to extract key
-        ((and (> size 32)
-              (eql (aref data 0) (char-code #\-)))
-         (let* ((text (map 'string #'code-char data))
-                (lines (remove-if (lambda (line)
-                                    (or (search "-----" line)
-                                        (zerop (length line))))
-                                  (uiop:split-string text :separator '(#\Newline))))
-                (base64 (apply #'concatenate 'string lines)))
-           (make-public-key :bytes (decode-base64-to-bytes base64))))
+        ;; ASCII hex key (64 hex chars + optional newline/whitespace)
         (t
-         (error "Unsupported public key format"))))))
+         (let* ((text (map 'string #'code-char data))
+                (trim (string-trim '(#\Space #\Newline #\Return #\Tab) text)))
+           (labels ((hex-string-p (s)
+                      (and (= (length s) 64)
+                           (every (lambda (c)
+                                    (find c "0123456789abcdef" :test #'char-equal))
+                                  s))))
+             (cond
+               ;; PEM format - try to extract key
+               ((and (> size 32)
+                     (eql (aref data 0) (char-code #\-)))
+                (let* ((lines (remove-if (lambda (line)
+                                           (or (search "-----" line)
+                                               (zerop (length line))))
+                                         (uiop:split-string text :separator '(#\Newline))))
+                       (base64 (apply #'concatenate 'string lines)))
+                  (make-public-key :bytes (decode-base64-to-bytes base64))))
+               ;; Hex-encoded key
+               ((hex-string-p trim)
+                (let ((bytes (clpm.crypto.sha256:hex-to-bytes trim)))
+                  (unless (= (length bytes) 32)
+                    (error "Invalid hex public key length"))
+                  (make-public-key :bytes bytes)))
+               (t
+                (error "Unsupported public key format"))))))))))
 
 (defun decode-base64-to-bytes (base64-string)
   "Decode base64 string to byte array."
@@ -153,9 +171,19 @@ so this is a placeholder for proper integration."
 
 (defun read-detached-signature (sig-path)
   "Read a detached signature file.
-Format: base64-encoded 64-byte signature."
-  (let ((content (uiop:read-file-string sig-path)))
-    (make-signature :bytes (decode-base64-to-bytes (string-trim '(#\Space #\Newline) content)))))
+Format: base64-encoded or hex-encoded 64-byte signature."
+  (let* ((content (uiop:read-file-string sig-path))
+         (trim (string-trim '(#\Space #\Newline #\Return #\Tab) content))
+         (hexp (and (= (length trim) 128)
+                    (every (lambda (c)
+                             (find c "0123456789abcdef" :test #'char-equal))
+                           trim)))
+         (bytes (if hexp
+                    (clpm.crypto.sha256:hex-to-bytes trim)
+                    (decode-base64-to-bytes trim))))
+    (unless (= (length bytes) 64)
+      (error "Invalid detached signature length"))
+    (make-signature :bytes bytes)))
 
 (defun verify-file-signature (file-path sig-path key-path)
   "Verify signature of FILE-PATH using signature at SIG-PATH and key at KEY-PATH.
