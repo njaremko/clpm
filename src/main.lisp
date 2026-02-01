@@ -36,6 +36,7 @@ Commands:
   repl             Start SBCL with project loaded
   run              Run the project entrypoint
   exec -- <cmd...> Run a command in the project env
+  test             Run project tests
   gc               Garbage collect store
 
 Options:
@@ -160,6 +161,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
              (apply #'clpm.commands:cmd-run command-args))
             (:exec
              (apply #'clpm.commands:cmd-exec command-args))
+            (:test
+             (apply #'clpm.commands:cmd-test command-args))
             (:gc
              (clpm.commands:cmd-gc
               :dry-run (member "--dry-run" command-args

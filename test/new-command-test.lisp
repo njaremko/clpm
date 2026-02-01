@@ -55,7 +55,11 @@
         (assert-true (string= "binproj" (getf run :system))
                      "Unexpected :run :system: ~S" (getf run :system))
         (assert-true (string= "binproj::main" (getf run :function))
-                     "Unexpected :run :function: ~S" (getf run :function))))
+                     "Unexpected :run :function: ~S" (getf run :function)))
+      (let ((test (clpm.project:project-test p)))
+        (assert-true test "Expected :test metadata for scaffolded project")
+        (assert-true (equal '("binproj/test") (getf test :systems))
+                     "Unexpected :test :systems: ~S" (getf test :systems))))
 
     ;; --lib with --dir
     (uiop:with-current-directory (workspace)
@@ -70,7 +74,11 @@
       (assert-true (equal '("libproj") (clpm.project:project-systems p))
                    "Unexpected project systems: ~S" (clpm.project:project-systems p))
       (assert-true (null (clpm.project:project-run p))
-                   "Did not expect :run metadata for --lib project"))))
+                   "Did not expect :run metadata for --lib project")
+      (let ((test (clpm.project:project-test p)))
+        (assert-true test "Expected :test metadata for scaffolded project")
+        (assert-true (equal '("libproj/test") (getf test :systems))
+                     "Unexpected :test :systems: ~S" (getf test :systems))))))
 
 (format t "  `clpm new` scaffolding PASSED~%")
 (format t "~%New command tests PASSED!~%")

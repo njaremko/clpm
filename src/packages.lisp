@@ -103,6 +103,7 @@
            #:project-version
            #:project-systems
            #:project-run
+           #:project-test
            #:project-depends
            #:project-dev-depends
            #:project-test-depends
@@ -297,6 +298,7 @@
            #:cmd-repl
            #:cmd-run
            #:cmd-exec
+           #:cmd-test
            #:cmd-gc))
 
 (defpackage #:clpm

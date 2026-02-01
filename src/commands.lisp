@@ -124,6 +124,7 @@
                         :run (when (eq kind :bin)
                                (list :system name
                                      :function (format nil "~A::main" name)))
+                        :test (list :systems (list (format nil "~A/test" name)))
                         :scripts nil)))
           (clpm.project:write-project-file project manifest-path))
 
@@ -810,6 +811,70 @@ Usage: clpm exec -- <cmd...>"
                                            :directory project-root
                                            :output :interactive
                                            :error-output :interactive)
+              (declare (ignore output error-output))
+              exit-code)))))))
+
+;;; test command
+
+(defun cmd-test (&rest args)
+  "Run project tests.
+
+Uses clpm.project :test metadata:
+  :test (:systems (\"<test-system>\" ...))"
+  (declare (ignore args))
+  (multiple-value-bind (project-root manifest-path lock-path)
+      (clpm.project:find-project-root)
+    (declare (ignore lock-path))
+    (unless manifest-path
+      (log-error "No clpm.project found")
+      (return-from cmd-test 1))
+    (let* ((project (clpm.project:read-project-file manifest-path))
+           (test (clpm.project:project-test project)))
+      (unless test
+        (log-error "No :test entry configured in clpm.project")
+        (return-from cmd-test 1))
+      (let ((systems (getf test :systems)))
+        (unless (and (listp systems)
+                     systems
+                     (every #'stringp systems))
+          (log-error "Invalid :test entry: expected (:systems (<strings...>))")
+          (return-from cmd-test 1))
+
+        (multiple-value-bind (config-path rc)
+            (ensure-project-activated project-root)
+          (unless (zerop rc)
+            (return-from cmd-test rc))
+
+          (let* ((systems-var (intern "CLPM-TEST-SYSTEMS" "CL-USER"))
+                 (ok-var (intern "CLPM-TEST-OK" "CL-USER"))
+                 (sys-var (intern "CLPM-TEST-SYSTEM" "CL-USER"))
+                 (cond-var (intern "CLPM-TEST-CONDITION" "CL-USER"))
+                 (call-form
+                   `(let ((,systems-var ',systems)
+                          (,ok-var t))
+                      (dolist (,sys-var ,systems-var)
+                        (handler-case
+                            (progn
+                              (format t "~&Testing ~A...~%" ,sys-var)
+                              (asdf:test-system ,sys-var)
+                              (format t "~&OK: ~A~%" ,sys-var))
+                          (error (,cond-var)
+                            (format *error-output* "~&FAIL: ~A: ~A~%" ,sys-var ,cond-var)
+                            (setf ,ok-var nil))))
+                      (sb-ext:exit :code (if ,ok-var 0 1))))
+                 (call-form-str
+                   (with-standard-io-syntax
+                     (let ((*package* (find-package "CL-USER")))
+                       (prin1-to-string call-form))))
+                 (sbcl-args (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
+                                  "--load" (namestring config-path)
+                                  "--eval" call-form-str)))
+            (multiple-value-bind (output error-output exit-code)
+                (clpm.platform:run-program sbcl-args
+                                           :directory project-root
+                                           :output :interactive
+                                           :error-output :interactive
+                                           :timeout 600000)
               (declare (ignore output error-output))
               exit-code)))))))
 
