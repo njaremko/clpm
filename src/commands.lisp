@@ -508,7 +508,8 @@ Returns (values system-id constraint-form-or-nil)."
         (handler-case
             (let ((results (clpm.fetch:fetch-lockfile-deps
                             lockfile
-                            :lockfile-path lock-path)))
+                            :lockfile-path lock-path
+                            :jobs *jobs*)))
               (let ((missing-tree-after
                       (count-if (lambda (locked)
                                   (null (clpm.project:locked-release-tree-sha256

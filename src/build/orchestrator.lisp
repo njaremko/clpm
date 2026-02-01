@@ -103,54 +103,164 @@ SOURCE-PATHS is alist of (system-id . source-path)."
                   &key (jobs 1) compile-options)
   "Build all releases in RESOLUTION.
 SOURCE-PATHS is alist of (system-id . source-path).
-JOBS is number of parallel build jobs (currently sequential only).
+JOBS is number of parallel build jobs.
 Returns list of (system-id . build-id) pairs."
-  (declare (ignore jobs))  ; TODO: implement parallel builds
-  (let ((plan (create-build-plan resolution lockfile source-paths))
-        (results '())
-        (built-sources (make-hash-table :test 'equal)))  ; tree-sha256 -> build-id
-    ;; Build in order
-    (dolist (task-id (build-plan-order plan))
-      (let ((task (gethash task-id (build-plan-task-map plan))))
-        (when task
-          ;; Check if already built (same source)
-          (let* ((tree-sha256 (build-task-tree-sha256 task))
-                 (existing (when tree-sha256
-                             (gethash tree-sha256 built-sources))))
-            (if existing
-                ;; Reuse existing build
-                (progn
-                  (setf (build-task-build-id task) existing
-                        (build-task-status task) :done)
-                  (push (cons (build-task-system-id task) existing) results))
-                ;; Need to build
-                (when (build-task-source-path task)
-                  ;; Collect dependency source paths
-                  (let ((dep-source-dirs '()))
-                    (dolist (dep-id (build-task-depends-on task))
-                      (let ((dep-task (gethash dep-id (build-plan-task-map plan))))
-                        (when (and dep-task (build-task-source-path dep-task))
-                          (pushnew (build-task-source-path dep-task)
-                                   dep-source-dirs
-                                   :test #'equal))))
-                    ;; Run build
-                    (setf (build-task-status task) :building)
-                    (handler-case
-                        (let ((build-id
-                                (build-release (build-task-source-path task)
-                                               (build-task-systems task)
-                                               tree-sha256
-                                               dep-source-dirs
-                                               :compile-options compile-options)))
-                          (setf (build-task-build-id task) build-id
-                                (build-task-status task) :done)
-                          (when tree-sha256
-                            (setf (gethash tree-sha256 built-sources) build-id))
-                          (push (cons (build-task-system-id task) build-id) results))
-                      (error (c)
-                        (setf (build-task-status task) :failed)
-                        (error c))))))))))
-    (nreverse results)))
+  (let* ((jobs (max 1 (or jobs 1)))
+         (plan (create-build-plan resolution lockfile source-paths))
+         (results '())
+         (built-sources (make-hash-table :test 'equal)))  ; tree-sha256 -> build-id
+
+    (labels ((collect-dep-source-dirs (task)
+               (let ((dep-source-dirs '()))
+                 (dolist (dep-id (build-task-depends-on task))
+                   (let ((dep-task (gethash dep-id (build-plan-task-map plan))))
+                     (when (and dep-task (build-task-source-path dep-task))
+                       (pushnew (build-task-source-path dep-task)
+                                dep-source-dirs
+                                :test #'equal))))
+                 dep-source-dirs))
+             (record-result (system-id build-id)
+               (push (cons system-id build-id) results)))
+
+      (if (<= jobs 1)
+          ;; Sequential build in deterministic topological order.
+          (dolist (task-id (build-plan-order plan))
+            (let ((task (gethash task-id (build-plan-task-map plan))))
+              (when task
+                (let* ((tree-sha256 (build-task-tree-sha256 task))
+                       (existing (when tree-sha256
+                                   (gethash tree-sha256 built-sources))))
+                  (cond
+                    (existing
+                     (setf (build-task-build-id task) existing
+                           (build-task-status task) :done)
+                     (record-result (build-task-system-id task) existing))
+                    ((null (build-task-source-path task))
+                     (error 'clpm.errors:clpm-build-error
+                            :message "Missing source path for build"
+                            :system (build-task-system-id task)
+                            :log-file nil
+                            :exit-code 1))
+                    (t
+                     (let ((dep-source-dirs (collect-dep-source-dirs task)))
+                       (setf (build-task-status task) :building)
+                       (handler-case
+                           (let ((build-id
+                                   (build-release (build-task-source-path task)
+                                                  (build-task-systems task)
+                                                  tree-sha256
+                                                  dep-source-dirs
+                                                  :compile-options compile-options)))
+                             (setf (build-task-build-id task) build-id
+                                   (build-task-status task) :done)
+                             (when tree-sha256
+                               (setf (gethash tree-sha256 built-sources) build-id))
+                             (record-result (build-task-system-id task) build-id))
+                         (error (c)
+                           (setf (build-task-status task) :failed)
+                           (error c))))))))))
+          ;; Parallel scheduling respecting dependencies.
+          (let* ((mutex (sb-thread:make-mutex :name "clpm.build.scheduler"))
+                 (cv (sb-thread:make-waitqueue :name "clpm.build.scheduler"))
+                 (remaining (length (build-plan-tasks plan)))
+                 (dep-count (make-hash-table :test 'equal))
+                 (dependents (make-hash-table :test 'equal))
+                 (ready '())
+                 (err nil))
+
+            ;; Build dependency counts and reverse edges.
+            (dolist (task (build-plan-tasks plan))
+              (let ((task-id (build-task-id task))
+                    (deps (build-task-depends-on task)))
+                (setf (gethash task-id dep-count) (length deps))
+                (when (null deps)
+                  (push task-id ready))
+                (dolist (dep-id deps)
+                  (push task-id (gethash dep-id dependents)))))
+            (setf ready (sort ready #'string<))
+
+            (labels ((next-task-id ()
+                       (sb-thread:with-mutex (mutex)
+                         (loop
+                           (when err
+                             (return nil))
+                           (when ready
+                             (return (pop ready)))
+                           (when (zerop remaining)
+                             (return nil))
+                           (sb-thread:condition-wait cv mutex))))
+                     (mark-done (task-id build-id)
+                       (sb-thread:with-mutex (mutex)
+                         (let ((task (gethash task-id (build-plan-task-map plan))))
+                           (when task
+                             (setf (build-task-build-id task) build-id
+                                   (build-task-status task) :done)
+                             (record-result (build-task-system-id task) build-id)))
+                         (decf remaining)
+                         (dolist (dep-id (gethash task-id dependents))
+                           (let ((n (1- (gethash dep-id dep-count 0))))
+                             (setf (gethash dep-id dep-count) n)
+                             (when (zerop n)
+                               (push dep-id ready))))
+                         (setf ready (sort ready #'string<))
+                         (sb-thread:condition-broadcast cv)))
+                     (mark-failed (c)
+                       (sb-thread:with-mutex (mutex)
+                         (unless err
+                           (setf err c))
+                         (setf ready nil
+                               remaining 0)
+                         (sb-thread:condition-broadcast cv)))
+                     (build-one (task-id)
+                       (let ((task (gethash task-id (build-plan-task-map plan))))
+                         (unless task
+                           (error "Unknown task-id: ~A" task-id))
+                         (let* ((tree-sha256 (build-task-tree-sha256 task))
+                                (existing
+                                  (when tree-sha256
+                                    (sb-thread:with-mutex (mutex)
+                                      (gethash tree-sha256 built-sources)))))
+                           (cond
+                             (existing
+                              (mark-done task-id existing))
+                             ((null (build-task-source-path task))
+                              (error 'clpm.errors:clpm-build-error
+                                     :message "Missing source path for build"
+                                     :system (build-task-system-id task)
+                                     :log-file nil
+                                     :exit-code 1))
+                             (t
+                              (let ((dep-source-dirs (collect-dep-source-dirs task)))
+                                (setf (build-task-status task) :building)
+                                (let ((build-id
+                                        (build-release (build-task-source-path task)
+                                                       (build-task-systems task)
+                                                       tree-sha256
+                                                       dep-source-dirs
+                                                       :compile-options compile-options)))
+                                  (when tree-sha256
+                                    (sb-thread:with-mutex (mutex)
+                                      (setf (gethash tree-sha256 built-sources) build-id)))
+                                  (mark-done task-id build-id)))))))))
+
+              (let ((threads
+                      (loop repeat jobs
+                            collect (sb-thread:make-thread
+                                     (lambda ()
+                                       (loop for task-id = (next-task-id) while task-id do
+                                         (handler-case
+                                             (build-one task-id)
+                                           (error (c)
+                                             (mark-failed c)
+                                             (return)))))
+                                                           :name "clpm.build.worker"))))
+                (dolist (th threads)
+                  (sb-thread:join-thread th))
+                (when err
+                  (error err))))))
+
+      ;; Deterministic output ordering.
+      (sort results #'string< :key #'car))))
 
 ;;; Check native dependencies
 

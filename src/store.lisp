@@ -36,7 +36,9 @@
 
 (defun build-exists-p (build-id)
   "Check if build exists in store."
-  (uiop:directory-exists-p (build-path build-id)))
+  (let ((path (build-path build-id)))
+    (and (uiop:directory-exists-p path)
+         (uiop:file-exists-p (merge-pathnames "manifest.sxp" path)))))
 
 ;;; Store artifacts
 
@@ -143,7 +145,8 @@ Returns nil if not in store."
   "Get path to build directory for given ID.
 Returns nil if not in store."
   (let ((path (build-path build-id)))
-    (when (uiop:directory-exists-p path)
+    (when (and (uiop:directory-exists-p path)
+               (uiop:file-exists-p (merge-pathnames "manifest.sxp" path)))
       path)))
 
 ;;; Build ID computation
@@ -184,16 +187,20 @@ BUILD-ID is the computed build ID.
 SOURCE-DIR is the source tree path.
 FASL-DIR is the directory containing compiled fasls.
 MANIFEST is build metadata plist."
-  (let ((dest (build-path build-id)))
-    (unless (uiop:directory-exists-p dest)
+  (declare (ignore source-dir))
+  (let* ((dest (build-path build-id))
+         (manifest-path (merge-pathnames "manifest.sxp" dest)))
+    ;; Treat the manifest as the completion marker so readers never pick up a
+    ;; partially written build directory.
+    (unless (uiop:file-exists-p manifest-path)
       (ensure-directories-exist dest)
       ;; Copy fasls
       (let ((fasl-dest (merge-pathnames "fasl/" dest)))
         (ensure-directories-exist fasl-dest)
         (when (uiop:directory-exists-p fasl-dir)
           (copy-directory-tree fasl-dir fasl-dest)))
-      ;; Write manifest
-      (with-open-file (s (merge-pathnames "manifest.sxp" dest)
+      ;; Write manifest last.
+      (with-open-file (s manifest-path
                          :direction :output
                          :if-exists :supersede)
         (clpm.io.sexp:write-canonical-sexp

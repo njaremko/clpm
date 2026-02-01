@@ -401,44 +401,99 @@ Returns path in store."
 
 ;;; Fetch all dependencies from lockfile
 
-(defun fetch-lockfile-deps (lockfile &key lockfile-path (parallel nil))
+(defun fetch-lockfile-deps (lockfile &key lockfile-path (jobs 1))
   "Fetch all dependencies specified in LOCKFILE.
-If PARALLEL, fetch multiple in parallel (not yet implemented).
-Returns list of (system-id . source-path) pairs."
-  (declare (ignore parallel))
-  (let ((results '()))
+JOBS controls bounded concurrency for network/path/git fetches.
+
+Returns list of (system-id . source-path) pairs sorted by system-id."
+  (let* ((jobs (max 1 (or jobs 1)))
+         (existing-results '())
+         (tasks '()))
     (dolist (locked (clpm.project:lockfile-resolved lockfile))
       (let* ((system-id (clpm.project:locked-system-id locked))
              (release (clpm.project:locked-system-release locked))
              (source (clpm.project:locked-release-source release))
              (artifact-sha256 (clpm.project:locked-release-artifact-sha256 release))
              (tree-sha256 (clpm.project:locked-release-tree-sha256 release)))
-        ;; Check if already in store
+        ;; Check if already in store.
         (let ((existing (when tree-sha256
                           (clpm.store:get-source-path tree-sha256))))
           (if existing
-              (push (cons system-id existing) results)
-              ;; Need to fetch
-              (let ((source-spec (locked-source-to-spec source)))
-                (multiple-value-bind (path fetched-tree-sha256)
-                    (fetch-artifact source-spec
-                                   (if (eq (clpm.project:locked-source-kind source) :path)
-                                       tree-sha256
-                                       artifact-sha256))
-                  (when (and fetched-tree-sha256 (null tree-sha256))
-                    (setf (clpm.project:locked-release-tree-sha256 release)
-                          fetched-tree-sha256))
-                  (push (cons system-id path) results)))))))
-    ;; If we backfilled tree hashes, persist them to disk.
-    (when lockfile-path
-      (let* ((lockfile-path (uiop:ensure-pathname lockfile-path
-                                                  :want-file t
-                                                  :want-existing nil))
-             (tmp-path (merge-pathnames "clpm.lock.tmp"
-                                        (uiop:pathname-directory-pathname lockfile-path))))
-        (clpm.project:write-lock-file lockfile tmp-path)
-        (rename-file tmp-path lockfile-path)))
-    (nreverse results)))
+              (push (cons system-id existing) existing-results)
+              (let ((source-spec (locked-source-to-spec source))
+                    (expected (if (eq (clpm.project:locked-source-kind source) :path)
+                                  tree-sha256
+                                  artifact-sha256)))
+                ;; Task = (system-id release source-spec expected old-tree-sha256)
+                (push (list system-id release source-spec expected tree-sha256) tasks))))))
+
+    (let ((fetched-results '())
+          (updates '()))
+      (labels ((fetch-task (task)
+                 (destructuring-bind (system-id release source-spec expected old-tree-sha256)
+                     task
+                   (multiple-value-bind (path fetched-tree-sha256)
+                       (fetch-artifact source-spec expected)
+                     (values system-id path release old-tree-sha256 fetched-tree-sha256)))))
+        (if (or (<= jobs 1) (<= (length tasks) 1))
+            ;; Sequential.
+            (dolist (task tasks)
+              (multiple-value-bind (system-id path release old-tree-sha256 fetched-tree-sha256)
+                  (fetch-task task)
+                (push (cons system-id path) fetched-results)
+                (when (and fetched-tree-sha256 (null old-tree-sha256))
+                  (push (cons release fetched-tree-sha256) updates))))
+            ;; Parallel.
+            (let ((queue tasks)
+                  (queue-mutex (sb-thread:make-mutex :name "clpm.fetch.queue"))
+                  (result-mutex (sb-thread:make-mutex :name "clpm.fetch.results"))
+                  (err nil))
+              (labels ((pop-task ()
+                         (sb-thread:with-mutex (queue-mutex)
+                           (when (and (null err) queue)
+                             (pop queue))))
+                       (record-error (c)
+                         (sb-thread:with-mutex (queue-mutex)
+                           (unless err
+                             (setf err c)))))
+                (let ((threads
+                        (loop repeat jobs
+                              collect
+                              (sb-thread:make-thread
+                               (lambda ()
+                                 (loop for task = (pop-task) while task do
+                                   (handler-case
+                                       (multiple-value-bind (system-id path release old-tree-sha256 fetched-tree-sha256)
+                                           (fetch-task task)
+                                         (sb-thread:with-mutex (result-mutex)
+                                           (push (cons system-id path) fetched-results)
+                                           (when (and fetched-tree-sha256 (null old-tree-sha256))
+                                             (push (cons release fetched-tree-sha256) updates))))
+                                     (error (c)
+                                       (record-error c)
+                                       (return)))))
+                               :name "clpm.fetch.worker"))))
+                  (dolist (th threads)
+                    (sb-thread:join-thread th))
+                  (when err
+                    (error err))))))
+
+      ;; Apply tree-sha256 backfills to the lockfile struct.
+      (dolist (pair updates)
+        (setf (clpm.project:locked-release-tree-sha256 (car pair)) (cdr pair)))
+
+      ;; Persist lockfile (may include tree hash backfills).
+      (when lockfile-path
+        (let* ((lockfile-path (uiop:ensure-pathname lockfile-path
+                                                    :want-file t
+                                                    :want-existing nil))
+               (tmp-path (merge-pathnames "clpm.lock.tmp"
+                                          (uiop:pathname-directory-pathname lockfile-path))))
+          (clpm.project:write-lock-file lockfile tmp-path)
+          (rename-file tmp-path lockfile-path)))
+
+      ;; Deterministic result ordering.
+      (sort (append existing-results fetched-results) #'string< :key #'car)))))
 
 (defun locked-source-to-spec (locked-source)
   "Convert a locked-source struct to a source specification plist."
