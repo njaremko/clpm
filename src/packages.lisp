@@ -42,6 +42,11 @@
            #:bytes-to-hex
            #:hex-to-bytes))
 
+(defpackage #:clpm.crypto.sha512
+  (:use #:cl)
+  (:export #:sha512
+           #:sha512-file))
+
 (defpackage #:clpm.crypto.ed25519
   (:use #:cl)
   (:export #:verify-signature

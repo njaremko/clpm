@@ -22,6 +22,7 @@
       :serial t
       :components
       ((:file "sha256")
+       (:file "sha512")
        (:file "ed25519")))
      (:file "platform")
      (:file "store")
