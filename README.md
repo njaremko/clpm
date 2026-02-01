@@ -29,8 +29,9 @@ curl -fsSL https://github.com/clpm/clpm/releases/download/v0.1.0/clpm-bootstrap.
 ## Quick Start
 
 ```bash
-# Initialize a new project
-clpm init myproject
+# Create a new project
+clpm new myproject --bin
+cd myproject
 
 # Edit clpm.project to add dependencies
 cat > clpm.project << 'EOF'
@@ -89,6 +90,7 @@ The `clpm.project` file is a data-only S-expression:
 
 | Command | Description |
 |---------|-------------|
+| `clpm new <name> --bin\|--lib [--dir <path>]` | Create a new project scaffold |
 | `clpm init [name]` | Initialize new project |
 | `clpm resolve` | Resolve dependencies and write lockfile |
 | `clpm fetch` | Download dependencies |

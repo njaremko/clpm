@@ -23,6 +23,7 @@ clpm ~A - Common Lisp Package Manager
 Usage: clpm [options] <command> [args]
 
 Commands:
+  new <name> ...   Create a new project
   init [name]      Initialize new project
   registry ...     Manage registries
   resolve          Resolve dependencies and write lockfile
@@ -43,6 +44,7 @@ Options:
   --version        Show version
 
 Examples:
+  clpm new myproject --bin
   clpm init myproject
   clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:example-key-id
   clpm install
@@ -129,6 +131,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
             (:init
              (clpm.commands:cmd-init
               :name (first command-args)))
+            (:new
+             (apply #'clpm.commands:cmd-new command-args))
             (:registry
              (apply #'clpm.commands:cmd-registry command-args))
             (:resolve

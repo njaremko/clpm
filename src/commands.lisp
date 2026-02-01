@@ -54,6 +54,123 @@
         (log-info "Detected systems: ~{~A~^, ~}" systems)))
     0))
 
+;;; new command
+
+(defun cmd-new (&rest args)
+  "Create a new project scaffold."
+  (labels ((write-text (path text)
+             (ensure-directories-exist path)
+             (with-open-file (s path :direction :output
+                                     :if-exists :supersede
+                                     :external-format :utf-8)
+               (write-string text s)))
+           (usage-error (fmt &rest fmt-args)
+             (apply #'log-error fmt fmt-args)
+             (log-error "Usage: clpm new <name> --bin|--lib [--dir <path>]")
+             (return-from cmd-new 1)))
+    (let ((name (first args))
+          (kind nil)
+          (dir nil))
+      (unless (and name (plusp (length name)) (not (char= (char name 0) #\-)))
+        (usage-error "Missing project name"))
+      ;; Parse flags
+      (let ((i 1))
+        (loop while (< i (length args)) do
+          (let ((arg (nth i args)))
+            (cond
+              ((string= arg "--bin")
+               (when kind
+                 (usage-error "Only one of --bin or --lib may be specified"))
+               (setf kind :bin))
+              ((string= arg "--lib")
+               (when kind
+                 (usage-error "Only one of --bin or --lib may be specified"))
+               (setf kind :lib))
+              ((string= arg "--dir")
+               (incf i)
+               (when (>= i (length args))
+                 (usage-error "Missing value for --dir"))
+               (setf dir (nth i args)))
+              (t
+               (usage-error "Unknown option: ~A" arg))))
+          (incf i)))
+      (unless kind
+        (usage-error "Missing project kind: specify --bin or --lib"))
+
+      (let* ((base (if dir
+                       (uiop:ensure-directory-pathname
+                        (uiop:ensure-pathname (clpm.platform:expand-path dir)
+                                              :defaults (uiop:getcwd)
+                                              :want-existing nil))
+                       (uiop:getcwd)))
+             (project-root (merge-pathnames (format nil "~A/" name) base))
+             (src-dir (merge-pathnames "src/" project-root))
+             (test-dir (merge-pathnames "test/" project-root))
+             (asd-path (merge-pathnames (format nil "~A.asd" name) project-root))
+             (src-path (merge-pathnames (format nil "src/~A.lisp" name) project-root))
+             (test-path (merge-pathnames (format nil "test/~A-test.lisp" name) project-root))
+             (manifest-path (merge-pathnames "clpm.project" project-root)))
+        (when (uiop:directory-exists-p project-root)
+          (log-error "Destination already exists: ~A" (namestring project-root))
+          (return-from cmd-new 1))
+        (ensure-directories-exist src-dir)
+        (ensure-directories-exist test-dir)
+
+        ;; clpm.project
+        (let ((project (clpm.project:make-project
+                        :name name
+                        :version "0.1.0"
+                        :systems (list name)
+                        :scripts nil)))
+          (clpm.project:write-project-file project manifest-path))
+
+        ;; ASDF system + test system.
+        (write-text
+         asd-path
+         (with-output-to-string (s)
+           (format s ";;;; ~A.asd~%~%" name)
+           (format s "(asdf:defsystem ~S~%  :version ~S~%  :serial t~%  :pathname ~S~%  :components ((:file ~S))~%  :in-order-to ((asdf:test-op (asdf:test-op ~S))))~%~%"
+                   name "0.1.0" "src" name (format nil "~A/test" name))
+           (format s "(asdf:defsystem ~S~%  :depends-on (~S)~%  :serial t~%  :pathname ~S~%  :components ((:file ~S))~%  :perform (asdf:test-op (op c)~%             (declare (ignore op c))~%             (uiop:symbol-call :~A-test :run)))~%"
+                   (format nil "~A/test" name)
+                   name
+                   "test"
+                   (format nil "~A-test" name)
+                   name)))
+
+        ;; src/<name>.lisp
+        (write-text
+         src-path
+         (with-output-to-string (s)
+           (format s ";;;; ~A.lisp~%~%" name)
+           (format s "(defpackage #:~A~%  (:use #:cl)~%  (:export #:~A))~%~%"
+                   name (if (eq kind :bin) "main" "hello"))
+           (format s "(in-package #:~A)~%~%" name)
+           (ecase kind
+             (:bin
+              (format s "(defun main (&optional (args nil))~%  (declare (ignore args))~%  (format t \"Hello from ~A!~%\")~%  0)~%"
+                      name))
+             (:lib
+              (format s "(defun hello ()~%  :ok)~%")))))
+
+        ;; test/<name>-test.lisp
+        (write-text
+         test-path
+         (with-output-to-string (s)
+           (format s ";;;; ~A-test.lisp~%~%" name)
+           (format s "(defpackage #:~A-test~%  (:use #:cl)~%  (:export #:run))~%~%"
+                   name)
+           (format s "(in-package #:~A-test)~%~%" name)
+           (format s "(defun run ()~%  (format t \"Running tests for ~A...~%\")~%  (assert ~A)~%  (format t \"All tests passed.~%\"))~%"
+                   name
+                   (if (eq kind :bin)
+                       (format nil "(eql 0 (uiop:symbol-call :~A :main))" name)
+                       (format nil "(eql :ok (uiop:symbol-call :~A :hello))" name)))))
+
+        (log-info "Created ~A project: ~A" (string-downcase (symbol-name kind))
+                  (namestring project-root))
+        0))))
+
 ;;; resolve command
 
 (defun cmd-resolve ()

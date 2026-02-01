@@ -283,6 +283,7 @@
            #:*insecure*
            #:*jobs*
            #:cmd-init
+           #:cmd-new
            #:cmd-resolve
            #:cmd-fetch
            #:cmd-build
