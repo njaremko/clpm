@@ -34,7 +34,8 @@ Commands:
   install          Resolve, fetch, and build (default)
   update [sys...]  Update dependencies
   repl             Start SBCL with project loaded
-  run <script>     Run a project script
+  run              Run the project entrypoint
+  exec -- <cmd...> Run a command in the project env
   gc               Garbage collect store
 
 Options:
@@ -157,6 +158,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
               :load-system (first command-args)))
             (:run
              (apply #'clpm.commands:cmd-run command-args))
+            (:exec
+             (apply #'clpm.commands:cmd-exec command-args))
             (:gc
              (clpm.commands:cmd-gc
               :dry-run (member "--dry-run" command-args

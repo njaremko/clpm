@@ -55,6 +55,7 @@
                    :name "roundtrip"
                    :version "0.1.0"
                    :systems '("roundtrip")
+                   :run '(:system "roundtrip" :function "roundtrip::main")
                    :depends (list dep1 dep2)
                    :dev-depends (list dev1)
                    :test-depends (list test1)

@@ -121,6 +121,9 @@
                         :name name
                         :version "0.1.0"
                         :systems (list name)
+                        :run (when (eq kind :bin)
+                               (list :system name
+                                     :function (format nil "~A::main" name)))
                         :scripts nil)))
           (clpm.project:write-project-file project manifest-path))
 
@@ -659,11 +662,33 @@ Returns (values system-id constraint-form-or-nil)."
         (declare (ignore output error-output))
         exit-code))))
 
-;;; run command
+;;; run/exec commands
 
-(defun cmd-run (script-name &rest args)
-  "Run a script defined in the project."
-  (declare (ignore args))
+(defun ensure-project-activated (project-root)
+  "Ensure PROJECT-ROOT has an activation config; returns (values config-path exit-code)."
+  (let ((config-path (merge-pathnames ".clpm/asdf-config.lisp" project-root)))
+    (unless (uiop:file-exists-p config-path)
+      (log-info "Project not activated; running 'clpm install'...")
+      (let ((rc (uiop:with-current-directory (project-root)
+                  (cmd-install))))
+        (unless (zerop rc)
+          (return-from ensure-project-activated (values nil rc)))))
+    (if (uiop:file-exists-p config-path)
+        (values config-path 0)
+        (values nil 1))))
+
+(defun parse-function-spec (spec)
+  "Parse \"<package>::<fn>\" and return (values package-name function-name).
+Returns NIL values on parse failure."
+  (let ((pos (search "::" spec)))
+    (when pos
+      (let ((pkg (subseq spec 0 pos))
+            (fn (subseq spec (+ pos 2))))
+        (when (and (plusp (length pkg)) (plusp (length fn)))
+          (values pkg fn))))))
+
+(defun cmd-run (&rest args)
+  "Run the project entrypoint defined in clpm.project :run."
   (multiple-value-bind (project-root manifest-path lock-path)
       (clpm.project:find-project-root)
     (declare (ignore lock-path))
@@ -671,32 +696,122 @@ Returns (values system-id constraint-form-or-nil)."
       (log-error "No clpm.project found")
       (return-from cmd-run 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
-           (scripts (clpm.project:project-scripts project))
-           (script (assoc script-name scripts :test #'string=)))
-      (unless script
-        (log-error "Unknown script: ~A" script-name)
-        (log-error "Available scripts: ~{~A~^, ~}"
-                   (mapcar #'car scripts))
+           (run (clpm.project:project-run project)))
+      (unless run
+        (log-error "No :run entry configured in clpm.project")
         (return-from cmd-run 1))
-      ;; Execute script
-      (let ((script-spec (cdr script)))
-        (cond
-          ((stringp script-spec)
-           ;; Shell command
-           (multiple-value-bind (output error-output exit-code)
-               (clpm.platform:run-program
-                (list "sh" "-c" script-spec)
-                :directory project-root
-                :output :interactive
-                :error-output :interactive)
-             (declare (ignore output error-output))
-             exit-code))
-          ((and (consp script-spec) (eq (car script-spec) :lisp))
-           ;; Lisp expression - run in REPL
-           (cmd-repl :load-system nil))
-          (t
-           (log-error "Invalid script specification")
-           1))))))
+      (let ((system (getf run :system))
+            (fn-spec (getf run :function)))
+        (unless (and (stringp system) (stringp fn-spec))
+          (log-error "Invalid :run entry: expected (:system <string> :function <string>)")
+          (return-from cmd-run 1))
+        (multiple-value-bind (config-path rc)
+            (ensure-project-activated project-root)
+          (unless (zerop rc)
+            (return-from cmd-run rc))
+
+          (multiple-value-bind (pkg fn)
+              (parse-function-spec fn-spec)
+            (unless (and pkg fn)
+              (log-error "Invalid :run :function: expected <package>::<fn>, got ~S" fn-spec)
+              (return-from cmd-run 1))
+
+            (let* ((run-args (if (and args (string= (first args) "--"))
+                                 (rest args)
+                                 args))
+                   (pkg-key (intern (string-upcase pkg) :keyword))
+                   (fn-key (intern (string-upcase fn) :keyword))
+                   (args-var (intern "CLPM-RUN-ARGS" "CL-USER"))
+                   (result-var (intern "CLPM-RUN-RESULT" "CL-USER"))
+                   (call-form
+                     `(let ((,args-var ',run-args))
+                        (let ((,result-var (uiop:symbol-call ,pkg-key ,fn-key ,args-var)))
+                          (sb-ext:exit :code (if (integerp ,result-var) ,result-var 0)))))
+                   (call-form-str
+                     (with-standard-io-syntax
+                       (let ((*package* (find-package "CL-USER")))
+                         (prin1-to-string call-form))))
+                   (sbcl-args (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
+                                    "--load" (namestring config-path)
+                                    "--eval" (format nil "(asdf:load-system ~S)" system)
+                                    "--eval" call-form-str)))
+              (log-info "Running ~A (~A)..." system fn-spec)
+              (multiple-value-bind (output error-output exit-code)
+                  (clpm.platform:run-program sbcl-args
+                                             :directory project-root
+                                             :output :interactive
+                                             :error-output :interactive
+                                             :timeout 600000)
+                (declare (ignore output error-output))
+                exit-code))))))))
+
+(defun sbcl-loads-config-p (cmd config-path)
+  (let ((abs (namestring config-path))
+        (rel ".clpm/asdf-config.lisp"))
+    (loop for tail on cmd
+          for a = (first tail)
+          for b = (second tail)
+          when (and b
+                    (string= a "--load")
+                    (or (string= b abs)
+                        (string= b rel)))
+            do (return t)
+          finally (return nil))))
+
+(defun cmd-exec (&rest args)
+  "Run an external command in the project's activated environment.
+
+Usage: clpm exec -- <cmd...>"
+  (multiple-value-bind (project-root manifest-path lock-path)
+      (clpm.project:find-project-root)
+    (declare (ignore lock-path))
+    (unless manifest-path
+      (log-error "No clpm.project found")
+      (return-from cmd-exec 1))
+    (let ((cmd args))
+      (when (and cmd (string= (first cmd) "--"))
+        (setf cmd (rest cmd)))
+      (unless cmd
+        (log-error "Usage: clpm exec -- <cmd...>")
+        (return-from cmd-exec 1))
+
+      (multiple-value-bind (config-path rc)
+          (ensure-project-activated project-root)
+        (unless (zerop rc)
+          (return-from cmd-exec rc))
+
+        (let ((final-cmd
+                (if (and cmd (string= (first cmd) "sbcl"))
+                    (if (sbcl-loads-config-p cmd config-path)
+                        cmd
+                        (let* ((prog (first cmd))
+                               (rest (rest cmd))
+                               (insert-at (or (position-if
+                                               (lambda (a)
+                                                 (member a '("--eval" "--load" "--script")
+                                                         :test #'string=))
+                                               rest)
+                                              (length rest))))
+                          (append (list prog)
+                                  (subseq rest 0 insert-at)
+                                  (list "--load" (namestring config-path))
+                                  (subseq rest insert-at))))
+                    cmd)))
+          (let* ((env (clpm.platform:which "env"))
+                 (cmd-with-env
+                   (if env
+                       (cons env
+                             (cons (format nil "CLPM_PROJECT_ROOT=~A"
+                                           (namestring project-root))
+                                   final-cmd))
+                       final-cmd)))
+            (multiple-value-bind (output error-output exit-code)
+                (clpm.platform:run-program cmd-with-env
+                                           :directory project-root
+                                           :output :interactive
+                                           :error-output :interactive)
+              (declare (ignore output error-output))
+              exit-code)))))))
 
 ;;; gc command
 
