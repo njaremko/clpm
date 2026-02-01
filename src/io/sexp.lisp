@@ -103,6 +103,8 @@ When PRETTY is true, format with indentation for readability."
              (cond
                ((null f)
                 (write-string "nil" stream))
+               ((eq f t)
+                (write-string "t" stream))
                ((keywordp f)
                 (write-char #\: stream)
                 (write-string (string-downcase (symbol-name f)) stream))
@@ -112,26 +114,6 @@ When PRETTY is true, format with indentation for readability."
                 (format stream "~D" f))
                ((floatp f)
                 (format stream "~F" f))
-               ((and (consp f)
-                     (keywordp (car f))
-                     (consp (cdr f))
-                     (null (cddr f)))
-                ;; Property-value pair on one line
-                (write-form (car f) level)
-                (write-char #\Space stream)
-                (if (and (consp (cadr f))
-                         (not (and (consp (caadr f))
-                                   (keywordp (caadr f)))))
-                    (progn
-                      (write-char #\( stream)
-                      (let ((first t))
-                        (dolist (item (cadr f))
-                          (if first
-                              (setf first nil)
-                              (write-char #\Space stream))
-                          (write-form item level)))
-                      (write-char #\) stream))
-                    (write-form (cadr f) level)))
                ((consp f)
                 ;; General list
                 (write-char #\( stream)
