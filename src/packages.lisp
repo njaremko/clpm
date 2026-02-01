@@ -37,6 +37,7 @@
 (defpackage #:clpm.crypto.sha256
   (:use #:cl)
   (:export #:sha256
+           #:sha256-stream
            #:sha256-file
            #:sha256-tree
            #:bytes-to-hex

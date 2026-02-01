@@ -214,16 +214,23 @@ Returns a 32-byte array."
     (sha256-update ctx octets)
     (sha256-final ctx)))
 
+(defun sha256-stream (stream &key (buffer-size 8192))
+  "Compute SHA-256 hash of STREAM.
+
+STREAM must be a binary input stream of octets.
+Returns a 32-byte array."
+  (let ((ctx (make-sha256-ctx))
+        (buffer (make-array buffer-size :element-type '(unsigned-byte 8))))
+    (loop for n = (read-sequence buffer stream)
+          while (> n 0)
+          do (sha256-update ctx (subseq buffer 0 n)))
+    (sha256-final ctx)))
+
 (defun sha256-file (path)
   "Compute SHA-256 hash of file at PATH.
 Returns a 32-byte array."
-  (let ((ctx (make-sha256-ctx))
-        (buffer (make-array 8192 :element-type '(unsigned-byte 8))))
-    (with-open-file (stream path :element-type '(unsigned-byte 8))
-      (loop for n = (read-sequence buffer stream)
-            while (> n 0)
-            do (sha256-update ctx (subseq buffer 0 n))))
-    (sha256-final ctx)))
+  (with-open-file (stream path :element-type '(unsigned-byte 8))
+    (sha256-stream stream)))
 
 (defun sha256-tree (directory &key (exclude '(".git" ".hg" ".svn" ".clpm")))
   "Compute deterministic SHA-256 hash of a directory tree.

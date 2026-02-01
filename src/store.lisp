@@ -45,31 +45,41 @@
 DATA is a byte vector or a path to a file.
 Returns path where artifact was stored.
 Signals error if hash doesn't match."
-  (let* ((source-bytes (etypecase data
-                         ((array (unsigned-byte 8) (*)) data)
-                         ((or pathname string)
-                          (with-open-file (s data :element-type '(unsigned-byte 8))
-                            (let ((bytes (make-array (file-length s)
-                                                     :element-type '(unsigned-byte 8))))
-                              (read-sequence bytes s)
-                              bytes)))))
-         (actual-hash (clpm.crypto.sha256:bytes-to-hex
-                       (clpm.crypto.sha256:sha256 source-bytes)))
-         (dest-path (artifact-path actual-hash)))
-    ;; Verify hash
-    (unless (string-equal actual-hash expected-sha256)
-      (error 'clpm.errors:clpm-hash-mismatch-error
-             :expected expected-sha256
-             :actual actual-hash
-             :artifact "artifact"))
-    ;; Store if not already present
-    (unless (uiop:file-exists-p dest-path)
-      (ensure-directories-exist dest-path)
-      (with-open-file (s dest-path :direction :output
-                                   :element-type '(unsigned-byte 8)
-                                   :if-exists :supersede)
-        (write-sequence source-bytes s)))
-    dest-path))
+  (etypecase data
+    ((array (unsigned-byte 8) (*))
+     (let* ((source-bytes data)
+            (actual-hash (clpm.crypto.sha256:bytes-to-hex
+                          (clpm.crypto.sha256:sha256 source-bytes)))
+            (dest-path (artifact-path actual-hash)))
+       ;; Verify hash
+       (unless (string-equal actual-hash expected-sha256)
+         (error 'clpm.errors:clpm-hash-mismatch-error
+                :expected expected-sha256
+                :actual actual-hash
+                :artifact "artifact"))
+       ;; Store if not already present
+       (unless (uiop:file-exists-p dest-path)
+         (ensure-directories-exist dest-path)
+         (with-open-file (s dest-path :direction :output
+                                      :element-type '(unsigned-byte 8)
+                                      :if-exists :supersede)
+           (write-sequence source-bytes s)))
+       dest-path))
+    ((or pathname string)
+     (let* ((actual-hash (clpm.crypto.sha256:bytes-to-hex
+                          (clpm.crypto.sha256:sha256-file data)))
+            (dest-path (artifact-path actual-hash)))
+       ;; Verify hash
+       (unless (string-equal actual-hash expected-sha256)
+         (error 'clpm.errors:clpm-hash-mismatch-error
+                :expected expected-sha256
+                :actual actual-hash
+                :artifact "artifact"))
+       ;; Store if not already present (streaming copy).
+       (unless (uiop:file-exists-p dest-path)
+         (ensure-directories-exist dest-path)
+         (uiop:copy-file data dest-path))
+       dest-path))))
 
 (defun store-source (source-dir expected-tree-sha256)
   "Store source directory in content-addressed store.
