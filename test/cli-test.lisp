@@ -34,6 +34,12 @@
 (assert-eql 1 (clpm:run-cli '("unknown-command")))
 (format t "  Unknown command PASSED~%")
 
+(format t "Testing run-program :timeout keyword...~%")
+(multiple-value-bind (output error-output exit-code)
+    (clpm.platform:run-program (list "sh" "-c" "exit 0") :timeout 1)
+  (declare (ignore output error-output))
+  (assert-eql 0 exit-code))
+(format t "  run-program :timeout PASSED~%")
+
 (format t "~%CLI tests PASSED!~%")
 (sb-ext:exit :code 0)
-

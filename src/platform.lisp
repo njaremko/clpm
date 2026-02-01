@@ -157,13 +157,15 @@
 ;;; Process execution
 
 (defun run-program (command &key (output :string) (error-output :output)
-                              directory input)
+                              directory input timeout
+                              &allow-other-keys)
   "Run an external program and return (values output error-output exit-code).
 COMMAND is a list of strings (program and arguments).
 OUTPUT can be :string, :lines, nil, or a stream.
 ERROR-OUTPUT can be :string, :output (merge with output), nil, or a stream.
 DIRECTORY is the working directory.
-INPUT is a string or stream to pass to stdin."
+INPUT is a string or stream to pass to stdin.
+TIMEOUT, when non-nil, is a number of seconds to allow the process to run."
   (let ((result-output nil)
         (result-error nil))
     (multiple-value-bind (output-val error-val exit-code)
@@ -178,6 +180,7 @@ INPUT is a string or stream to pass to stdin."
                                           (t error-output))
                           :directory directory
                           :input input
+                          :timeout timeout
                           :ignore-error-status t)
       (setf result-output (if (eq output :lines)
                               (uiop:split-string output-val :separator '(#\Newline))
