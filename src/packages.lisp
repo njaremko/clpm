@@ -240,6 +240,7 @@
   (:use #:cl #:clpm.platform #:clpm.store #:clpm.crypto.sha256 #:clpm.errors)
   (:export #:fetch-artifact
            #:fetch-git
+           #:resolve-git-ref
            #:extract-archive
            #:verify-and-store
            #:fetch-lockfile-deps))

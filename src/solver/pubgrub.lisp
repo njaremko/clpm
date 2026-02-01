@@ -142,7 +142,7 @@ For pinned/local sources, registry is NIL."
   "Find release candidates for SYSTEM-ID satisfying CONSTRAINT."
   (let ((pinned-source (constraint-pinned-source constraint)))
     (when pinned-source
-      (ecase (car pinned-source)
+      (case (car pinned-source)
         (:path
          (let* ((raw (or (and (<= 2 (length pinned-source))
                               (stringp (second pinned-source))
@@ -173,7 +173,35 @@ For pinned/local sources, registry is NIL."
                                    :artifact-sha256 nil
                                    :systems (list system-id)
                                    :system-deps nil)))))
-             (return-from find-candidates (list (cons release-ref meta)))))))))
+             (return-from find-candidates (list (cons release-ref meta))))))
+        (:git
+         (let* ((url (getf (cdr pinned-source) :url))
+                (commit (getf (cdr pinned-source) :commit))
+                (ref (or commit (getf (cdr pinned-source) :ref))))
+           (unless url
+             (signal-conflict state system-id constraint
+                              "Missing :url for :git constraint"))
+           (unless ref
+             (signal-conflict state system-id constraint
+                              "Missing :ref for :git constraint"))
+           (let* ((commit (or commit (clpm.fetch:resolve-git-ref url ref)))
+                  (short (subseq commit 0 (min 12 (length commit))))
+                  (release-ref (format nil "git:~A@~A" system-id commit))
+                  (meta (or (gethash release-ref (solver-state-extra-release-metadata state))
+                            (setf (gethash release-ref (solver-state-extra-release-metadata state))
+                                  (clpm.registry::make-release-metadata
+                                   :name system-id
+                                   :version (format nil "0.0.0+git.~A" short)
+                                   :source (list :git
+                                                 :url url
+                                                 :commit commit)
+                                   :artifact-sha256 nil
+                                   :systems (list system-id)
+                                   :system-deps nil)))))
+             (return-from find-candidates (list (cons release-ref meta))))))
+        (t
+         (signal-conflict state system-id constraint
+                          (format nil "Unknown pinned source: ~S" pinned-source))))))
 
   (let ((index (solver-state-index state))
         (candidates '()))

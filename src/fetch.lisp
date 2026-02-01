@@ -98,6 +98,64 @@
                  :url url
                  :status exit-code))))))
 
+(defun %hex40-p (s)
+  "Return true when S is a 40-hex commit string."
+  (and (stringp s)
+       (= (length s) 40)
+       (every (lambda (c) (find c "0123456789abcdef" :test #'char-equal)) s)))
+
+(defun resolve-git-ref (url ref)
+  "Resolve REF in URL to a full 40-hex commit SHA."
+  ;; Fast path: already a commit.
+  (when (%hex40-p ref)
+    (return-from resolve-git-ref ref))
+
+  (let ((git (clpm.platform:find-git)))
+    (unless git
+      (error 'clpm.errors:clpm-fetch-error
+             :message "git not found in PATH"
+             :url url))
+
+    (labels ((ls-remote (&optional (use-refs t))
+               (let ((args (if use-refs
+                               (list git "ls-remote" "--refs")
+                               (list git "ls-remote"))))
+                 (multiple-value-bind (output error-output exit-code)
+                     (clpm.platform:run-program
+                      (append args (list url ref (format nil "~A^{}" ref)))
+                      :error-output :string)
+                   (unless (zerop exit-code)
+                     (error 'clpm.errors:clpm-fetch-error
+                            :message (or error-output "git ls-remote failed")
+                            :url url
+                            :status exit-code))
+                   (let* ((lines (uiop:split-string output :separator '(#\Newline #\Return)))
+                          (lines (remove-if (lambda (l) (zerop (length l))) lines)))
+                     (remove nil
+                             (mapcar (lambda (line)
+                                       (let ((tab (position #\Tab line)))
+                                         (when tab
+                                           (cons (subseq line 0 tab)
+                                                 (subseq line (1+ tab))))))
+                                     lines)))))))
+      ;; Plan algorithm: ls-remote --refs URL REF REF^{}.
+      (let* ((pairs (ls-remote t))
+             ;; Compatibility: `--refs` doesn't include HEAD; allow HEAD for local testing.
+             (pairs (if (and (null pairs) (string= ref "HEAD"))
+                        (ls-remote nil)
+                        pairs)))
+        (when (null pairs)
+          (error 'clpm.errors:clpm-fetch-error
+                 :message "git ref not found"
+                 :url url))
+        (let* ((tag-suffix (format nil "refs/tags/~A^{}" ref))
+               (tag (find-if (lambda (p) (and (cdr p)
+                                              (ends-with-p (cdr p) tag-suffix)))
+                             pairs))
+               (sha (string-trim '(#\Space #\Newline #\Return)
+                                 (car (or tag (first pairs))))))
+          sha)))))
+
 ;;; Archive extraction
 
 (defun extract-archive (archive-path dest-dir)
