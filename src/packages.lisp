@@ -110,6 +110,7 @@
            #:project-build-options
            #:project-scripts
            #:dependency
+           #:make-dependency
            #:dependency-system
            #:dependency-constraint
            #:dependency-source
@@ -284,6 +285,8 @@
            #:*jobs*
            #:cmd-init
            #:cmd-new
+           #:cmd-add
+           #:cmd-remove
            #:cmd-resolve
            #:cmd-fetch
            #:cmd-build

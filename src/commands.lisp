@@ -171,6 +171,265 @@
                   (namestring project-root))
         0))))
 
+;;; add/remove commands
+
+(defun parse-dep-spec (spec)
+  "Parse a dependency spec like:
+  <system>
+  <system>@^<semver>
+  <system>@=<exact>
+Returns (values system-id constraint-form-or-nil)."
+  (let ((at (position #\@ spec)))
+    (if (null at)
+        (values spec nil)
+        (let* ((system (subseq spec 0 at))
+               (rest (subseq spec (1+ at))))
+          (cond
+            ((and (plusp (length rest)) (char= (char rest 0) #\^))
+             (values system (list :semver rest)))
+            ((and (plusp (length rest)) (char= (char rest 0) #\=))
+             (values system (list :exact (subseq rest 1))))
+            (t
+             (values system :invalid)))))))
+
+(defun highest-system-version (registries system-id)
+  "Return the highest version string available for SYSTEM-ID across REGISTRIES."
+  (let* ((index (clpm.registry:build-registry-index registries))
+         (entries (clpm.registry:index-lookup-system index system-id))
+         (best nil))
+    (dolist (entry entries)
+      (let ((release-ref (cdr entry)))
+        (when (stringp release-ref)
+          (let ((at (position #\@ release-ref)))
+            (when at
+              (let ((ver (subseq release-ref (1+ at))))
+                (when (or (null best)
+                          (clpm.solver.version:version> ver best))
+                  (setf best ver))))))))
+    best))
+
+(defun sorted-deps (deps)
+  (sort (copy-list deps) #'string< :key #'clpm.project:dependency-system))
+
+(defun cmd-add (&rest args)
+  "Add a dependency to clpm.project and update clpm.lock."
+  (multiple-value-bind (project-root manifest-path lock-path)
+      (clpm.project:find-project-root)
+    (declare (ignore lock-path))
+    (unless manifest-path
+      (log-error "No clpm.project found")
+      (return-from cmd-add 1))
+
+    (let ((spec nil)
+          (dev-p nil)
+          (test-p nil)
+          (install-p nil)
+          (path nil)
+          (git-url nil)
+          (git-ref nil))
+      ;; Parse args
+      (let ((i 0))
+        (loop while (< i (length args)) do
+          (let ((arg (nth i args)))
+            (cond
+              ((string= arg "--dev")
+               (setf dev-p t))
+              ((string= arg "--test")
+               (setf test-p t))
+              ((string= arg "--install")
+               (setf install-p t))
+              ((string= arg "--path")
+               (incf i)
+               (when (>= i (length args))
+                 (log-error "Missing value for --path")
+                 (return-from cmd-add 1))
+               (when path
+                 (log-error "Duplicate option: --path")
+                 (return-from cmd-add 1))
+               (setf path (nth i args)))
+              ((string= arg "--git")
+               (incf i)
+               (when (>= i (length args))
+                 (log-error "Missing value for --git")
+                 (return-from cmd-add 1))
+               (when git-url
+                 (log-error "Duplicate option: --git")
+                 (return-from cmd-add 1))
+               (setf git-url (nth i args)))
+              ((string= arg "--ref")
+               (incf i)
+               (when (>= i (length args))
+                 (log-error "Missing value for --ref")
+                 (return-from cmd-add 1))
+               (when git-ref
+                 (log-error "Duplicate option: --ref")
+                 (return-from cmd-add 1))
+               (setf git-ref (nth i args)))
+              ((and (plusp (length arg)) (char= (char arg 0) #\-))
+               (log-error "Unknown option: ~A" arg)
+               (return-from cmd-add 1))
+              ((null spec)
+               (setf spec arg))
+              (t
+               (log-error "Unexpected argument: ~A" arg)
+               (return-from cmd-add 1))))
+          (incf i)))
+
+      (unless spec
+        (log-error "Usage: clpm add <system>[@^<semver>|@=<exact>] [--dev|--test] [--path <path>|--git <url> --ref <ref>] [--install]")
+        (return-from cmd-add 1))
+
+      (when (and dev-p test-p)
+        (log-error "Only one of --dev or --test may be specified")
+        (return-from cmd-add 1))
+
+      (when (and path git-url)
+        (log-error "Only one of --path or --git may be specified")
+        (return-from cmd-add 1))
+
+      (when (and git-url (null git-ref))
+        (log-error "--git requires --ref")
+        (return-from cmd-add 1))
+
+      (when (and git-ref (null git-url))
+        (log-error "--ref requires --git")
+        (return-from cmd-add 1))
+
+      (let* ((project (clpm.project:read-project-file manifest-path))
+             (registries (load-project-registries project))
+             (section (cond
+                        (dev-p :dev-depends)
+                        (test-p :test-depends)
+                        (t :depends)))
+             (system-id nil)
+             (constraint-form nil))
+        (multiple-value-bind (sys parsed-constraint)
+            (parse-dep-spec spec)
+          (setf system-id sys)
+          (when (eq parsed-constraint :invalid)
+            (log-error "Invalid dependency spec: ~A" spec)
+            (return-from cmd-add 1))
+          (when (and parsed-constraint (or path git-url))
+            (log-error "Do not combine @<constraint> with --path/--git")
+            (return-from cmd-add 1))
+          (cond
+            (path
+             (setf constraint-form (list :path path)))
+            (git-url
+              (setf constraint-form (list :git :url git-url :ref git-ref)))
+            (parsed-constraint
+             (setf constraint-form parsed-constraint))
+            (t
+             (let ((v-max (highest-system-version registries system-id)))
+               (unless v-max
+                 (log-error "No versions found for ~A in configured registries" system-id)
+                 (return-from cmd-add 1))
+               (setf constraint-form (list :semver (format nil "^~A" v-max)))))))
+
+        (labels ((deps-slot ()
+                   (ecase section
+                     (:depends (clpm.project:project-depends project))
+                     (:dev-depends (clpm.project:project-dev-depends project))
+                     (:test-depends (clpm.project:project-test-depends project))))
+                 (set-deps-slot (new)
+                   (ecase section
+                     (:depends (setf (clpm.project:project-depends project) new))
+                     (:dev-depends (setf (clpm.project:project-dev-depends project) new))
+                     (:test-depends (setf (clpm.project:project-test-depends project) new)))))
+          (let* ((deps (deps-slot))
+                 (existing (find system-id deps
+                                 :key #'clpm.project:dependency-system
+                                 :test #'string=)))
+            (if existing
+                (unless (equal (clpm.project:dependency-constraint existing) constraint-form)
+                  (setf (clpm.project:dependency-constraint existing) constraint-form))
+                (push (clpm.project:make-dependency
+                       :system system-id
+                       :constraint constraint-form)
+                      deps))
+            (set-deps-slot (sorted-deps deps))
+            (clpm.project:write-project-file project manifest-path)))
+
+        (log-info "Added ~A to ~A" system-id
+                  (ecase section
+                    (:depends "depends")
+                    (:dev-depends "dev-depends")
+                    (:test-depends "test-depends")))
+
+        (uiop:with-current-directory (project-root)
+          (if install-p
+              (cmd-install)
+              (cmd-resolve)))))))
+
+(defun cmd-remove (&rest args)
+  "Remove a dependency from clpm.project and update clpm.lock."
+  (multiple-value-bind (project-root manifest-path lock-path)
+      (clpm.project:find-project-root)
+    (declare (ignore lock-path))
+    (unless manifest-path
+      (log-error "No clpm.project found")
+      (return-from cmd-remove 1))
+
+    (let ((system-id nil)
+          (dev-p nil)
+          (test-p nil)
+          (install-p nil))
+      (dolist (arg args)
+        (cond
+          ((string= arg "--dev") (setf dev-p t))
+          ((string= arg "--test") (setf test-p t))
+          ((string= arg "--install") (setf install-p t))
+          ((and (plusp (length arg)) (char= (char arg 0) #\-))
+           (log-error "Unknown option: ~A" arg)
+           (return-from cmd-remove 1))
+          ((null system-id) (setf system-id arg))
+          (t
+           (log-error "Unexpected argument: ~A" arg)
+           (return-from cmd-remove 1))))
+      (unless system-id
+        (log-error "Usage: clpm remove <system> [--dev|--test] [--install]")
+        (return-from cmd-remove 1))
+
+      (when (and dev-p test-p)
+        (log-error "Only one of --dev or --test may be specified")
+        (return-from cmd-remove 1))
+
+      (let ((section (cond
+                       (dev-p :dev-depends)
+                       (test-p :test-depends)
+                       (t :depends))))
+        (let ((project (clpm.project:read-project-file manifest-path)))
+          (labels ((deps-slot ()
+                     (ecase section
+                       (:depends (clpm.project:project-depends project))
+                       (:dev-depends (clpm.project:project-dev-depends project))
+                       (:test-depends (clpm.project:project-test-depends project))))
+                   (set-deps-slot (new)
+                     (ecase section
+                       (:depends (setf (clpm.project:project-depends project) new))
+                       (:dev-depends (setf (clpm.project:project-dev-depends project) new))
+                       (:test-depends (setf (clpm.project:project-test-depends project) new)))))
+            (let* ((deps (deps-slot))
+                   (new-deps (remove system-id deps
+                                     :key #'clpm.project:dependency-system
+                                     :test #'string=)))
+              (when (eql (length new-deps) (length deps))
+                (log-error "Dependency not found: ~A" system-id)
+                (return-from cmd-remove 1))
+              (set-deps-slot (sorted-deps new-deps))
+              (clpm.project:write-project-file project manifest-path))))
+
+        (log-info "Removed ~A from ~A" system-id
+                  (ecase section
+                    (:depends "depends")
+                    (:dev-depends "dev-depends")
+                    (:test-depends "test-depends")))
+
+        (uiop:with-current-directory (project-root)
+          (if install-p
+              (cmd-install)
+              (cmd-resolve)))))))
+
 ;;; resolve command
 
 (defun cmd-resolve ()
