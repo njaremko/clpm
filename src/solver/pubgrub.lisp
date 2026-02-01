@@ -45,9 +45,9 @@ Returns a resolution struct or signals clpm-resolve-error."
           (make-hash-table :test 'equal))
     ;; Add root constraints from project
     (add-root-constraints state project)
-    ;; Run solver loop
+    ;; Run solver
     (handler-case
-        (solver-loop state)
+        (solver-search state)
       (resolution-conflict (c)
         (error 'clpm.errors:clpm-resolve-error
                :message (resolution-conflict-message c)
@@ -110,33 +110,110 @@ For pinned/local sources, registry is NIL."
          :systems (list system-id)
          :chain nil))
 
-;;; Solver loop
+;;; Backtracking search solver
 
-(defun solver-loop (state)
-  "Main solver loop - unit propagation with backtracking."
-  (loop while (solver-state-pending state) do
-    (let ((system-id (pop (solver-state-pending state))))
-      ;; Skip if already decided
-      (unless (assoc system-id (solver-state-decisions state) :test #'string=)
-        ;; Get constraint for this system
-        (let ((constraint (cdr (assoc system-id (solver-state-constraints state)
-                                      :test #'string=))))
-          (unless constraint
-            (setf constraint (any-constraint)))
-          ;; Find candidates
-          (let ((candidates (find-candidates state system-id constraint)))
-            (when (null candidates)
-              (signal-conflict state system-id constraint
-                               (format nil "No candidates found for ~A" system-id)))
-            ;; Choose best candidate (prefer lockfile, then highest version)
-            (let ((chosen (choose-candidate state system-id candidates)))
-              ;; Record decision
-              (push (cons system-id chosen) (solver-state-decisions state))
-              (incf (solver-state-decision-level state))
-              (push (list (solver-state-decision-level state) system-id chosen)
-                    (solver-state-decision-stack state))
-              ;; Propagate dependencies of chosen release
-              (propagate-dependencies state system-id chosen))))))))
+(defun next-pending-system (state)
+  "Pick and remove the next pending system deterministically."
+  (let ((pending (solver-state-pending state)))
+    (when pending
+      (let ((next (reduce (lambda (a b) (if (string< a b) a b))
+                          pending)))
+        (setf (solver-state-pending state)
+              (remove next pending :test #'string= :count 1))
+        next))))
+
+(defun snapshot-state (state)
+  "Create a snapshot of STATE sufficient for backtracking."
+  (list :decisions (copy-list (solver-state-decisions state))
+        :constraints (mapcar (lambda (c) (cons (car c) (cdr c)))
+                             (solver-state-constraints state))
+        :pending (copy-list (solver-state-pending state))
+        :decision-level (solver-state-decision-level state)
+        :decision-stack (copy-list (solver-state-decision-stack state))))
+
+(defun restore-state (state snapshot)
+  "Restore STATE from SNAPSHOT."
+  (setf (solver-state-decisions state) (getf snapshot :decisions)
+        (solver-state-constraints state) (getf snapshot :constraints)
+        (solver-state-pending state) (getf snapshot :pending)
+        (solver-state-decision-level state) (getf snapshot :decision-level)
+        (solver-state-decision-stack state) (getf snapshot :decision-stack)))
+
+(defun decided-release-ref (state system-id)
+  (cdr (assoc system-id (solver-state-decisions state) :test #'string=)))
+
+(defun decided-version (state system-id)
+  (let ((release-ref (decided-release-ref state system-id)))
+    (when release-ref
+      (let ((meta-entry (lookup-release-entry state release-ref)))
+        (when meta-entry
+          (clpm.registry:release-metadata-version (cdr meta-entry)))))))
+
+(defun check-decision-satisfies-constraint (state system-id constraint)
+  "Signal conflict if SYSTEM-ID is decided to a version that violates CONSTRAINT."
+  (let ((version (decided-version state system-id)))
+    (when (and version (not (constraint-satisfies-p constraint version)))
+      (signal-conflict state system-id constraint
+                       (format nil "Conflict: selected ~A does not satisfy ~A"
+                               system-id (constraint-to-string constraint))))))
+
+(defun ordered-candidate-refs (state system-id candidates)
+  "Return candidate release refs in deterministic preference order."
+  (let ((refs (mapcar #'car candidates))
+        (preferred (when (solver-state-lockfile state)
+                     (dolist (locked (clpm.project:lockfile-resolved
+                                      (solver-state-lockfile state)))
+                       (when (string= (clpm.project:locked-system-id locked) system-id)
+                         (let* ((locked-rel (clpm.project:locked-system-release locked))
+                                (locked-name (clpm.project:locked-release-name locked-rel))
+                                (locked-version (clpm.project:locked-release-version locked-rel)))
+                           (return (format nil "~A@~A" locked-name locked-version))))))))
+    (if (and preferred (member preferred refs :test #'string=))
+        (cons preferred (remove preferred refs :test #'string= :count 1))
+        refs)))
+
+(defun decide (state system-id release-ref)
+  "Record decision that SYSTEM-ID is RELEASE-REF."
+  (push (cons system-id release-ref) (solver-state-decisions state))
+  (incf (solver-state-decision-level state))
+  (push (list (solver-state-decision-level state) system-id release-ref)
+        (solver-state-decision-stack state)))
+
+(defun solver-search (state)
+  "Depth-first backtracking search over candidate versions."
+  (let ((system-id (next-pending-system state)))
+    (cond
+      ((null system-id)
+       t)
+      ;; Already decided (can happen if re-added to pending).
+      ((assoc system-id (solver-state-decisions state) :test #'string=)
+       (solver-search state))
+      (t
+       (let ((constraint (or (cdr (assoc system-id (solver-state-constraints state)
+                                         :test #'string=))
+                             (any-constraint))))
+         (let ((candidates (find-candidates state system-id constraint)))
+           (when (null candidates)
+             (signal-conflict state system-id constraint
+                              (format nil "No candidates found for ~A" system-id)))
+           (let ((candidate-refs (ordered-candidate-refs state system-id candidates))
+                 (last-conflict nil))
+             (dolist (release-ref candidate-refs)
+               (let ((snapshot (snapshot-state state)))
+                 (handler-case
+                     (progn
+                       (decide state system-id release-ref)
+                       (propagate-dependencies state system-id release-ref)
+                       (when (solver-search state)
+                         (return-from solver-search t)))
+                   (resolution-conflict (c)
+                     (setf last-conflict c)))
+                 (restore-state state snapshot)))
+             (if last-conflict
+                 (signal-conflict state system-id constraint
+                                  (resolution-conflict-message last-conflict))
+                 (signal-conflict state system-id constraint
+                                  (format nil "No viable candidates for ~A" system-id))))))))))
 
 (defun find-candidates (state system-id constraint)
   "Find release candidates for SYSTEM-ID satisfying CONSTRAINT."
@@ -266,6 +343,15 @@ Prefers lockfile selection, then highest version."
                         (setf (cdr existing) merged))
                       (push (cons dep-system constraint)
                             (solver-state-constraints state))))
+                ;; If DEP-SYSTEM is already decided, ensure the selected version
+                ;; still satisfies the tightened constraint.
+                (let ((decided (assoc dep-system (solver-state-decisions state)
+                                      :test #'string=)))
+                  (when decided
+                    (let ((current (cdr (assoc dep-system (solver-state-constraints state)
+                                               :test #'string=))))
+                      (when current
+                        (check-decision-satisfies-constraint state dep-system current)))))
                 ;; Add to pending
                 (unless (assoc dep-system (solver-state-decisions state)
                                :test #'string=)
