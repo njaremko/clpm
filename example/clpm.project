@@ -1,0 +1,21 @@
+(:project
+  :name "example-app"
+  :version "0.1.0"
+  :systems ("example-app")
+  :depends
+    ((:dep :system "alexandria" :constraint (:semver "^1.4.0"))
+     (:dep :system "bordeaux-threads" :constraint (:semver "^0.8.0"))
+     (:dep :system "usocket" :constraint (:semver "^0.8.0")))
+  :dev-depends
+    ((:dep :system "fiveam" :constraint (:semver "^1.4.0")))
+  :test-depends
+    ((:dep :system "cl-mock" :constraint (:semver "^0.3.0")))
+  :registries
+    ((:git :url "https://github.com/clpm/clpm-registry.git"
+           :name "main"
+           :trust "ed25519:example-key-id"))
+  :sbcl (:min "2.0.0" :max nil)
+  :build (:jobs 4 :compile (:debug nil :speed 2 :safety 1))
+  :scripts
+    (("test" . "sbcl --eval '(asdf:test-system :example-app)'")
+     ("build" . "sbcl --eval '(asdf:make :example-app)'")))
