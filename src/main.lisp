@@ -24,6 +24,7 @@ Usage: clpm [options] <command> [args]
 
 Commands:
   init [name]      Initialize new project
+  registry ...     Manage registries
   resolve          Resolve dependencies and write lockfile
   fetch            Download dependencies
   build            Build dependencies
@@ -43,6 +44,7 @@ Options:
 
 Examples:
   clpm init myproject
+  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:example-key-id
   clpm install
   clpm repl
   clpm update alexandria
@@ -127,6 +129,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
             (:init
              (clpm.commands:cmd-init
               :name (first command-args)))
+            (:registry
+             (apply #'clpm.commands:cmd-registry command-args))
             (:resolve
              (clpm.commands:cmd-resolve))
             (:fetch

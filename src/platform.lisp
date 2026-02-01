@@ -71,21 +71,24 @@
 
 (defun config-dir ()
   "Return CLPM config directory."
-  (case *os-type*
-    ((:linux :freebsd :openbsd :netbsd)
-     (let ((xdg (uiop:getenv "XDG_CONFIG_HOME")))
-       (if xdg
-           (merge-pathnames "clpm/" (uiop:ensure-directory-pathname xdg))
-           (merge-pathnames ".config/clpm/" (home-dir)))))
-    (:darwin
-     (merge-pathnames ".config/clpm/" (home-dir)))
-    (:windows
-     (let ((appdata (uiop:getenv "APPDATA")))
-       (if appdata
-           (merge-pathnames "clpm/" (uiop:ensure-directory-pathname appdata))
-           (merge-pathnames ".clpm/config/" (home-dir)))))
-    (t
-     (merge-pathnames ".clpm/config/" (home-dir)))))
+  (let ((override (uiop:getenv "CLPM_HOME")))
+    (if override
+        (merge-pathnames "config/" (uiop:ensure-directory-pathname override))
+        (case *os-type*
+          ((:linux :freebsd :openbsd :netbsd)
+           (let ((xdg (uiop:getenv "XDG_CONFIG_HOME")))
+             (if xdg
+                 (merge-pathnames "clpm/" (uiop:ensure-directory-pathname xdg))
+                 (merge-pathnames ".config/clpm/" (home-dir)))))
+          (:darwin
+           (merge-pathnames ".config/clpm/" (home-dir)))
+          (:windows
+           (let ((appdata (uiop:getenv "APPDATA")))
+             (if appdata
+                 (merge-pathnames "clpm/" (uiop:ensure-directory-pathname appdata))
+                 (merge-pathnames ".clpm/config/" (home-dir)))))
+          (t
+           (merge-pathnames ".clpm/config/" (home-dir)))))))
 
 (defun store-dir ()
   "Return CLPM store directory (content-addressed storage)."

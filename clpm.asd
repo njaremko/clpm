@@ -27,6 +27,7 @@
      (:file "platform")
      (:file "store")
      (:file "project")
+     (:file "config")
      (:module "registry"
       :serial t
       :components

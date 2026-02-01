@@ -197,6 +197,16 @@
            #:index-lookup-release
            #:git-rev-parse))
 
+(defpackage #:clpm.config
+  (:use #:cl #:clpm.io.sexp #:clpm.platform #:clpm.project #:clpm.errors)
+  (:export #:config
+           #:config-format
+           #:config-registries
+           #:config-defaults
+           #:read-config
+           #:write-config
+           #:merge-project-config))
+
 (defpackage #:clpm.solver.version
   (:use #:cl)
   (:export #:version
@@ -264,7 +274,7 @@
 
 (defpackage #:clpm.commands
   (:use #:cl #:clpm.project #:clpm.registry #:clpm.solver #:clpm.fetch #:clpm.build
-        #:clpm.store #:clpm.platform #:clpm.errors)
+        #:clpm.store #:clpm.platform #:clpm.config #:clpm.errors)
   (:export #:*verbose*
            #:*offline*
            #:*insecure*
@@ -275,6 +285,7 @@
            #:cmd-build
            #:cmd-install
            #:cmd-update
+           #:cmd-registry
            #:cmd-repl
            #:cmd-run
            #:cmd-gc))

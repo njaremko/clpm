@@ -144,6 +144,8 @@
       (return-from cmd-build 1))
     (log-info "Building dependencies...")
     (let* ((project (clpm.project:read-project-file manifest-path))
+           (effective-build (nth-value 1 (clpm.config:merge-project-config project)))
+           (compile-options (or compile-options effective-build))
            (lockfile (clpm.project:read-lock-file lock-path))
            (registries (load-project-registries project)))
       ;; First check native deps
@@ -179,7 +181,7 @@
       (log-error "No clpm.project found")
       (return-from cmd-install 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
-           (compile-options (clpm.project:project-build-options project)))
+           (compile-options (nth-value 1 (clpm.config:merge-project-config project))))
       ;; Resolve if no lockfile
       (unless lock-path
         (let ((result (cmd-resolve)))
@@ -332,8 +334,9 @@
 (defun load-project-registries (project)
   "Load registries specified in PROJECT."
   (clpm.platform:ensure-directories)
-  (let ((registries '()))
-    (dolist (ref (clpm.project:project-registries project))
+  (let ((registries '())
+        (refs (nth-value 0 (clpm.config:merge-project-config project))))
+    (dolist (ref refs)
       (let* ((name (clpm.project:registry-ref-name ref))
              (url (clpm.project:registry-ref-url ref))
              (trust (clpm.project:registry-ref-trust ref)))
@@ -341,6 +344,90 @@
         (push (clpm.registry:clone-registry name url :trust-key trust)
               registries)))
     (nreverse registries)))
+
+;;; registry command
+
+(defun cmd-registry (&rest args)
+  "Manage global registries in config.sxp."
+  (let ((subcommand (first args))
+        (rest (rest args)))
+    (cond
+      ((or (null subcommand) (string= subcommand "help"))
+       (log-error "Usage: clpm registry <list|add|update> [options]")
+       (return-from cmd-registry 1))
+
+      ((string= subcommand "list")
+       (let* ((cfg (clpm.config:read-config))
+              (regs (clpm.config:config-registries cfg)))
+         (if (null regs)
+             (log-info "No registries configured")
+             (dolist (r regs)
+               (log-info "~A  ~A~@[  (~A)~]"
+                         (clpm.project:registry-ref-name r)
+                         (clpm.project:registry-ref-url r)
+                         (clpm.project:registry-ref-trust r)))))
+       0)
+
+      ((string= subcommand "add")
+       (let ((name nil)
+             (url nil)
+             (trust nil))
+         (loop while rest do
+           (let ((arg (pop rest)))
+             (cond
+               ((string= arg "--name") (setf name (pop rest)))
+               ((string= arg "--url") (setf url (pop rest)))
+               ((string= arg "--trust") (setf trust (pop rest)))
+               (t
+                (log-error "Unknown option: ~A" arg)
+                (return-from cmd-registry 1)))))
+         (unless (and name url trust)
+           (log-error "Missing required options: --name, --url, --trust")
+           (return-from cmd-registry 1))
+         (let* ((cfg (clpm.config:read-config))
+                (regs (clpm.config:config-registries cfg))
+                (existing (find name regs
+                                :key #'clpm.project:registry-ref-name
+                                :test #'string=)))
+           (if existing
+               (progn
+                 (setf (clpm.project:registry-ref-url existing) url
+                       (clpm.project:registry-ref-trust existing) trust)
+                 (log-info "Updated registry: ~A" name))
+               (progn
+                 (push (clpm.project::make-registry-ref
+                        :kind :git
+                        :name name
+                        :url url
+                        :trust trust)
+                       regs)
+                 (setf (clpm.config:config-registries cfg) regs)
+                 (log-info "Added registry: ~A" name)))
+           (clpm.config:write-config cfg))
+         0))
+
+      ((string= subcommand "update")
+       (let* ((names rest)
+              (cfg (clpm.config:read-config))
+              (refs (clpm.config:config-registries cfg)))
+         (dolist (ref refs)
+           (let ((name (clpm.project:registry-ref-name ref)))
+             (when (or (null names) (member name names :test #'string=))
+               (log-info "Updating registry: ~A" name)
+               (handler-case
+                   (let ((reg (clpm.registry:clone-registry
+                               name
+                               (clpm.project:registry-ref-url ref)
+                               :trust-key (clpm.project:registry-ref-trust ref))))
+                     (clpm.registry:update-registry reg))
+                 (error (c)
+                   (log-error "Failed to update registry ~A: ~A" name c)
+                   (return-from cmd-registry 1))))))
+         0))
+
+      (t
+       (log-error "Unknown registry subcommand: ~A" subcommand)
+       1))))
 
 (defun collect-source-paths (lockfile)
   "Collect source paths from lockfile."
