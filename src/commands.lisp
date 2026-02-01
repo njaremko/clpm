@@ -81,7 +81,13 @@
                 (log-info "Resolved ~D systems"
                           (length (clpm.project:lockfile-resolved new-lockfile))))))
         (clpm.errors:clpm-resolve-error (c)
-          (log-error "~A" c)
+          (log-error "Failed to resolve dependencies: ~A"
+                     (clpm.errors:clpm-error-message c))
+          (let ((chain (clpm.errors:clpm-resolve-error-conflict-chain c)))
+            (when chain
+              (format *error-output* "~&Conflict chain:~%")
+              (dolist (line chain)
+                (format *error-output* "  ~A~%" line))))
           (return-from cmd-resolve 2))))
     0))
 

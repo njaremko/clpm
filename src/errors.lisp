@@ -59,7 +59,9 @@
 (define-condition clpm-resolve-error (clpm-error)
   ((systems :initarg :systems :initform nil :reader clpm-resolve-error-systems)
    (conflict-chain :initarg :conflict-chain :initform nil
-                   :reader clpm-resolve-error-conflict-chain))
+                   :reader clpm-resolve-error-conflict-chain)
+   (explanation :initarg :explanation :initform nil
+                :reader clpm-resolve-error-explanation))
   (:report (lambda (condition stream)
              (format stream "Failed to resolve dependencies: ~A~@[~%Conflict chain:~%~{  ~A~%~}~]"
                      (clpm-error-message condition)

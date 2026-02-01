@@ -10,6 +10,9 @@
            #:clpm-hash-mismatch-error
            #:clpm-signature-error
            #:clpm-resolve-error
+           #:clpm-resolve-error-systems
+           #:clpm-resolve-error-conflict-chain
+           #:clpm-resolve-error-explanation
            #:clpm-build-error
            #:clpm-missing-native-dep-error
            #:signal-error

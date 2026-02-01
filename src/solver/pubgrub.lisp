@@ -17,6 +17,17 @@
   (cause nil :type (or null string))
   (chain nil :type list))   ; list of (system constraint) pairs leading here
 
+(defun conflict-explanation (resolve-error)
+  "Return a structured conflict explanation for RESOLVE-ERROR."
+  (check-type resolve-error clpm.errors:clpm-resolve-error)
+  (or (clpm.errors:clpm-resolve-error-explanation resolve-error)
+      (make-conflict-explanation
+       :system (first (clpm.errors:clpm-resolve-error-systems resolve-error))
+       :constraint nil
+       :candidates nil
+       :cause (clpm.errors:clpm-error-message resolve-error)
+       :chain (clpm.errors:clpm-resolve-error-conflict-chain resolve-error))))
+
 ;;; Solver state
 
 (defstruct solver-state
@@ -29,6 +40,7 @@
   (incompatibilities nil :type list) ; learned conflict clauses
   (decision-level 0 :type integer)
   (decision-stack nil :type list) ; stack of (level system-id . release-ref)
+  (reasons (make-hash-table :test 'equal)) ; system-id -> list of reasons
   (extra-release-metadata nil))   ; hash-table release-ref -> release-metadata
 
 ;;; Main solver entry point
@@ -41,6 +53,7 @@ Returns a resolution struct or signals clpm-resolve-error."
         (state (make-solver-state)))
     (setf (solver-state-index state) index
           (solver-state-lockfile state) lockfile
+          (solver-state-reasons state) (make-hash-table :test 'equal)
           (solver-state-extra-release-metadata state)
           (make-hash-table :test 'equal))
     ;; Add root constraints from project
@@ -52,7 +65,8 @@ Returns a resolution struct or signals clpm-resolve-error."
         (error 'clpm.errors:clpm-resolve-error
                :message (resolution-conflict-message c)
                :systems (resolution-conflict-systems c)
-               :conflict-chain (resolution-conflict-chain c))))
+               :conflict-chain (resolution-conflict-chain c)
+               :explanation (resolution-conflict-explanation c))))
     ;; Build result
     (build-resolution state)))
 
@@ -76,11 +90,26 @@ For pinned/local sources, registry is NIL."
   (dolist (dep (clpm.project:project-test-depends project))
     (add-dependency-constraint state dep :test)))
 
+(defun record-constraint-reason (state system-id from-label constraint)
+  (let* ((reasons (solver-state-reasons state))
+         (entry (list :from from-label
+                      :constraint (constraint-to-string constraint)))
+         (existing (gethash system-id reasons)))
+    (unless (member entry existing :test #'equal)
+      (setf (gethash system-id reasons) (cons entry existing)))))
+
 (defun add-dependency-constraint (state dep source)
   "Add a dependency constraint to solver state."
-  (declare (ignore source))
   (let ((system-id (clpm.project:dependency-system dep))
         (constraint (parse-constraint (clpm.project:dependency-constraint dep))))
+    (record-constraint-reason
+     state system-id
+     (case source
+       (:root "root")
+       (:dev "root (dev)")
+       (:test "root (test)")
+       (t "root"))
+     constraint)
     ;; Merge with existing constraint
     (let ((existing (assoc system-id (solver-state-constraints state) :test #'string=)))
       (if existing
@@ -100,15 +129,39 @@ For pinned/local sources, registry is NIL."
 (define-condition resolution-conflict (error)
   ((message :initarg :message :reader resolution-conflict-message)
    (systems :initarg :systems :reader resolution-conflict-systems)
-   (chain :initarg :chain :reader resolution-conflict-chain)))
+   (chain :initarg :chain :reader resolution-conflict-chain)
+   (explanation :initarg :explanation :initform nil
+                :reader resolution-conflict-explanation)))
 
-(defun signal-conflict (state system-id constraint reason)
+(defun conflict-chain (state system-id)
+  (let ((reasons (copy-list (gethash system-id (solver-state-reasons state)))))
+    (mapcar (lambda (r)
+              (format nil "~A requires ~A ~A"
+                      (getf r :from)
+                      system-id
+                      (getf r :constraint)))
+            (sort reasons #'string<
+                  :key (lambda (r) (getf r :from))))))
+
+(defun signal-conflict (state system-id constraint reason &key candidates)
   "Signal a resolution conflict."
-  (declare (ignore state constraint))
-  (error 'resolution-conflict
-         :message reason
-         :systems (list system-id)
-         :chain nil))
+  (let* ((chain (conflict-chain state system-id))
+         (chain (if (and candidates (consp candidates))
+                    (append chain
+                            (list (format nil "Candidates considered: ~{~A~^, ~}"
+                                          candidates)))
+                    chain))
+         (explanation (make-conflict-explanation
+                       :system system-id
+                       :constraint constraint
+                       :candidates candidates
+                       :cause reason
+                       :chain chain)))
+    (error 'resolution-conflict
+           :message reason
+           :systems (list system-id)
+           :chain chain
+           :explanation explanation)))
 
 ;;; Backtracking search solver
 
@@ -129,7 +182,12 @@ For pinned/local sources, registry is NIL."
                              (solver-state-constraints state))
         :pending (copy-list (solver-state-pending state))
         :decision-level (solver-state-decision-level state)
-        :decision-stack (copy-list (solver-state-decision-stack state))))
+        :decision-stack (copy-list (solver-state-decision-stack state))
+        :reasons (let ((copy (make-hash-table :test 'equal)))
+                   (maphash (lambda (k v)
+                              (setf (gethash k copy) (copy-list v)))
+                            (solver-state-reasons state))
+                   copy)))
 
 (defun restore-state (state snapshot)
   "Restore STATE from SNAPSHOT."
@@ -137,7 +195,8 @@ For pinned/local sources, registry is NIL."
         (solver-state-constraints state) (getf snapshot :constraints)
         (solver-state-pending state) (getf snapshot :pending)
         (solver-state-decision-level state) (getf snapshot :decision-level)
-        (solver-state-decision-stack state) (getf snapshot :decision-stack)))
+        (solver-state-decision-stack state) (getf snapshot :decision-stack)
+        (solver-state-reasons state) (getf snapshot :reasons)))
 
 (defun decided-release-ref (state system-id)
   (cdr (assoc system-id (solver-state-decisions state) :test #'string=)))
@@ -189,31 +248,31 @@ For pinned/local sources, registry is NIL."
       ((assoc system-id (solver-state-decisions state) :test #'string=)
        (solver-search state))
       (t
-       (let ((constraint (or (cdr (assoc system-id (solver-state-constraints state)
-                                         :test #'string=))
-                             (any-constraint))))
-         (let ((candidates (find-candidates state system-id constraint)))
-           (when (null candidates)
-             (signal-conflict state system-id constraint
-                              (format nil "No candidates found for ~A" system-id)))
-           (let ((candidate-refs (ordered-candidate-refs state system-id candidates))
-                 (last-conflict nil))
-             (dolist (release-ref candidate-refs)
-               (let ((snapshot (snapshot-state state)))
-                 (handler-case
-                     (progn
-                       (decide state system-id release-ref)
-                       (propagate-dependencies state system-id release-ref)
-                       (when (solver-search state)
-                         (return-from solver-search t)))
-                   (resolution-conflict (c)
-                     (setf last-conflict c)))
-                 (restore-state state snapshot)))
-             (if last-conflict
-                 (signal-conflict state system-id constraint
-                                  (resolution-conflict-message last-conflict))
-                 (signal-conflict state system-id constraint
-                                  (format nil "No viable candidates for ~A" system-id))))))))))
+       (let* ((constraint (or (cdr (assoc system-id (solver-state-constraints state)
+                                          :test #'string=))
+                              (any-constraint)))
+              (candidates (find-candidates state system-id constraint)))
+         (when (null candidates)
+           (signal-conflict state system-id constraint
+                            (format nil "No candidates found for ~A" system-id)))
+         (let ((candidate-refs (ordered-candidate-refs state system-id candidates))
+               (last-conflict nil))
+           (dolist (release-ref candidate-refs)
+             (let ((snapshot (snapshot-state state)))
+               (handler-case
+                   (progn
+                     (decide state system-id release-ref)
+                     (propagate-dependencies state system-id release-ref)
+                     (when (solver-search state)
+                       (return-from solver-search t)))
+                 (resolution-conflict (c)
+                   (setf last-conflict c)))
+               (restore-state state snapshot)))
+           (if last-conflict
+               (error last-conflict)
+               (signal-conflict state system-id constraint
+                                (format nil "No viable candidates for ~A" system-id)
+                                :candidates candidate-refs))))))))
 
 (defun find-candidates (state system-id constraint)
   "Find release candidates for SYSTEM-ID satisfying CONSTRAINT."
@@ -333,12 +392,13 @@ Prefers lockfile selection, then highest version."
                 (let ((constraint (parse-constraint dep-constraint-form))
                       (existing (assoc dep-system (solver-state-constraints state)
                                        :test #'string=)))
+                  (record-constraint-reason state dep-system release-ref constraint)
                   (if existing
                       (let ((merged (constraint-intersect (cdr existing) constraint)))
                         (when (constraint-empty-p merged)
                           (signal-conflict state dep-system constraint
                                            (format nil "Conflict: ~A requires ~A ~A"
-                                                   system-id dep-system
+                                                   release-ref dep-system
                                                    (constraint-to-string constraint))))
                         (setf (cdr existing) merged))
                       (push (cons dep-system constraint)
