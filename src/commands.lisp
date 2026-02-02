@@ -693,6 +693,27 @@ Returns NIL values on parse failure."
         (when (and (plusp (length pkg)) (plusp (length fn)))
           (values pkg fn))))))
 
+(defun project-dependency-system-ids (project sections)
+  "Return a sorted list of system IDs from PROJECT dependency SECTIONS.
+
+SECTIONS is a list of keywords: :DEPENDS, :DEV-DEPENDS, :TEST-DEPENDS."
+  (let ((systems nil))
+    (dolist (section sections)
+      (dolist (dep (ecase section
+                     (:depends (clpm.project:project-depends project))
+                     (:dev-depends (clpm.project:project-dev-depends project))
+                     (:test-depends (clpm.project:project-test-depends project))))
+        (let ((id (clpm.project:dependency-system dep)))
+          (when (and id (stringp id))
+            (push id systems)))))
+    (sort (remove-duplicates systems :test #'string=) #'string<)))
+
+(defun sbcl-load-systems-argv (systems)
+  "Return an argv fragment that loads each system in SYSTEMS via ASDF."
+  (mapcan (lambda (sys)
+            (list "--eval" (format nil "(asdf:load-system ~S)" sys)))
+          systems))
+
 (defun cmd-run (&rest args)
   "Run the project entrypoint defined in clpm.project :run."
   (multiple-value-bind (project-root manifest-path lock-path)
@@ -722,29 +743,31 @@ Returns NIL values on parse failure."
               (log-error "Invalid :run :function: expected <package>::<fn>, got ~S" fn-spec)
               (return-from cmd-run 1))
 
-            (let* ((run-args (if (and args (string= (first args) "--"))
-                                 (rest args)
-                                 args))
-                   (pkg-key (intern (string-upcase pkg) :keyword))
-                   (fn-key (intern (string-upcase fn) :keyword))
-                   (args-var (intern "CLPM-RUN-ARGS" "CL-USER"))
-                   (result-var (intern "CLPM-RUN-RESULT" "CL-USER"))
-                   (call-form
-                     `(let ((,args-var ',run-args))
-                        (let ((,result-var (uiop:symbol-call ,pkg-key ,fn-key ,args-var)))
-                          (sb-ext:exit :code (if (integerp ,result-var) ,result-var 0)))))
-                   (call-form-str
-                     (with-standard-io-syntax
-                       (let ((*package* (find-package "CL-USER")))
-                         (prin1-to-string call-form))))
-                   (sbcl-args (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
-                                    "--load" (namestring config-path)
-                                    "--eval" (format nil "(asdf:load-system ~S)" system)
-                                    "--eval" call-form-str)))
-              (log-info "Running ~A (~A)..." system fn-spec)
-              (multiple-value-bind (output error-output exit-code)
-                  (clpm.platform:run-program sbcl-args
-                                             :directory project-root
+	            (let* ((run-args (if (and args (string= (first args) "--"))
+	                                 (rest args)
+	                                 args))
+	                   (pkg-key (intern (string-upcase pkg) :keyword))
+	                   (fn-key (intern (string-upcase fn) :keyword))
+	                   (args-var (intern "CLPM-RUN-ARGS" "CL-USER"))
+	                   (result-var (intern "CLPM-RUN-RESULT" "CL-USER"))
+	                   (call-form
+	                     `(let ((,args-var ',run-args))
+	                        (let ((,result-var (uiop:symbol-call ,pkg-key ,fn-key ,args-var)))
+	                          (sb-ext:exit :code (if (integerp ,result-var) ,result-var 0)))))
+	                   (call-form-str
+	                     (with-standard-io-syntax
+	                       (let ((*package* (find-package "CL-USER")))
+	                         (prin1-to-string call-form))))
+	                   (deps (project-dependency-system-ids project '(:depends)))
+	                   (sbcl-args (append (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
+	                                            "--load" (namestring config-path))
+	                                      (sbcl-load-systems-argv deps)
+	                                      (list "--eval" (format nil "(asdf:load-system ~S)" system)
+	                                            "--eval" call-form-str))))
+	              (log-info "Running ~A (~A)..." system fn-spec)
+	              (multiple-value-bind (output error-output exit-code)
+	                  (clpm.platform:run-program sbcl-args
+	                                             :directory project-root
                                              :output :interactive
                                              :error-output :interactive
                                              :timeout 600000)
@@ -850,34 +873,36 @@ Uses clpm.project :test metadata:
           (unless (zerop rc)
             (return-from cmd-test rc))
 
-          (let* ((systems-var (intern "CLPM-TEST-SYSTEMS" "CL-USER"))
-                 (ok-var (intern "CLPM-TEST-OK" "CL-USER"))
-                 (sys-var (intern "CLPM-TEST-SYSTEM" "CL-USER"))
-                 (cond-var (intern "CLPM-TEST-CONDITION" "CL-USER"))
-                 (call-form
-                   `(let ((,systems-var ',systems)
-                          (,ok-var t))
-                      (dolist (,sys-var ,systems-var)
-                        (handler-case
-                            (progn
-                              (format t "~&Testing ~A...~%" ,sys-var)
-                              (asdf:test-system ,sys-var)
-                              (format t "~&OK: ~A~%" ,sys-var))
-                          (error (,cond-var)
-                            (format *error-output* "~&FAIL: ~A: ~A~%" ,sys-var ,cond-var)
-                            (setf ,ok-var nil))))
-                      (sb-ext:exit :code (if ,ok-var 0 1))))
-                 (call-form-str
-                   (with-standard-io-syntax
-                     (let ((*package* (find-package "CL-USER")))
-                       (prin1-to-string call-form))))
-                 (sbcl-args (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
-                                  "--load" (namestring config-path)
-                                  "--eval" call-form-str)))
-            (multiple-value-bind (output error-output exit-code)
-                (clpm.platform:run-program sbcl-args
-                                           :directory project-root
-                                           :output :interactive
+	          (let* ((systems-var (intern "CLPM-TEST-SYSTEMS" "CL-USER"))
+	                 (ok-var (intern "CLPM-TEST-OK" "CL-USER"))
+	                 (sys-var (intern "CLPM-TEST-SYSTEM" "CL-USER"))
+	                 (cond-var (intern "CLPM-TEST-CONDITION" "CL-USER"))
+	                 (call-form
+	                   `(let ((,systems-var ',systems)
+	                          (,ok-var t))
+	                      (dolist (,sys-var ,systems-var)
+	                        (handler-case
+	                            (progn
+	                              (format t "~&Testing ~A...~%" ,sys-var)
+	                              (asdf:test-system ,sys-var)
+	                              (format t "~&OK: ~A~%" ,sys-var))
+	                          (error (,cond-var)
+	                            (format *error-output* "~&FAIL: ~A: ~A~%" ,sys-var ,cond-var)
+	                            (setf ,ok-var nil))))
+	                      (sb-ext:exit :code (if ,ok-var 0 1))))
+	                 (call-form-str
+	                   (with-standard-io-syntax
+	                     (let ((*package* (find-package "CL-USER")))
+	                       (prin1-to-string call-form))))
+	                 (deps (project-dependency-system-ids project '(:depends :test-depends)))
+	                 (sbcl-args (append (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
+	                                          "--load" (namestring config-path))
+	                                    (sbcl-load-systems-argv deps)
+	                                    (list "--eval" call-form-str))))
+	            (multiple-value-bind (output error-output exit-code)
+	                (clpm.platform:run-program sbcl-args
+	                                           :directory project-root
+	                                           :output :interactive
                                            :error-output :interactive
                                            :timeout 600000)
               (declare (ignore output error-output))
@@ -962,16 +987,18 @@ Manifest schema:
                      (with-standard-io-syntax
                        (let ((*package* (find-package "CL-USER")))
                          (prin1-to-string defun-form))))
-                   (save-str
-                     (with-standard-io-syntax
-                       (let ((*package* (find-package "CL-USER")))
-                         (prin1-to-string save-form))))
-                   (sbcl-args (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
-                                    "--load" (namestring config-path)
-                                    "--eval" (format nil "(asdf:load-system ~S)" system)
-                                    "--eval" defun-str
-                                    "--eval" save-str)))
-              (ensure-directories-exist output-path)
+	                   (save-str
+	                     (with-standard-io-syntax
+	                       (let ((*package* (find-package "CL-USER")))
+	                         (prin1-to-string save-form))))
+	                   (deps (project-dependency-system-ids project '(:depends)))
+	                   (sbcl-args (append (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
+	                                            "--load" (namestring config-path))
+	                                      (sbcl-load-systems-argv deps)
+	                                      (list "--eval" (format nil "(asdf:load-system ~S)" system)
+	                                            "--eval" defun-str
+	                                            "--eval" save-str))))
+	              (ensure-directories-exist output-path)
 
               (log-info "Packaging ~A -> ~A" system (namestring output-path))
               (multiple-value-bind (out err rc)

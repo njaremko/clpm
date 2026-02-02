@@ -340,7 +340,6 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
                     (assert-eql 0 (clpm:run-cli (list "new" "qlapp" "--bin" "--dir" (namestring ws))))
 
                     (let* ((app-root (merge-pathnames "qlapp/" ws))
-                           (asd-path (merge-pathnames "qlapp.asd" app-root))
                            (src-path (merge-pathnames "src/qlapp.lisp" app-root))
                            (lock-path (merge-pathnames "clpm.lock" app-root))
                            (dist-bin (merge-pathnames "dist/qlapp" app-root)))
@@ -363,23 +362,6 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
                                     (format *error-output* "~A~%" (uiop:read-file-string p))))))
                             (fail "clpm add --install failed with exit code ~D" rc)))
 
-	                        ;; Wire the dependency into the ASDF system (CLPM doesn't edit .asd yet).
-	                        (let* ((asd (substitute #\Newline #\Return (uiop:read-file-string asd-path)))
-	                               (test-defsystem (format nil "(asdf:defsystem ~S" (format nil "~A/test" "qlapp")))
-	                               (test-pos (search test-defsystem asd :test #'char-equal))
-	                               (main-block (if test-pos (subseq asd 0 test-pos) asd)))
-	                          (unless (search ":depends-on" main-block :test #'char-equal)
-	                            (let ((serial-pos (search ":serial" main-block :test #'char-equal)))
-	                              (unless serial-pos
-	                                (fail "Expected :serial in ~A" (namestring asd-path)))
-	                              (setf asd (uiop:strcat
-	                                         (subseq asd 0 serial-pos)
-	                                         ":depends-on (\"ql-a\")"
-	                                         (string #\Newline)
-	                                         "  "
-	                                         (subseq asd serial-pos)))))
-	                          (write-text asd-path asd))
-
                         ;; Update main to reference the dependency (ensures it really loads).
                         (write-text
                          src-path
@@ -389,8 +371,8 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
                            (format s "(in-package #:qlapp)~%~%")
                            (format s "(defun main (&optional (args nil))~%")
                            (format s "  (declare (ignore args))~%")
-                           (format s "  (format t \"~~A~~%\" (uiop:symbol-call :ql-a :greeting))~%")
-                           (format s "  0)~%")))
+	                           (format s "  (format t \"~~A~~%\" (uiop:symbol-call :ql-a :greeting))~%")
+	                           (format s "  0)~%")))
 
                         ;; Lockfile should include the Quicklisp systems, with hashes backfilled.
                         (assert-true (uiop:file-exists-p lock-path)
