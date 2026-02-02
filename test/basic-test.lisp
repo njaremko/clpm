@@ -35,6 +35,45 @@
         (format *error-output* "    Got:      ~A~%" result)
         (sb-ext:exit :code 1))))
 
+;;; Test SHA1
+
+(format t "Testing SHA1...~%")
+
+(let* ((test-input "abc")
+       (expected "a9993e364706816aba3e25717850c26c9cd0d89d")
+       (result (clpm.crypto.sha256:bytes-to-hex
+                (clpm.crypto.sha1:sha1 test-input))))
+  (if (string= result expected)
+      (format t "  SHA1 test PASSED~%")
+      (progn
+        (format *error-output* "  SHA1 test FAILED~%")
+        (format *error-output* "    Expected: ~A~%" expected)
+        (format *error-output* "    Got:      ~A~%" result)
+        (sb-ext:exit :code 1))))
+
+;; Regression: sha1-files must match sha1(concat) even when file boundaries
+;; exactly fill an internal block.
+(clpm.store:with-temp-dir (tmp)
+  (let* ((a (merge-pathnames "a.bin" tmp))
+         (b (merge-pathnames "b.bin" tmp))
+         (bytes-a (make-array 10 :element-type '(unsigned-byte 8) :initial-element #x41))
+         (bytes-b (make-array 54 :element-type '(unsigned-byte 8) :initial-element #x42))
+         (expected (clpm.crypto.sha256:bytes-to-hex
+                    (clpm.crypto.sha1:sha1 (concatenate '(vector (unsigned-byte 8))
+                                                        bytes-a
+                                                        bytes-b)))))
+    (with-open-file (s a :direction :output :if-exists :supersede :element-type '(unsigned-byte 8))
+      (write-sequence bytes-a s))
+    (with-open-file (s b :direction :output :if-exists :supersede :element-type '(unsigned-byte 8))
+      (write-sequence bytes-b s))
+    (let ((result (clpm.crypto.sha256:bytes-to-hex
+                   (clpm.crypto.sha1:sha1-files (list a b)))))
+      (unless (string= result expected)
+        (format *error-output* "  SHA1 sha1-files regression FAILED~%")
+        (format *error-output* "    Expected: ~A~%" expected)
+        (format *error-output* "    Got:      ~A~%" result)
+        (sb-ext:exit :code 1)))))
+
 ;;; Test version parsing
 
 (format t "Testing version parsing...~%")

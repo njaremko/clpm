@@ -313,6 +313,17 @@ Supports .tar.gz, .tgz, .tar, .zip"
 
 ;;; High-level fetch interface
 
+(defun %content-sha1-hex (root)
+  "Return a Quicklisp-style content SHA-1 hex digest for ROOT.
+
+Quicklisp's releases.txt provides a content hash, not an archive hash: it is
+the SHA-1 of the concatenated contents of all files in the release, processed
+in sorted filename order."
+  (let* ((files (clpm.io.fs:walk-files root))
+         (paths (mapcar #'cdr files)))
+    (clpm.crypto.sha256:bytes-to-hex
+     (clpm.crypto.sha1:sha1-files paths))))
+
 (defun fetch-artifact (source expected-sha256 &key (verify t))
   "Fetch artifact according to SOURCE specification.
 SOURCE is a plist like (:tarball :url ... :sha256 ... :sha1 ...) or (:git :url ... :commit ...)
@@ -322,54 +333,58 @@ If VERIFY is true, verifies the tarball against an expected hash when available.
     (clpm.store:with-temp-dir (tmp)
       (ecase kind
         (:tarball
-         (let* ((url (getf (cdr source) :url))
-                (expected-sha256 (or expected-sha256 (getf (cdr source) :sha256)))
-                (expected-sha1 (getf (cdr source) :sha1))
-                (artifact-file (merge-pathnames "artifact.tar.gz" tmp)))
-           ;; Download
-           (fetch-url url artifact-file)
-           ;; Verify hashes (if available) before extracting.
-           (when verify
-             (unless (or (stringp expected-sha256) (stringp expected-sha1))
-               (error 'clpm.errors:clpm-fetch-error
-                      :message "Missing expected hash for tarball source"
-                      :url url))
-             (when (stringp expected-sha1)
-               (let ((actual-sha1 (clpm.crypto.sha256:bytes-to-hex
-                                   (clpm.crypto.sha1:sha1-file artifact-file))))
-                 (unless (string-equal actual-sha1 expected-sha1)
-                   (error 'clpm.errors:clpm-hash-mismatch-error
-                          :expected expected-sha1
-                          :actual actual-sha1
-                          :artifact url))))
-             (when (stringp expected-sha256)
-               (let ((actual-sha256 (clpm.crypto.sha256:bytes-to-hex
-                                     (clpm.crypto.sha256:sha256-file artifact-file))))
-                 (unless (string-equal actual-sha256 expected-sha256)
-                   (error 'clpm.errors:clpm-hash-mismatch-error
-                          :expected expected-sha256
-                          :actual actual-sha256
-                          :artifact url)))))
-           ;; Compute artifact SHA-256 for storage and lockfile backfills.
-           (let ((artifact-sha256 (clpm.crypto.sha256:bytes-to-hex
-                                   (clpm.crypto.sha256:sha256-file artifact-file))))
-             ;; Store artifact (store uses SHA-256 addressing).
-             (clpm.store:store-artifact artifact-file artifact-sha256)
+	         (let* ((url (getf (cdr source) :url))
+	                (expected-sha256 (or expected-sha256 (getf (cdr source) :sha256)))
+	                (expected-sha1 (getf (cdr source) :sha1))
+	                (artifact-file (merge-pathnames "artifact.tar.gz" tmp)))
+	           ;; Download
+	           (fetch-url url artifact-file)
+	           ;; Verify hashes (if available).
+	           ;;
+	           ;; - If we have an archive SHA-256, verify it before extraction.
+	           ;; - If we only have a SHA-1 (Quicklisp content hash), verify it after extraction.
+	           (when verify
+	             (unless (or (stringp expected-sha256) (stringp expected-sha1))
+	               (error 'clpm.errors:clpm-fetch-error
+	                      :message "Missing expected hash for tarball source"
+	                      :url url))
+	             (when (stringp expected-sha256)
+	               (let ((actual-sha256 (clpm.crypto.sha256:bytes-to-hex
+	                                     (clpm.crypto.sha256:sha256-file artifact-file))))
+	                 (unless (string-equal actual-sha256 expected-sha256)
+	                   (error 'clpm.errors:clpm-hash-mismatch-error
+	                          :expected expected-sha256
+	                          :actual actual-sha256
+	                          :artifact url)))))
+	           ;; Compute artifact SHA-256 for storage and lockfile backfills.
+	           (let ((artifact-sha256 (clpm.crypto.sha256:bytes-to-hex
+	                                   (clpm.crypto.sha256:sha256-file artifact-file))))
+	             ;; Store artifact (store uses SHA-256 addressing).
+	             (clpm.store:store-artifact artifact-file artifact-sha256)
              ;; Extract and store source
              (let ((extract-dir (merge-pathnames "extract/" tmp)))
                (ensure-directories-exist extract-dir)
                (extract-archive artifact-file extract-dir)
                ;; Find extracted directory (often has one top-level dir)
-               (let ((contents (directory (merge-pathnames "*" extract-dir))))
-                 (let ((source-dir (if (and (= (length contents) 1)
-                                            (uiop:directory-pathname-p (first contents)))
-                                       (first contents)
-                                       extract-dir)))
-                   (multiple-value-bind (store-path tree-sha256)
-                       (clpm.store:store-source source-dir nil)
-                     (declare (ignore store-path))
-                     (values (clpm.store:get-source-path tree-sha256)
-                             tree-sha256
+	               (let ((contents (directory (merge-pathnames "*" extract-dir))))
+	                 (let ((source-dir (if (and (= (length contents) 1)
+	                                            (uiop:directory-pathname-p (first contents)))
+	                                       (first contents)
+	                                       extract-dir)))
+	                   (when (and verify
+	                              (stringp expected-sha1)
+	                              (not (stringp expected-sha256)))
+	                     (let ((actual-sha1 (%content-sha1-hex source-dir)))
+	                       (unless (string-equal actual-sha1 expected-sha1)
+	                         (error 'clpm.errors:clpm-hash-mismatch-error
+	                                :expected expected-sha1
+	                                :actual actual-sha1
+	                                :artifact url))))
+	                   (multiple-value-bind (store-path tree-sha256)
+	                       (clpm.store:store-source source-dir nil)
+	                     (declare (ignore store-path))
+	                     (values (clpm.store:get-source-path tree-sha256)
+	                             tree-sha256
                              artifact-sha256))))))))
         (:git
          (let* ((url (getf (cdr source) :url))

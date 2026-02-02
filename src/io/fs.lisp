@@ -40,7 +40,7 @@ EXCLUDE is a list of entry names (strings) to ignore (directories or files)."
          (dir (pathname-directory rel))
          (dir-parts (cond
                       ((null dir) '())
-                      ((and (consp dir) (eq (first dir) :relative)) (rest dir))
+                      ((and (consp dir) (keywordp (first dir))) (rest dir))
                       ((consp dir) dir)
                       (t '())))
          (name (pathname-name rel))
@@ -60,7 +60,8 @@ EXCLUDE is a list of entry names (strings) to ignore (directories or files)."
   "Walk ROOT and return (rel-path . absolute-path) for all files.
 
 REL-PATH is a deterministic, slash-separated string, sorted lexicographically."
-  (let ((root (uiop:ensure-directory-pathname root))
+  (let ((root (uiop:ensure-directory-pathname
+               (truename (uiop:ensure-directory-pathname root))))
         (files '()))
     (labels ((walk (dir)
                (dolist (entry (list-directory-entries dir :exclude exclude))
@@ -71,4 +72,3 @@ REL-PATH is a deterministic, slash-separated string, sorted lexicographically."
                     (push (cons (%rel-unix-path root entry) entry) files))))))
       (walk root))
     (sort files #'string< :key #'car)))
-

@@ -573,12 +573,11 @@ Returns (values system-id constraint-form-or-nil)."
       (return-from cmd-install 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
            (compile-options (nth-value 1 (clpm.config:merge-project-config project))))
-      ;; Resolve if no lockfile
-      (unless lock-path
-        (let ((result (cmd-resolve)))
-          (unless (zerop result)
-            (return-from cmd-install result)))
-        (setf lock-path (merge-pathnames "clpm.lock" project-root)))
+      ;; Resolve to ensure clpm.lock matches current clpm.project.
+      (let ((result (cmd-resolve)))
+        (unless (zerop result)
+          (return-from cmd-install result)))
+      (setf lock-path (merge-pathnames "clpm.lock" project-root))
       ;; Fetch
       (let ((result (cmd-fetch)))
         (unless (zerop result)

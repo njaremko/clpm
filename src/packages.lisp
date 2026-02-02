@@ -50,7 +50,8 @@
   (:use #:cl)
   (:export #:sha1
            #:sha1-stream
-           #:sha1-file))
+           #:sha1-file
+           #:sha1-files))
 
 (defpackage #:clpm.crypto.sha512
   (:use #:cl)

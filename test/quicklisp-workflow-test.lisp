@@ -218,30 +218,37 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
         (start-file-http-server dist-root)
       (unwind-protect
            (progn
-             ;; Build a tiny fake Quicklisp dist served over localhost.
-             (let* ((dist-dir (merge-pathnames "dist/" dist-root))
-                    (archive-dir (merge-pathnames "archive/" dist-root))
-                    (distinfo (merge-pathnames "dist/quicklisp.txt" dist-root))
-                    (systems-txt (merge-pathnames "dist/systems.txt" dist-root))
-                    (releases-txt (merge-pathnames "dist/releases.txt" dist-root))
+	             ;; Build a tiny fake Quicklisp dist served over localhost.
+	             (let* ((dist-dir (merge-pathnames "dist/" dist-root))
+	                    (archive-dir (merge-pathnames "archive/" dist-root))
+	                    (distinfo (merge-pathnames "dist/quicklisp.txt" dist-root))
+	                    (systems-txt (merge-pathnames "dist/systems.txt" dist-root))
+	                    (releases-txt (merge-pathnames "dist/releases.txt" dist-root))
                     (date "20260201")
                     (proj-b "ql-b")
                     (proj-m "ql-multi")
                     (proj-a "ql-a")
-                    (prefix-b (format nil "~A-~A-git" proj-b date))
-                    (prefix-m (format nil "~A-~A-git" proj-m date))
-                    (prefix-a (format nil "~A-~A-git" proj-a date))
-                    (tar-b (merge-pathnames (format nil "archive/~A/~A.tgz" proj-b prefix-b) dist-root))
-                    (tar-m (merge-pathnames (format nil "archive/~A/~A.tgz" proj-m prefix-m) dist-root))
-                    (tar-a (merge-pathnames (format nil "archive/~A/~A.tgz" proj-a prefix-a) dist-root))
-                    (stage (merge-pathnames "stage/" tmp)))
-               (ensure-directories-exist dist-dir)
-               (ensure-directories-exist archive-dir)
-               (ensure-directories-exist stage)
+	                    (prefix-b (format nil "~A-~A-git" proj-b date))
+	                    (prefix-m (format nil "~A-~A-git" proj-m date))
+	                    (prefix-a (format nil "~A-~A-git" proj-a date))
+	                    (tar-b (merge-pathnames (format nil "archive/~A/~A.tgz" proj-b prefix-b) dist-root))
+	                    (tar-m (merge-pathnames (format nil "archive/~A/~A.tgz" proj-m prefix-m) dist-root))
+	                    (tar-a (merge-pathnames (format nil "archive/~A/~A.tgz" proj-a prefix-a) dist-root))
+	                    (stage (merge-pathnames "stage/" tmp))
+	                    (sha1-b nil)
+	                    (sha1-m nil)
+	                    (sha1-a nil))
+	               (ensure-directories-exist dist-dir)
+	               (ensure-directories-exist archive-dir)
+	               (ensure-directories-exist stage)
+	               (labels ((content-sha1-hex (dir)
+	                          (clpm.crypto.sha256:bytes-to-hex
+	                           (clpm.crypto.sha1:sha1-files
+	                            (mapcar #'cdr (clpm.io.fs:walk-files dir))))))
 
-               ;; ql-b
-               (let* ((dir-b (make-ql-project
-                              stage proj-b prefix-b
+	               ;; ql-b
+	               (let* ((dir-b (make-ql-project
+	                              stage proj-b prefix-b
                               :systems (list proj-b)
                               :files (list
                                       (cons (format nil "~A.asd" proj-b)
@@ -250,15 +257,16 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
                                                       proj-b "0.0.0" proj-b)))
                                       (cons (format nil "~A.lisp" proj-b)
                                             (with-output-to-string (s)
-                                              (format s "(defpackage #:~A (:use #:cl) (:export #:value))~%" proj-b)
-                                              (format s "(in-package #:~A)~%" proj-b)
-                                              (format s "(defun value () \"B\")~%")))))))
-                 (ensure-directories-exist tar-b)
-                 (tar-gz-dir dir-b tar-b))
+	                                              (format s "(defpackage #:~A (:use #:cl) (:export #:value))~%" proj-b)
+	                                              (format s "(in-package #:~A)~%" proj-b)
+	                                              (format s "(defun value () \"B\")~%")))))))
+	                 (ensure-directories-exist tar-b)
+	                 (tar-gz-dir dir-b tar-b)
+	                 (setf sha1-b (content-sha1-hex dir-b)))
 
-               ;; ql-multi (two systems in one .asd)
-               (let* ((dir-m (make-ql-project
-                              stage proj-m prefix-m
+	               ;; ql-multi (two systems in one .asd)
+	               (let* ((dir-m (make-ql-project
+	                              stage proj-m prefix-m
                               :systems (list proj-m "ql-multi/extra")
                               :files (list
                                       (cons (format nil "~A.asd" proj-m)
@@ -274,15 +282,16 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
                                               (format s "(defun multi-value () \"M\")~%")))
                                       (cons "ql-multi-extra.lisp"
                                             (with-output-to-string (s)
-                                              (format s "(defpackage #:ql-multi-extra (:use #:cl) (:export #:extra-value))~%")
-                                              (format s "(in-package #:ql-multi-extra)~%")
-                                              (format s "(defun extra-value () \"MX\")~%")))))))
-                 (ensure-directories-exist tar-m)
-                 (tar-gz-dir dir-m tar-m))
+	                                              (format s "(defpackage #:ql-multi-extra (:use #:cl) (:export #:extra-value))~%")
+	                                              (format s "(in-package #:ql-multi-extra)~%")
+	                                              (format s "(defun extra-value () \"MX\")~%")))))))
+	                 (ensure-directories-exist tar-m)
+	                 (tar-gz-dir dir-m tar-m)
+	                 (setf sha1-m (content-sha1-hex dir-m)))
 
-               ;; ql-a depends on ql-b and ql-multi/extra
-               (let* ((dir-a (make-ql-project
-                              stage proj-a prefix-a
+	               ;; ql-a depends on ql-b and ql-multi/extra
+	               (let* ((dir-a (make-ql-project
+	                              stage proj-a prefix-a
                               :systems (list proj-a)
                               :files (list
                                       (cons (format nil "~A.asd" proj-a)
@@ -293,20 +302,18 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
                                             (with-output-to-string (s)
                                               (format s "(defpackage #:~A (:use #:cl) (:export #:greeting))~%" proj-a)
                                               (format s "(in-package #:~A)~%" proj-a)
-                                              (format s "(defun greeting (&optional (args nil))~%")
-                                              (format s "  (declare (ignore args))~%")
-                                              (format s "  (concatenate 'string \"A(\" (ql-b:value) \"/\" (ql-multi-extra:extra-value) \")\"))~%")))))))
-                 (ensure-directories-exist tar-a)
-                 (tar-gz-dir dir-a tar-a))
+	                                              (format s "(defun greeting (&optional (args nil))~%")
+	                                              (format s "  (declare (ignore args))~%")
+	                                              (format s "  (concatenate 'string \"A(\" (ql-b:value) \"/\" (ql-multi-extra:extra-value) \")\"))~%")))))))
+	                 (ensure-directories-exist tar-a)
+	                 (tar-gz-dir dir-a tar-a)
+	                 (setf sha1-a (content-sha1-hex dir-a)))
 
-               ;; releases.txt needs tarball SHA-1
-               (let ((sha1-b (clpm.crypto.sha256:bytes-to-hex (clpm.crypto.sha1:sha1-file tar-b)))
-                     (sha1-m (clpm.crypto.sha256:bytes-to-hex (clpm.crypto.sha1:sha1-file tar-m)))
-                     (sha1-a (clpm.crypto.sha256:bytes-to-hex (clpm.crypto.sha1:sha1-file tar-a))))
-                 (write-text
-                  distinfo
-                  (with-output-to-string (s)
-                    (format s "system-index-url: ~Adist/systems.txt~%" base-url)
+	               ;; releases.txt needs tarball SHA-1
+	                 (write-text
+	                  distinfo
+	                  (with-output-to-string (s)
+	                    (format s "system-index-url: ~Adist/systems.txt~%" base-url)
                     (format s "release-index-url: ~Adist/releases.txt~%" base-url)))
                  (write-text
                   systems-txt
@@ -316,18 +323,18 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
                     (format s "~A ~A.asd ~A ~A~%" proj-m proj-m "ql-multi/extra" proj-m)
                     (format s "~A ~A.asd ~A ~A ~A~%" proj-a proj-a proj-a proj-b "ql-multi/extra")))
                  (write-text
-                  releases-txt
-                  (with-output-to-string (s)
-                    (format s "~A ~Aarchive/~A/~A.tgz 0 0 ~A ~A ~A.asd~%"
-                            proj-b base-url proj-b prefix-b sha1-b prefix-b proj-b)
-                    (format s "~A ~Aarchive/~A/~A.tgz 0 0 ~A ~A ~A.asd~%"
-                            proj-m base-url proj-m prefix-m sha1-m prefix-m proj-m)
-                    (format s "~A ~Aarchive/~A/~A.tgz 0 0 ~A ~A ~A.asd~%"
-                            proj-a base-url proj-a prefix-a sha1-a prefix-a proj-a)))))
+	                  releases-txt
+	                  (with-output-to-string (s)
+	                    (format s "~A ~Aarchive/~A/~A.tgz 0 0 ~A ~A ~A.asd~%"
+	                            proj-b base-url proj-b prefix-b sha1-b prefix-b proj-b)
+	                    (format s "~A ~Aarchive/~A/~A.tgz 0 0 ~A ~A ~A.asd~%"
+	                            proj-m base-url proj-m prefix-m sha1-m prefix-m proj-m)
+	                    (format s "~A ~Aarchive/~A/~A.tgz 0 0 ~A ~A ~A.asd~%"
+	                            proj-a base-url proj-a prefix-a sha1-a prefix-a proj-a))))))
 
-             (unwind-protect
-                  (progn
-                    (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
+	             (unwind-protect
+	                  (progn
+	                    (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
                     ;; Configure a quicklisp registry pointed at our local dist.
                     (assert-eql 0 (clpm:run-cli (list "registry" "add"
                                                       "--quicklisp"
@@ -421,10 +428,11 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
                           (assert-true (search "A(B/MX)" out :test #'char-equal)
                                        "Expected output from dependency, got:~%~A"
                                        out)))))
-               (if old-home
-                   (sb-posix:setenv "CLPM_HOME" old-home 1)
-                   (sb-posix:unsetenv "CLPM_HOME"))))
-        (funcall stop-server)))))
+               (progn
+                 (if old-home
+                     (sb-posix:setenv "CLPM_HOME" old-home 1)
+                     (sb-posix:unsetenv "CLPM_HOME"))
+                 (funcall stop-server)))))))
 
 (format t "  Quicklisp workflow PASSED~%")
 (format t "~%Quicklisp workflow tests PASSED!~%")

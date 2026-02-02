@@ -1,0 +1,18 @@
+(:project
+  :name "quicklisp-app"
+  :version "0.1.0"
+  :systems ("quicklisp-app")
+  :run (:system "quicklisp-app" :function "quicklisp-app::main")
+  :test (:systems ("quicklisp-app/test"))
+  :package (:output "dist/quicklisp-app" :system "quicklisp-app" :function "quicklisp-app::main")
+  :depends
+    ((:dep :system "alexandria" :constraint nil))
+  :dev-depends ()
+  :test-depends
+    ((:dep :system "fiveam" :constraint nil))
+  :registries
+    ((:quicklisp
+      :name "quicklisp"
+      :url "https://beta.quicklisp.org/dist/quicklisp.txt"))
+  :scripts ())
+

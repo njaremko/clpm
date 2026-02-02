@@ -123,6 +123,8 @@
               (replace buffer data :start1 buflen :start2 0)
               (setf (sha1-ctx-buflen ctx) (+ buflen len))
               (return-from sha1-update ctx)))))
+    ;; Ensure ctx buflen matches local state after processing any buffered block.
+    (setf (sha1-ctx-buflen ctx) buflen)
     ;; Process complete blocks.
     (loop while (>= (- len pos) 64) do
       (let ((block (make-array 64 :element-type '(unsigned-byte 8))))
@@ -130,9 +132,11 @@
         (sha1-transform ctx block)
         (incf pos 64)))
     ;; Buffer remaining data.
-    (when (< pos len)
-      (replace buffer data :start1 0 :start2 pos)
-      (setf (sha1-ctx-buflen ctx) (- len pos)))
+    (if (< pos len)
+        (progn
+          (replace buffer data :start1 0 :start2 pos)
+          (setf (sha1-ctx-buflen ctx) (- len pos)))
+        (setf (sha1-ctx-buflen ctx) 0))
     ctx))
 
 (defun sha1-final (ctx)
@@ -194,3 +198,16 @@ Returns a 20-byte array."
   (with-open-file (stream path :element-type '(unsigned-byte 8))
     (sha1-stream stream)))
 
+(defun sha1-files (paths &key (buffer-size 8192))
+  "Compute SHA-1 hash of the concatenated contents of PATHS.
+
+PATHS is a list of pathnames to regular files. Files are processed in the order
+given. Returns a 20-byte array."
+  (let ((ctx (make-sha1-ctx))
+        (buffer (make-array buffer-size :element-type '(unsigned-byte 8))))
+    (dolist (path paths)
+      (with-open-file (stream path :element-type '(unsigned-byte 8))
+        (loop for n = (read-sequence buffer stream)
+              while (> n 0)
+              do (sha1-update ctx (subseq buffer 0 n)))))
+    (sha1-final ctx)))
