@@ -2052,18 +2052,19 @@ Manifest schema:
 	                     (with-standard-io-syntax
                        (let ((*package* (find-package "CL-USER")))
                          (prin1-to-string defun-form))))
-	                   (save-str
-	                     (with-standard-io-syntax
-	                       (let ((*package* (find-package "CL-USER")))
-	                         (prin1-to-string save-form))))
-		                   (deps (project-dependency-system-ids project '(:depends)))
-		                   (sbcl-args (append (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
+		                   (save-str
+		                     (with-standard-io-syntax
+		                       (let ((*package* (find-package "CL-USER")))
+		                         (prin1-to-string save-form))))
+			                   (deps (project-dependency-system-ids project '(:depends)))
+			                   (sbcl-args (append (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
 		                                            "--load" (namestring config-path))
 		                                      (sbcl-load-systems-argv deps)
-	                                      (list "--eval" (format nil "(asdf:load-system ~S)" system)
-	                                            "--eval" defun-str
-	                                            "--eval" save-str))))
-	              (ensure-directories-exist output-path)
+		                                      (list "--eval" "(ignore-errors (require :sb-posix))"
+		                                            "--eval" (format nil "(asdf:load-system ~S)" system)
+		                                            "--eval" defun-str
+		                                            "--eval" save-str))))
+		              (ensure-directories-exist output-path)
 
               (log-info "Packaging ~A -> ~A" system (namestring output-path))
               (multiple-value-bind (out err rc)
