@@ -109,11 +109,19 @@
              (assert-true (search "Hello, codex!" output)
                           "Unexpected binary output: ~S" output))
 
-           ;; Verify metadata includes lock hash.
-           (let* ((meta (clpm.io.sexp:read-safe-sexp-from-file meta-path))
-                  (lock (getf (cdr meta) :lock-sha256)))
-             (assert-true (and (stringp lock) (= (length lock) 64))
-                          "Expected :lock-sha256 64-char hex, got ~S" lock))))
+	           ;; Verify metadata includes lock hash.
+	           (let* ((meta (clpm.io.sexp:read-safe-sexp-from-file meta-path))
+	                  (lock (getf (cdr meta) :lock-sha256)))
+	             (assert-true (and (stringp lock) (= (length lock) 64))
+	                          "Expected :lock-sha256 64-char hex, got ~S" lock))
+
+	           ;; Non-SBCL packaging is explicitly rejected.
+	           (uiop:with-current-directory (project-root)
+	             (let ((*error-output* (make-string-output-stream)))
+	               (assert-eql 1 (clpm:run-cli '("--lisp" "ccl" "package")))
+	               (let ((err (get-output-stream-string *error-output*)))
+	                 (assert-true (search "Packaging currently supports SBCL only" err)
+	                              "Expected SBCL-only message, got: ~S" err))))))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME"))))

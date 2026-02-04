@@ -1887,6 +1887,10 @@ Manifest schema:
       (return-from cmd-package 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
            (pkg (clpm.project:project-package project)))
+      (let ((kind (effective-lisp-kind project)))
+        (unless (eq kind :sbcl)
+          (log-error "Packaging currently supports SBCL only; re-run with --lisp sbcl")
+          (return-from cmd-package 1)))
       (unless pkg
         (log-error "No :package entry configured in clpm.project")
         (return-from cmd-package 1))
