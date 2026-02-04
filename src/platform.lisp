@@ -192,27 +192,117 @@ ERROR-OUTPUT can be :string, :output (merge with output), nil, or a stream.
 DIRECTORY is the working directory.
 INPUT is a string or stream to pass to stdin.
 TIMEOUT, when non-nil, is a number of seconds to allow the process to run."
-  (let ((result-output nil)
-        (result-error nil))
-    (multiple-value-bind (output-val error-val exit-code)
-        (uiop:run-program command
-                          :output (case output
-                                    (:string :string)
-                                    (:lines :string)
-                                    (t output))
-                          :error-output (case error-output
-                                          (:string :string)
-                                          (:output :output)
-                                          (t error-output))
-                          :directory directory
-                          :input input
-                          :timeout timeout
-                          :ignore-error-status t)
-      (setf result-output (if (eq output :lines)
-                              (uiop:split-string output-val :separator '(#\Newline))
-                              output-val))
-      (setf result-error (when (eq error-output :string) error-val))
-      (values result-output result-error exit-code))))
+  ;; UIOP's `run-program` may try to load implementation contribs (e.g. sb-posix)
+  ;; on some SBCL distributions. Prefer SBCL's native runner when available.
+  (labels ((slurp-stream (stream)
+             (let ((buf (make-string 4096)))
+               (with-output-to-string (out)
+                 (loop
+                   (let ((n (read-sequence buf stream)))
+                     (when (zerop n)
+                       (return))
+                     (write-string buf out :end n))))))
+           (normalize-io (x)
+             (case x
+               (:string :stream)
+               (:lines :stream)
+               (:interactive t)
+               (t x)))
+           (normalize-input (x)
+             (cond
+               ((null x) nil)
+               ((stringp x) (make-string-input-stream x))
+               (t x)))
+           (maybe-split-lines (s)
+             (uiop:split-string s :separator '(#\Newline)))
+           (wait-with-timeout (proc timeout-seconds)
+             (when (null timeout-seconds)
+               (sb-ext:process-wait proc)
+               (return-from wait-with-timeout t))
+             (unless (and (numberp timeout-seconds) (plusp timeout-seconds))
+               (sb-ext:process-wait proc)
+               (return-from wait-with-timeout t))
+             (let* ((deadline (+ (get-internal-real-time)
+                                 (* timeout-seconds internal-time-units-per-second))))
+               (loop while (sb-ext:process-alive-p proc) do
+                 (when (>= (get-internal-real-time) deadline)
+                   (ignore-errors (sb-ext:process-kill proc 15))
+                   (sleep 0.05)
+                   (ignore-errors (sb-ext:process-kill proc 9))
+                   (return-from wait-with-timeout nil))
+                 (sleep 0.01))
+               t)))
+    #+sbcl
+    (let* ((command (or command '()))
+           (program (first command))
+           (args (rest command)))
+      (unless (and (stringp program) (plusp (length program)))
+        (error "run-program expects a non-empty command list, got ~S" command))
+      (let* ((out-spec (normalize-io output))
+             (err-spec (if (eq error-output :output)
+                           :output
+                           (normalize-io error-output)))
+             (in-spec (normalize-input input))
+             (proc (sb-ext:run-program program args
+                                       :search t
+                                       :wait nil
+                                       :directory directory
+                                       :input (or in-spec nil)
+                                       :output out-spec
+                                       :error err-spec)))
+        (unwind-protect
+             (let ((ok (wait-with-timeout proc timeout)))
+               (cond
+                 ((not ok)
+                  (values (if (eq output :lines) '() "")
+                          (when (eq error-output :string) "Process timed out")
+                          124))
+                 (t
+                  (let* ((exit-code (or (sb-ext:process-exit-code proc) 1))
+                         (out-str (when (eq out-spec :stream)
+                                    (let ((s (sb-ext:process-output proc)))
+                                      (when s (slurp-stream s)))))
+                         (err-str (when (eq err-spec :stream)
+                                    (let ((s (sb-ext:process-error proc)))
+                                      (when s (slurp-stream s))))))
+                    (values (cond
+                              ((eq output :lines) (maybe-split-lines (or out-str "")))
+                              ((eq output :string) (or out-str ""))
+                              (t out-str))
+                            (when (eq error-output :string)
+                              (or err-str ""))
+                            exit-code)))))
+          (ignore-errors
+           (let ((s (sb-ext:process-output proc)))
+             (when (streamp s) (close s))))
+          (ignore-errors
+           (let ((s (sb-ext:process-error proc)))
+             (when (and (streamp s) (not (eq err-spec :output))) (close s))))
+          (ignore-errors
+           (let ((s (sb-ext:process-input proc)))
+             (when (streamp s) (close s)))))))
+    #-sbcl
+    (let ((result-output nil)
+          (result-error nil))
+      (multiple-value-bind (output-val error-val exit-code)
+          (uiop:run-program command
+                            :output (case output
+                                      (:string :string)
+                                      (:lines :string)
+                                      (t output))
+                            :error-output (case error-output
+                                            (:string :string)
+                                            (:output :output)
+                                            (t error-output))
+                            :directory directory
+                            :input input
+                            :timeout timeout
+                            :ignore-error-status t)
+        (setf result-output (if (eq output :lines)
+                                (uiop:split-string output-val :separator '(#\Newline))
+                                output-val))
+        (setf result-error (when (eq error-output :string) error-val))
+        (values result-output result-error exit-code)))))
 
 (defun which (program)
   "Find PROGRAM on PATH without relying on external `which`.
