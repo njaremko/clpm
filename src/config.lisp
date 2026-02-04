@@ -29,7 +29,9 @@
          (case key
            (:url (setf (clpm.project:registry-ref-url ref) val))
            (:name (setf (clpm.project:registry-ref-name ref) val))
-           (:trust (setf (clpm.project:registry-ref-trust ref) val)))))
+           (:trust (setf (clpm.project:registry-ref-trust ref) val))
+           (:systems-sha256 (setf (clpm.project:registry-ref-quicklisp-systems-sha256 ref) val))
+           (:releases-sha256 (setf (clpm.project:registry-ref-quicklisp-releases-sha256 ref) val)))))
       (t
        (error 'clpm.errors:clpm-parse-error
               :message (format nil "Unknown registry format: ~S" form))))
@@ -40,7 +42,13 @@
   `(,(clpm.project:registry-ref-kind ref)
     :url ,(clpm.project:registry-ref-url ref)
     :name ,(clpm.project:registry-ref-name ref)
-    :trust ,(clpm.project:registry-ref-trust ref)))
+    :trust ,(clpm.project:registry-ref-trust ref)
+    ,@(when (and (eq (clpm.project:registry-ref-kind ref) :quicklisp)
+                 (clpm.project:registry-ref-quicklisp-systems-sha256 ref))
+        (list :systems-sha256 (clpm.project:registry-ref-quicklisp-systems-sha256 ref)))
+    ,@(when (and (eq (clpm.project:registry-ref-kind ref) :quicklisp)
+                 (clpm.project:registry-ref-quicklisp-releases-sha256 ref))
+        (list :releases-sha256 (clpm.project:registry-ref-quicklisp-releases-sha256 ref)))))
 
 (defun parse-config (form)
   "Parse a config FORM into a config struct."

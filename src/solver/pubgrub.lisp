@@ -561,6 +561,10 @@ Prefers lockfile selection, then highest version."
                :kind kind
                :url (clpm.registry:registry-url reg)
                :trust (clpm.registry:registry-trust-key reg)
+               :quicklisp-systems-sha256 (when (eq kind :quicklisp)
+                                          (clpm.registry:registry-quicklisp-systems-sha256 reg))
+               :quicklisp-releases-sha256 (when (eq kind :quicklisp)
+                                           (clpm.registry:registry-quicklisp-releases-sha256 reg))
                :commit (when (eq kind :git)
                          (clpm.registry:git-rev-parse
                           (clpm.registry:registry-local-path

@@ -65,6 +65,8 @@ When not in a project, only the global config registries are used."
              (clpm.project:registry-ref-name ref)
              (clpm.project:registry-ref-url ref)
              :trust-key (clpm.project:registry-ref-trust ref)
+             :quicklisp-systems-sha256 (clpm.project:registry-ref-quicklisp-systems-sha256 ref)
+             :quicklisp-releases-sha256 (clpm.project:registry-ref-quicklisp-releases-sha256 ref)
              :kind (clpm.project:registry-ref-kind ref))))))
 
 ;;; init command
@@ -358,7 +360,9 @@ Returns (values system-id constraint-form-or-nil)."
                   :name ,(clpm.project:registry-ref-name ref)
                   :kind ,(clpm.project:registry-ref-kind ref)
                   :url ,(clpm.project:registry-ref-url ref)
-                  :trust ,(clpm.project:registry-ref-trust ref)))))
+                  :trust ,(clpm.project:registry-ref-trust ref)
+                  :systems-sha256 ,(clpm.project:registry-ref-quicklisp-systems-sha256 ref)
+                  :releases-sha256 ,(clpm.project:registry-ref-quicklisp-releases-sha256 ref)))))
     (setf items
           (sort items
                 (lambda (a b)
@@ -2192,9 +2196,15 @@ Manifest schema:
       (let* ((name (clpm.project:registry-ref-name ref))
              (kind (clpm.project:registry-ref-kind ref))
              (url (clpm.project:registry-ref-url ref))
-             (trust (clpm.project:registry-ref-trust ref)))
+             (trust (clpm.project:registry-ref-trust ref))
+             (ql-systems (clpm.project:registry-ref-quicklisp-systems-sha256 ref))
+             (ql-releases (clpm.project:registry-ref-quicklisp-releases-sha256 ref)))
         (log-verbose "Loading registry: ~A" name)
-        (push (clpm.registry:clone-registry name url :trust-key trust :kind kind)
+        (push (clpm.registry:clone-registry name url
+                                            :trust-key trust
+                                            :quicklisp-systems-sha256 ql-systems
+                                            :quicklisp-releases-sha256 ql-releases
+                                            :kind kind)
               registries)))
     (nreverse registries)))
 
@@ -2339,61 +2349,71 @@ Manifest schema:
                          (clpm.project:registry-ref-trust r)))))
        0)
 
-      ((string= subcommand "add")
-       (let ((name nil)
-             (url nil)
-             (trust nil)
-             (kind :git))
-         (loop while rest do
-           (let ((arg (pop rest)))
-             (cond
-               ((string= arg "--name") (setf name (pop rest)))
-               ((string= arg "--url") (setf url (pop rest)))
-               ((string= arg "--trust") (setf trust (pop rest)))
-               ((string= arg "--quicklisp") (setf kind :quicklisp))
-               (t
-                (log-error "Unknown option: ~A" arg)
-                (return-from cmd-registry 1)))))
-         (when (eq kind :quicklisp)
-           (unless name
-             (setf name "quicklisp"))
-           (unless url
-             (setf url "https://beta.quicklisp.org/dist/quicklisp.txt"))
-           (setf trust nil))
-         (case kind
-           (:git
-            (unless (and name url trust)
-              (log-error "Missing required options: --name, --url, --trust")
-              (return-from cmd-registry 1)))
-           (:quicklisp
-            (unless (and name url)
-              (log-error "Missing required options: --name, --url")
-              (return-from cmd-registry 1)))
-           (t
-            (log-error "Unknown registry kind: ~S" kind)
-            (return-from cmd-registry 1)))
-         (let* ((cfg (clpm.config:read-config))
-                (regs (clpm.config:config-registries cfg))
-                (existing (find name regs
-                                :key #'clpm.project:registry-ref-name
-                                :test #'string=)))
-           (if existing
-               (progn
-                 (setf (clpm.project:registry-ref-kind existing) kind
-                       (clpm.project:registry-ref-url existing) url
-                       (clpm.project:registry-ref-trust existing) trust)
-                 (log-info "Updated registry: ~A" name))
-               (progn
-                 (push (clpm.project::make-registry-ref
-                        :kind kind
-                        :name name
-                        :url url
-                        :trust trust)
-                       regs)
-                 (setf (clpm.config:config-registries cfg) regs)
-                 (log-info "Added registry: ~A" name)))
-           (clpm.config:write-config cfg))
-         0))
+	      ((string= subcommand "add")
+	       (let ((name nil)
+	             (url nil)
+	             (trust nil)
+	             (kind :git))
+	         (labels ((normalize-trust-arg (s)
+	                    (cond
+	                      ((null s) nil)
+	                      ((or (string= s "none") (string= s "nil")) nil)
+	                      (t s))))
+	           (loop while rest do
+	             (let ((arg (pop rest)))
+	               (cond
+	                 ((string= arg "--name") (setf name (pop rest)))
+	                 ((string= arg "--url") (setf url (pop rest)))
+	                 ((string= arg "--trust") (setf trust (normalize-trust-arg (pop rest))))
+	                 ((string= arg "--quicklisp") (setf kind :quicklisp))
+	                 (t
+	                  (log-error "Unknown option: ~A" arg)
+	                  (return-from cmd-registry 1)))))
+
+	           (when (eq kind :quicklisp)
+	             (unless name
+	               (setf name "quicklisp"))
+	             (unless url
+	               (setf url "https://beta.quicklisp.org/dist/quicklisp.txt"))
+	             (unless trust
+	               ;; Safer default: pin distinfo digest on first use (TOFU).
+	               (setf trust "tofu")))
+
+	           (case kind
+	             (:git
+	              (unless (and name url trust)
+	                (log-error "Missing required options: --name, --url, --trust")
+	                (return-from cmd-registry 1)))
+	             (:quicklisp
+	              (unless (and name url)
+	                (log-error "Missing required options: --name, --url")
+	                (return-from cmd-registry 1)))
+	             (t
+	              (log-error "Unknown registry kind: ~S" kind)
+	              (return-from cmd-registry 1)))
+
+	           (let* ((cfg (clpm.config:read-config))
+	                  (regs (clpm.config:config-registries cfg))
+	                  (existing (find name regs
+	                                  :key #'clpm.project:registry-ref-name
+	                                  :test #'string=)))
+	             (if existing
+	                 (progn
+	                   (setf (clpm.project:registry-ref-kind existing) kind
+	                         (clpm.project:registry-ref-url existing) url
+	                         (clpm.project:registry-ref-trust existing) trust)
+	                   (log-info "Updated registry: ~A" name))
+	                 (progn
+	                   (push (clpm.project::make-registry-ref
+	                          :kind kind
+	                          :name name
+	                          :url url
+	                          :trust trust)
+	                         regs)
+	                   (setf (clpm.config:config-registries cfg) regs)
+	                   (log-info "Added registry: ~A" name)))
+	             (clpm.config:write-config cfg))
+	           0)))
 
       ((string= subcommand "init")
        (let ((dir nil)
@@ -3012,20 +3032,25 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                (tarball-count 0)
                (git-count 0)
                (path-count 0)
-               (path-systems '())
-               (git-unpinned-systems '())
-               (quicklisp-no-trust '())
-               (git-sig-missing '()))
+	               (path-systems '())
+	               (git-unpinned-systems '())
+	               (quicklisp-no-trust '())
+	               (quicklisp-tofu '())
+	               (git-sig-missing '()))
 
-          (dolist (reg locked-registries)
-            (let ((kind (clpm.project:locked-registry-kind reg))
-                  (name (clpm.project:locked-registry-name reg))
-                  (trust (clpm.project:locked-registry-trust reg))
-                  (sig (clpm.project:locked-registry-signature reg)))
-              (when (and (eq kind :quicklisp) (null trust))
-                (push name quicklisp-no-trust))
-              (when (and (eq kind :git) trust (null sig))
-                (push name git-sig-missing))))
+	          (dolist (reg locked-registries)
+	            (let ((kind (clpm.project:locked-registry-kind reg))
+	                  (name (clpm.project:locked-registry-name reg))
+	                  (trust (clpm.project:locked-registry-trust reg))
+	                  (sig (clpm.project:locked-registry-signature reg)))
+	              (when (and (eq kind :quicklisp) (null trust))
+	                (push name quicklisp-no-trust))
+	              (when (and (eq kind :quicklisp)
+	                         (stringp trust)
+	                         (string-equal trust "tofu"))
+	                (push name quicklisp-tofu))
+	              (when (and (eq kind :git) trust (null sig))
+	                (push name git-sig-missing))))
 
           (dolist (locked (clpm.project:lockfile-resolved lock))
             (let* ((id (clpm.project:locked-system-id locked))
@@ -3042,20 +3067,25 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                    (incf path-count)
                    (push id path-systems))))))
 
-          (setf path-systems (sort (remove-duplicates path-systems :test #'string=) #'string<)
-                git-unpinned-systems (sort (remove-duplicates git-unpinned-systems :test #'string=) #'string<)
-                quicklisp-no-trust (sort (remove-duplicates quicklisp-no-trust :test #'string=) #'string<)
-                git-sig-missing (sort (remove-duplicates git-sig-missing :test #'string=) #'string<))
+	          (setf path-systems (sort (remove-duplicates path-systems :test #'string=) #'string<)
+	                git-unpinned-systems (sort (remove-duplicates git-unpinned-systems :test #'string=) #'string<)
+	                quicklisp-no-trust (sort (remove-duplicates quicklisp-no-trust :test #'string=) #'string<)
+	                quicklisp-tofu (sort (remove-duplicates quicklisp-tofu :test #'string=) #'string<)
+	                git-sig-missing (sort (remove-duplicates git-sig-missing :test #'string=) #'string<))
 
           (let ((warnings '()))
             (when path-systems
               (push (format nil "path dependencies present: ~{~A~^, ~}" path-systems) warnings))
             (when git-unpinned-systems
               (push (format nil "git dependencies missing commit pin: ~{~A~^, ~}" git-unpinned-systems) warnings))
-            (when quicklisp-no-trust
-              (push (format nil "quicklisp trust not configured: ~{~A~^, ~}" quicklisp-no-trust) warnings))
-            (when git-sig-missing
-              (push (format nil "git registry snapshot signature not recorded: ~{~A~^, ~}" git-sig-missing) warnings))
+	            (when quicklisp-no-trust
+	              (push (format nil "quicklisp trust not configured: ~{~A~^, ~}" quicklisp-no-trust) warnings))
+	            (when quicklisp-tofu
+	              (push (format nil "quicklisp trust is tofu (not pinned): ~{~A~^, ~}. Run: clpm registry update"
+	                            quicklisp-tofu)
+	                    warnings))
+	            (when git-sig-missing
+	              (push (format nil "git registry snapshot signature not recorded: ~{~A~^, ~}" git-sig-missing) warnings))
             (setf warnings (nreverse warnings))
 
             (if jsonp
@@ -3084,12 +3114,16 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                              (when (eq (clpm.project:locked-registry-kind reg) :quicklisp)
                                (let* ((name (clpm.project:locked-registry-name reg))
                                       (trust (clpm.project:locked-registry-trust reg))
-                                      (pin (and (stringp trust)
-                                                (starts-with-p (string-downcase trust) "sha256:")
-                                                trust)))
+                                      (distinfo-pin (and (stringp trust)
+                                                         (starts-with-p (string-downcase trust) "sha256:")
+                                                         trust))
+                                      (systems (clpm.project:locked-registry-quicklisp-systems-sha256 reg))
+                                      (releases (clpm.project:locked-registry-quicklisp-releases-sha256 reg)))
                                  (push (list :object
                                              (list (cons "name" name)
-                                                   (cons "pin" (or pin ""))))
+                                                   (cons "distinfoPin" (or distinfo-pin ""))
+                                                   (cons "systemsSha256" (or systems ""))
+                                                   (cons "releasesSha256" (or releases ""))))
                                        pins))))
                            (nreverse pins))))
                   (clpm.io.json:write-json
@@ -3145,18 +3179,24 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                       (when (eq (clpm.project:locked-registry-kind reg) :quicklisp)
                         (let* ((name (clpm.project:locked-registry-name reg))
                                (trust (clpm.project:locked-registry-trust reg))
-                               (pin (cond
-                                      ((and (stringp trust)
-                                            (starts-with-p (string-downcase trust) "sha256:"))
-                                       trust)
-                                      ((and (stringp trust) (plusp (length trust))) trust)
-                                      (t "-"))))
-                          (push (cons name pin) pins))))
+                               (distinfo (cond
+                                          ((and (stringp trust)
+                                                (starts-with-p (string-downcase trust) "sha256:"))
+                                           trust)
+                                          ((and (stringp trust) (plusp (length trust))) trust)
+                                          (t "-")))
+                               (systems (or (clpm.project:locked-registry-quicklisp-systems-sha256 reg) "-"))
+                               (releases (or (clpm.project:locked-registry-quicklisp-releases-sha256 reg) "-")))
+                          (push (list name distinfo systems releases) pins))))
                     (setf pins (sort pins #'string< :key #'car))
                     (when pins
-                      (format t "Quicklisp distinfo pins:~%")
+                      (format t "Quicklisp snapshot pins:~%")
                       (dolist (p pins)
-                        (format t "  ~A~C~A~%" (car p) #\Tab (cdr p)))))
+                        (format t "  ~A~Cdistinfo: ~A~Csystems: ~A~Creleases: ~A~%"
+                                (first p) #\Tab
+                                (second p) #\Tab
+                                (third p) #\Tab
+                                (fourth p)))))))
 
                   (format t "Sources:~%")
                   (format t "  tarball: ~D~%" tarball-count)
@@ -3166,7 +3206,7 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                     (format t "Warnings:~%")
                     (dolist (w warnings)
                       (format t "  - ~A~%" w)))
-                  0))))))))
+                  0))))))
 
 ;;; sbom command
 
@@ -3230,6 +3270,8 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                    (kind (clpm.project:locked-registry-kind lr))
                    (url (clpm.project:locked-registry-url lr))
                    (trust (clpm.project:locked-registry-trust lr))
+                   (ql-systems (clpm.project:locked-registry-quicklisp-systems-sha256 lr))
+                   (ql-releases (clpm.project:locked-registry-quicklisp-releases-sha256 lr))
                    (local (clpm.registry:registry-local-path name)))
               (when (and (stringp name) (plusp (length name)))
                 (let ((loadp t))
@@ -3247,6 +3289,8 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                     (handler-case
                         (push (clpm.registry:clone-registry name url
                                                             :trust-key trust
+                                                            :quicklisp-systems-sha256 ql-systems
+                                                            :quicklisp-releases-sha256 ql-releases
                                                             :kind kind)
                               registries)
                       (error (c)

@@ -154,6 +154,8 @@
            #:registry-ref-kind
            #:registry-ref-url
            #:registry-ref-trust
+           #:registry-ref-quicklisp-systems-sha256
+           #:registry-ref-quicklisp-releases-sha256
            #:lockfile
            #:make-lockfile
            #:lockfile-format
@@ -191,6 +193,8 @@
            #:locked-registry-commit
            #:locked-registry-trust
            #:locked-registry-signature
+           #:locked-registry-quicklisp-systems-sha256
+           #:locked-registry-quicklisp-releases-sha256
            #:read-project-file
            #:write-project-file
            #:serialize-project
@@ -221,6 +225,8 @@
            #:registry-path
            #:registry-trust-key
            #:registry-snapshot-sig-sha256
+           #:registry-quicklisp-systems-sha256
+           #:registry-quicklisp-releases-sha256
            #:registry-snapshot
            #:registry-local-path
            #:snapshot
