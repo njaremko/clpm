@@ -29,6 +29,7 @@
      (:file "platform")
      (:file "store")
      (:file "project")
+     (:file "workspace")
      (:file "config")
      (:module "registry"
       :serial t

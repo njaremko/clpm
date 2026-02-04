@@ -180,6 +180,17 @@
            #:lockfile-project-name
            #:lockfile-clpm-version))
 
+(defpackage #:clpm.workspace
+  (:use #:cl #:clpm.io.sexp #:clpm.errors)
+  (:export #:workspace
+           #:make-workspace
+           #:workspace-format
+           #:workspace-members
+           #:read-workspace-file
+           #:write-workspace-file
+           #:find-workspace-root
+           #:find-project-or-workspace-root))
+
 (defpackage #:clpm.registry
   (:use #:cl #:clpm.io.sexp #:clpm.crypto.sha256 #:clpm.crypto.ed25519 #:clpm.errors)
   (:export #:registry
