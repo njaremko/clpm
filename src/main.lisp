@@ -292,10 +292,54 @@ This function must not call `sb-ext:exit` so it can be used from tests."
 
 ;;; Build standalone executable
 
+(defun %chmod-755 (path)
+  (let ((path (namestring (uiop:ensure-pathname path :want-existing nil))))
+    (when (uiop:os-windows-p)
+      (return-from %chmod-755 t))
+    (handler-case
+        (let ((proc (sb-ext:run-program "chmod" (list "+x" path)
+                                        :search t
+                                        :output nil
+                                        :error nil
+                                        :wait t)))
+          (zerop (sb-ext:process-exit-code proc)))
+      (error ()
+        nil))))
+
+(defun %write-sbcl-wrapper-script (wrapper-path bin-basename)
+  "Write a small POSIX sh wrapper that runs BIN-BASENAME with SBCL runtime
+option processing disabled so user flags like --help/--version reach Lisp."
+  (let ((wrapper-path (uiop:ensure-pathname wrapper-path :want-existing nil :want-file t)))
+    (ensure-directories-exist wrapper-path)
+    (with-open-file (s wrapper-path :direction :output
+                            :if-exists :supersede
+                            :external-format :utf-8)
+      (write-line "#!/bin/sh" s)
+      (write-line "set -e" s)
+      (format s "exec \"$(dirname \"$0\")/~A\" --end-runtime-options \"$@\"~%" bin-basename))
+    (unless (%chmod-755 wrapper-path)
+      (error "Failed to mark wrapper executable: ~A" (namestring wrapper-path)))))
+
 (defun build-executable (output-path)
-  "Build standalone CLPM executable."
-  (sb-ext:save-lisp-and-die
-   output-path
-   :toplevel #'main
-   :executable t
-   :compression t))
+  "Build a standalone CLPM executable.
+
+On POSIX, this produces:
+- OUTPUT-PATH: a tiny sh wrapper that forwards args to OUTPUT-PATH.bin with
+  `--end-runtime-options` so SBCL doesn't consume flags like --help/--version.
+- OUTPUT-PATH.bin: the actual SBCL-based executable."
+  (let* ((output-path (uiop:ensure-pathname output-path :want-existing nil :want-file t))
+         (bin-path (uiop:ensure-pathname (format nil "~A.bin" (namestring output-path))
+                                         :want-existing nil :want-file t)))
+    (if (uiop:os-windows-p)
+        (sb-ext:save-lisp-and-die
+         (namestring output-path)
+         :toplevel #'main
+         :executable t
+         :compression t)
+        (progn
+          (%write-sbcl-wrapper-script output-path (file-namestring bin-path))
+          (sb-ext:save-lisp-and-die
+           (namestring bin-path)
+           :toplevel #'main
+           :executable t
+           :compression t)))))

@@ -1946,6 +1946,32 @@ Uses clpm.project :test metadata:
 Manifest schema:
   :package (:output \"dist/<name>\" :system \"<system>\" :function \"<package>::<fn>\")"
   (declare (ignore args))
+  (labels ((chmod-755 (path)
+             (let ((path (namestring (uiop:ensure-pathname path :want-existing nil))))
+               (when (uiop:os-windows-p)
+                 (return-from chmod-755 t))
+               (handler-case
+                   (let ((proc (sb-ext:run-program "chmod" (list "+x" path)
+                                                   :search t
+                                                   :output nil
+                                                   :error nil
+                                                   :wait t)))
+                     (zerop (sb-ext:process-exit-code proc)))
+                 (error ()
+                   nil))))
+           (write-sbcl-wrapper (wrapper-path bin-basename)
+             (let ((wrapper-path (uiop:ensure-pathname wrapper-path :want-existing nil :want-file t)))
+               (ensure-directories-exist wrapper-path)
+               (with-open-file (s wrapper-path :direction :output
+                                       :if-exists :supersede
+                                       :external-format :utf-8)
+                 (write-line "#!/bin/sh" s)
+                 (write-line "set -e" s)
+                 (format s "exec \"$(dirname \"$0\")/~A\" --end-runtime-options \"$@\"~%"
+                         bin-basename))
+               (unless (chmod-755 wrapper-path)
+                 (log-error "Failed to mark wrapper executable: ~A" (namestring wrapper-path))
+                 (return-from cmd-package 1)))))
   (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
       (find-effective-project-root)
     (declare (ignore _workspace-path))
@@ -1992,16 +2018,19 @@ Manifest schema:
               (log-error "Invalid :package :function: expected <package>::<fn>, got ~S" fn-spec)
               (return-from cmd-package 1))
 
-            (let* ((expanded-output (clpm.platform:expand-path output))
-                   (output-path (uiop:ensure-pathname expanded-output
-                                                     :defaults project-root
+	            (let* ((expanded-output (clpm.platform:expand-path output))
+	                   (output-path (uiop:ensure-pathname expanded-output
+	                                                     :defaults project-root
+	                                                     :want-existing nil
+	                                                     :want-file t))
+                     (bin-path (uiop:ensure-pathname (format nil "~A.bin" (namestring output-path))
                                                      :want-existing nil
                                                      :want-file t))
-                   (lock-sha256
-                     (clpm.crypto.sha256:bytes-to-hex
-                      (clpm.crypto.sha256:sha256-file lock-path)))
-                   (meta-path (make-pathname :name (format nil "~A.meta"
-                                                          (pathname-name output-path))
+	                   (lock-sha256
+	                     (clpm.crypto.sha256:bytes-to-hex
+	                      (clpm.crypto.sha256:sha256-file lock-path)))
+	                   (meta-path (make-pathname :name (format nil "~A.meta"
+	                                                          (pathname-name output-path))
                                              :type "sxp"
                                              :defaults output-path))
                    (pkg-key (intern (string-upcase pkg-name) :keyword))
@@ -2009,28 +2038,28 @@ Manifest schema:
                    (main-sym (intern "CLPM-PACKAGE-MAIN" "CL-USER"))
                    (args-var (intern "CLPM-PACKAGE-ARGS" "CL-USER"))
                    (result-var (intern "CLPM-PACKAGE-RESULT" "CL-USER"))
-                   (defun-form
-                     `(defun ,main-sym ()
-                        (let* ((,args-var (uiop:command-line-arguments))
-                               (,result-var (uiop:symbol-call ,pkg-key ,fn-key ,args-var)))
-                          (sb-ext:exit :code (if (integerp ,result-var) ,result-var 0)))))
-                   (save-form
-                     `(sb-ext:save-lisp-and-die ,(namestring output-path)
-                                                :toplevel ',main-sym
-                                                :executable t
-                                                :compression t))
-                   (defun-str
-                     (with-standard-io-syntax
+	                   (defun-form
+	                     `(defun ,main-sym ()
+	                        (let* ((,args-var (uiop:command-line-arguments))
+	                               (,result-var (uiop:symbol-call ,pkg-key ,fn-key ,args-var)))
+	                          (sb-ext:exit :code (if (integerp ,result-var) ,result-var 0)))))
+	                   (save-form
+	                     `(sb-ext:save-lisp-and-die ,(namestring bin-path)
+	                                                :toplevel ',main-sym
+	                                                :executable t
+	                                                :compression t))
+	                   (defun-str
+	                     (with-standard-io-syntax
                        (let ((*package* (find-package "CL-USER")))
                          (prin1-to-string defun-form))))
 	                   (save-str
 	                     (with-standard-io-syntax
 	                       (let ((*package* (find-package "CL-USER")))
 	                         (prin1-to-string save-form))))
-	                   (deps (project-dependency-system-ids project '(:depends)))
-	                   (sbcl-args (append (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
-	                                            "--load" (namestring config-path))
-	                                      (sbcl-load-systems-argv deps)
+		                   (deps (project-dependency-system-ids project '(:depends)))
+		                   (sbcl-args (append (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
+		                                            "--load" (namestring config-path))
+		                                      (sbcl-load-systems-argv deps)
 	                                      (list "--eval" (format nil "(asdf:load-system ~S)" system)
 	                                            "--eval" defun-str
 	                                            "--eval" save-str))))
@@ -2043,19 +2072,22 @@ Manifest schema:
                                              :output :interactive
                                              :error-output :interactive
                                              :timeout 600000)
-                (declare (ignore out err))
-                (unless (zerop rc)
-                  (log-error "Packaging failed (exit code ~D)" rc)
-                  (return-from cmd-package rc)))
+	                (declare (ignore out err))
+	                (unless (zerop rc)
+	                  (log-error "Packaging failed (exit code ~D)" rc)
+	                  (return-from cmd-package rc)))
 
-              (clpm.io.sexp:write-canonical-sexp-to-file
-               `(:package-meta
-                 :lock-sha256 ,lock-sha256
-                 :sbcl-version ,(clpm.platform:sbcl-version)
+	              ;; Write wrapper to ensure SBCL runtime options don't steal flags.
+	              (write-sbcl-wrapper output-path (file-namestring bin-path))
+
+	              (clpm.io.sexp:write-canonical-sexp-to-file
+	               `(:package-meta
+	                 :lock-sha256 ,lock-sha256
+	                 :sbcl-version ,(clpm.platform:sbcl-version)
                  :platform ,(clpm.platform:platform-triple))
                meta-path)
               (log-info "Wrote package metadata: ~A" (namestring meta-path))
-              0)))))))
+              0))))))))
 
 ;;; clean command
 

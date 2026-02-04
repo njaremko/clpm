@@ -109,6 +109,19 @@
              (assert-true (search "Hello, codex!" output)
                           "Unexpected binary output: ~S" output))
 
+           ;; Verify SBCL runtime options aren't consuming app args.
+           ;; Without a wrapper, `--version` would print SBCL version and exit.
+           (multiple-value-bind (output error-output exit-code)
+               (clpm.platform:run-program (list (namestring dist-bin) "--version")
+                                          :output :string
+                                          :error-output :string
+                                          :timeout 60)
+             (declare (ignore error-output))
+             (assert-true (zerop exit-code)
+                          "Packaged binary exited non-zero: ~D" exit-code)
+             (assert-true (search "Hello, --version!" output)
+                          "Expected wrapper to pass through args, got: ~S" output))
+
 	           ;; Verify metadata includes lock hash.
 	           (let* ((meta (clpm.io.sexp:read-safe-sexp-from-file meta-path))
 	                  (lock (getf (cdr meta) :lock-sha256)))

@@ -18,6 +18,20 @@
 
 (in-package #:clpm-bootstrap)
 
+;;; Ensure ASDF/UIOP are available at read-time
+;;;
+;;; This file references `asdf:` and `uiop:` symbols inside function bodies.
+;;; Those package prefixes are resolved by the reader, so we must ensure ASDF
+;;; (and thus UIOP) is loaded *before* the reader encounters those forms.
+;;;
+;;; Some environments provide ASDF via an explicit file pointed to by $ASDF.
+;;; If present, load it first, then fall back to `(require :asdf)`.
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (let ((asdf-path (sb-ext:posix-getenv "ASDF")))
+    (when (and asdf-path (plusp (length asdf-path)))
+      (load asdf-path)))
+  (require :asdf))
+
 ;;; Configuration
 
 (defparameter *clpm-version* "0.1.0")
@@ -29,12 +43,18 @@
 ;;; Platform detection
 
 (defun home-dir ()
-  (or (sb-ext:posix-getenv "HOME")
-      (sb-ext:posix-getenv "USERPROFILE")
-      (user-homedir-pathname)))
+  "Return the user's home directory as a directory pathname."
+  (let ((home (or (sb-ext:posix-getenv "HOME")
+                  (sb-ext:posix-getenv "USERPROFILE"))))
+    (cond
+      ((and home (plusp (length home)))
+       (uiop:ensure-directory-pathname home))
+      (t
+       (uiop:ensure-directory-pathname (user-homedir-pathname))))))
 
 (defun default-prefix ()
-  (merge-pathnames ".local/" (home-dir)))
+  (uiop:ensure-directory-pathname
+   (merge-pathnames ".local/" (home-dir))))
 
 (defun default-bin-dir ()
   (merge-pathnames "bin/" (default-prefix)))
@@ -201,38 +221,55 @@ sbcl --noinform --non-interactive --disable-debugger \\
 ;;; Main
 
 (defun print-usage ()
-  (format t "~
-CLPM Bootstrap Installer
-
-Usage: sbcl --script clpm-bootstrap.lisp <command> [options]
-
-Commands:
-  install [--prefix DIR]     Install CLPM
-  install-local DIR          Install from local source
-  uninstall [--prefix DIR]   Uninstall CLPM
-  help                       Show this help
-
-Options:
-  --prefix DIR    Installation prefix (default: ~/.local)
-
-Examples:
-  sbcl --script clpm-bootstrap.lisp install
-  sbcl --script clpm-bootstrap.lisp install --prefix /usr/local
-  sbcl --script clpm-bootstrap.lisp install-local ./clpm
-  sbcl --script clpm-bootstrap.lisp uninstall
-"))
+  (format t "CLPM Bootstrap Installer~%~%")
+  (format t "Usage: sbcl --script clpm-bootstrap.lisp <command> [options]~%~%")
+  (format t "Commands:~%")
+  (format t "  install [--prefix DIR]     Install CLPM~%")
+  (format t "  install-local DIR          Install from local source~%")
+  (format t "  uninstall [--prefix DIR]   Uninstall CLPM~%")
+  (format t "  help                       Show this help~%~%")
+  (format t "Options:~%")
+  (format t "  --prefix DIR    Installation prefix (default: ~~/.local)~%~%")
+  (format t "Examples:~%")
+  (format t "  sbcl --script clpm-bootstrap.lisp install~%")
+  (format t "  sbcl --script clpm-bootstrap.lisp install --prefix /usr/local~%")
+  (format t "  sbcl --script clpm-bootstrap.lisp install-local ./clpm~%")
+  (format t "  sbcl --script clpm-bootstrap.lisp uninstall~%"))
 
 (defun main (args)
   (let ((command (first args))
         (prefix (default-prefix))
         (source-dir nil))
-    ;; Parse args
-    (loop for (arg val) on (rest args) by #'cddr do
-      (cond
-        ((string= arg "--prefix")
-         (setf prefix (uiop:ensure-directory-pathname val)))
-        ((string= arg "--source")
-         (setf source-dir (uiop:ensure-directory-pathname val)))))
+    ;; Parse args (options may appear before/after positional args).
+    (let ((rest (rest args))
+          (positionals '()))
+      (labels ((need (opt)
+                 (let ((v (pop rest)))
+                   (unless (and (stringp v) (plusp (length v)))
+                     (format *error-output* "Missing value for ~A~%" opt)
+                     (sb-ext:exit :code 1))
+                   v))
+               (looks-like-option-p (s)
+                 (and (stringp s)
+                      (plusp (length s))
+                      (char= (char s 0) #\-))))
+        (loop while rest do
+          (let ((arg (pop rest)))
+            (cond
+              ((string= arg "--prefix")
+               (setf prefix (uiop:ensure-directory-pathname (need "--prefix"))))
+              ((string= arg "--source")
+               (setf source-dir (uiop:ensure-directory-pathname (need "--source"))))
+              ((looks-like-option-p arg)
+               (format *error-output* "Unknown option: ~A~%" arg)
+               (print-usage)
+               (sb-ext:exit :code 1))
+              (t
+               (push arg positionals))))))
+      (setf positionals (nreverse positionals))
+      (when (and (null source-dir) positionals)
+        (setf source-dir (uiop:ensure-directory-pathname (first positionals)))))
+
     ;; Dispatch
     (cond
       ((or (null command) (string= command "help") (string= command "--help"))
@@ -240,9 +277,7 @@ Examples:
       ((string= command "install")
        (install :prefix prefix))
       ((string= command "install-local")
-       (let ((dir (or source-dir
-                      (uiop:ensure-directory-pathname (second args))
-                      (uiop:getcwd))))
+       (let ((dir (or source-dir (uiop:getcwd))))
          (install-from-source dir :prefix prefix)))
       ((string= command "uninstall")
        (uninstall :prefix prefix))
