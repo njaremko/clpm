@@ -305,6 +305,7 @@
            #:cmd-add
            #:cmd-remove
            #:cmd-search
+           #:cmd-info
            #:cmd-resolve
            #:cmd-fetch
            #:cmd-build

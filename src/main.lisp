@@ -183,6 +183,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
              (apply #'clpm.commands:cmd-remove command-args))
             (:search
              (apply #'clpm.commands:cmd-search command-args))
+            (:info
+             (apply #'clpm.commands:cmd-info command-args))
             (:registry
              (apply #'clpm.commands:cmd-registry command-args))
             (:resolve

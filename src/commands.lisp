@@ -24,6 +24,29 @@
   "Print error message."
   (format *error-output* "~&error: ~?~%" format-string args))
 
+;;; Registry loading (global + project)
+
+(defun load-merged-registries ()
+  "Load merged registries (global config plus project registries when in a project).
+
+When not in a project, only the global config registries are used."
+  (clpm.platform:ensure-directories)
+  (multiple-value-bind (_project-root manifest-path _lock-path)
+      (clpm.project:find-project-root)
+    (declare (ignore _project-root _lock-path))
+    (let ((refs
+            (if manifest-path
+                (let ((project (clpm.project:read-project-file manifest-path)))
+                  (nth-value 0 (clpm.config:merge-project-config project)))
+                (clpm.config:config-registries (clpm.config:read-config)))))
+      (loop for ref in refs
+            collect
+            (clpm.registry:clone-registry
+             (clpm.project:registry-ref-name ref)
+             (clpm.project:registry-ref-url ref)
+             :trust-key (clpm.project:registry-ref-trust ref)
+             :kind (clpm.project:registry-ref-kind ref))))))
+
 ;;; init command
 
 (defun cmd-init (&key name)
@@ -452,24 +475,7 @@ Returns (values system-id constraint-form-or-nil)."
                (if at-pos
                    (values (subseq release-ref 0 at-pos)
                            (subseq release-ref (1+ at-pos)))
-                   (values release-ref nil))))
-           (load-merged-registries ()
-             (clpm.platform:ensure-directories)
-             (multiple-value-bind (_project-root manifest-path _lock-path)
-                 (clpm.project:find-project-root)
-               (declare (ignore _project-root _lock-path))
-               (let ((refs
-                       (if manifest-path
-                           (let ((project (clpm.project:read-project-file manifest-path)))
-                             (nth-value 0 (clpm.config:merge-project-config project)))
-                           (clpm.config:config-registries (clpm.config:read-config)))))
-                 (loop for ref in refs
-                       collect
-                       (clpm.registry:clone-registry
-                        (clpm.project:registry-ref-name ref)
-                        (clpm.project:registry-ref-url ref)
-                        :trust-key (clpm.project:registry-ref-trust ref)
-                        :kind (clpm.project:registry-ref-kind ref)))))))
+                   (values release-ref nil)))))
     (let ((query nil)
           (limit nil)
           (jsonp nil))
@@ -574,6 +580,147 @@ Returns (values system-id constraint-form-or-nil)."
                   (destructuring-bind (sys reg-name rel) r
                     (format t "~A~C~A~C~A~%" sys #\Tab reg-name #\Tab rel)))
                 0)))))))
+
+;;; info command
+
+(defun cmd-info (&rest args)
+  "Show information about a system across configured registries."
+  (labels ((usage-error (fmt &rest fmt-args)
+             (apply #'log-error fmt fmt-args)
+             (log-error "Usage: clpm info <system> [--json] [--all]")
+             (return-from cmd-info 1))
+           (release-ref (pkg ver)
+             (format nil "~A@~A" pkg ver))
+           (source->fields (source)
+             (when (and (consp source) (keywordp (car source)))
+               (list (car source)
+                     (getf (cdr source) :url)
+                     (or (getf (cdr source) :sha256)
+                         (getf (cdr source) :sha1))
+                     (getf (cdr source) :commit)))))
+    (let ((system-id nil)
+          (jsonp nil)
+          (allp nil))
+      (dolist (arg args)
+        (cond
+          ((string= arg "--json") (setf jsonp t))
+          ((string= arg "--all") (setf allp t))
+          ((and (stringp arg) (plusp (length arg)) (char= (char arg 0) #\-))
+           (usage-error "Unknown option: ~A" arg))
+          ((null system-id) (setf system-id arg))
+          (t (usage-error "Unexpected argument: ~A" arg))))
+      (unless (and (stringp system-id) (plusp (length system-id)))
+        (usage-error "Missing system id"))
+
+      (let ((registries (load-merged-registries)))
+        (when (null registries)
+          (log-error "No registries configured (run: clpm registry add ...)")
+          (return-from cmd-info 1))
+
+        (let ((candidates '()))
+          (dolist (reg registries)
+            (let ((reg-name (clpm.registry:registry-name reg)))
+              (dolist (pair (clpm.registry:find-system-candidates reg system-id))
+                (push (list :registry reg
+                            :registry-name reg-name
+                            :package (car pair)
+                            :version (cdr pair)
+                            :release (release-ref (car pair) (cdr pair)))
+                      candidates))))
+          (when (null candidates)
+            (log-error "System not found: ~A" system-id)
+            (return-from cmd-info 1))
+
+          (setf candidates
+                (sort candidates
+                      (lambda (a b)
+                        (let ((aver (getf a :version))
+                              (bver (getf b :version)))
+                          (cond
+                            ((and aver bver (clpm.solver.version:version> aver bver)) t)
+                            ((and aver bver (clpm.solver.version:version< aver bver)) nil)
+                            ((and aver (null bver)) t)
+                            ((and (null aver) bver) nil)
+                            ((string< (getf a :registry-name) (getf b :registry-name)) t)
+                            ((string> (getf a :registry-name) (getf b :registry-name)) nil)
+                            ((string< (getf a :package) (getf b :package)) t)
+                            ((string> (getf a :package) (getf b :package)) nil)
+                            (t (string< (getf a :release) (getf b :release))))))))
+
+          (let* ((selected (first candidates))
+                 (sel-reg (getf selected :registry))
+                 (sel-reg-name (getf selected :registry-name))
+                 (sel-pkg (getf selected :package))
+                 (sel-ver (getf selected :version))
+                 (sel-rel (getf selected :release))
+                 (sel-meta (clpm.registry:get-release-metadata sel-reg sel-pkg sel-ver)))
+            (if jsonp
+                (let* ((selected-entries
+                         (list (cons "registry" sel-reg-name)
+                               (cons "package" sel-pkg)
+                               (cons "version" sel-ver)
+                               (cons "release" sel-rel)))
+                       (candidates-json
+                         (mapcar (lambda (c)
+                                   (let ((entries (list (cons "registry" (getf c :registry-name))
+                                                        (cons "package" (getf c :package))
+                                                        (cons "version" (getf c :version))
+                                                        (cons "release" (getf c :release)))))
+                                     (when allp
+                                       (let* ((reg (getf c :registry))
+                                              (pkg (getf c :package))
+                                              (ver (getf c :version))
+                                              (meta (clpm.registry:get-release-metadata reg pkg ver)))
+                                         (when (and meta (clpm.registry:release-metadata-license meta))
+                                           (push (cons "license" (clpm.registry:release-metadata-license meta))
+                                                 entries))))
+                                     (list :object (nreverse entries))))
+                                 candidates)))
+                  (when sel-meta
+                    (let ((fields (source->fields (clpm.registry:release-metadata-source sel-meta))))
+                      (when fields
+                        (destructuring-bind (kind url hash commit) fields
+                          (push (cons "source"
+                                      (list :object
+                                            (list (cons "kind" (string-downcase (symbol-name kind)))
+                                                  (cons "url" (or url ""))
+                                                  (cons "hash" (or hash ""))
+                                                  (cons "commit" (or commit "")))))
+                                selected-entries))))
+                    (when (clpm.registry:release-metadata-license sel-meta)
+                      (push (cons "license" (clpm.registry:release-metadata-license sel-meta))
+                            selected-entries)))
+                  (clpm.io.json:write-json
+                   (list :object
+                         (list (cons "system" system-id)
+                               (cons "selected" (list :object (nreverse selected-entries)))
+                               (cons "candidates" (list :array candidates-json))))
+                   *standard-output*)
+                  (terpri)
+                  0)
+                (progn
+                  (format t "System: ~A~%" system-id)
+                  (format t "Selected:~%  ~A~C~A~%" sel-reg-name #\Tab sel-rel)
+                  (when sel-meta
+                    (let ((fields (source->fields (clpm.registry:release-metadata-source sel-meta))))
+                      (when fields
+                        (destructuring-bind (kind url hash commit) fields
+                          (format t "Source:~%  ~A~C~A"
+                                  (string-downcase (symbol-name kind)) #\Tab (or url ""))
+                          (cond
+                            ((and hash (plusp (length hash)))
+                             (format t "~Chash:~A~%" #\Tab hash))
+                            ((and commit (plusp (length commit)))
+                             (format t "~Ccommit:~A~%" #\Tab commit))
+                            (t (terpri))))))
+                    (when (clpm.registry:release-metadata-license sel-meta)
+                      (format t "Metadata:~%  license~C~A~%"
+                              #\Tab (clpm.registry:release-metadata-license sel-meta))))
+                  (format t "Candidates:~%")
+                  (dolist (c candidates)
+                    (format t "  ~A~C~A~%"
+                            (getf c :registry-name) #\Tab (getf c :release)))
+                  0))))))))
 
 ;;; resolve command
 
@@ -1405,10 +1552,13 @@ Manifest schema:
        (p "  --json     Emit a stable JSON array")
        0)
       (:info
-       (p "Usage: clpm info <system> [--json]")
+       (p "Usage: clpm info <system> [--json] [--all]")
        (p "")
        (p "Show details about a system and available releases.")
-       (p "Not implemented yet.")
+       (p "")
+       (p "Options:")
+       (p "  --json   Emit a stable JSON object")
+       (p "  --all    Include metadata for all candidates")
        0)
       (:tree
        (p "Usage: clpm tree [--package <member>] [--json]")
