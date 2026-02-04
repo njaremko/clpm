@@ -91,10 +91,16 @@
                                    (<= (length "sha256:") (length trust))
                                    (string= "sha256:" trust :end2 (length "sha256:")))
                               "Expected pinned trust string sha256:..., got ~S"
-                              trust)))))
+                              trust))
+               (let ((systems (clpm.project:registry-ref-quicklisp-systems-sha256 ref))
+                     (releases (clpm.project:registry-ref-quicklisp-releases-sha256 ref)))
+                 (assert-true (and (stringp systems) (= (length systems) 64))
+                              "Expected systems pin SHA-256 hex, got ~S" systems)
+                 (assert-true (and (stringp releases) (= (length releases) 64))
+                              "Expected releases pin SHA-256 hex, got ~S" releases))))))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
-          (sb-posix:unsetenv "CLPM_HOME")))))
+          (sb-posix:unsetenv "CLPM_HOME"))))
 
 (format t "  Quicklisp TOFU pin-on-load PASSED~%")
 (format t "~%Quicklisp pin-on-load tests PASSED!~%")

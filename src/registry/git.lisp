@@ -18,6 +18,9 @@
   (path nil :type (or null pathname))  ; local path to cloned registry
   (trust-key nil :type (or null string))
   (snapshot-sig-sha256 nil :type (or null string))
+  ;; Quicklisp-only snapshot pins (SHA-256 hex digests of downloaded metadata).
+  (quicklisp-systems-sha256 nil :type (or null string))
+  (quicklisp-releases-sha256 nil :type (or null string))
   (snapshot nil)
   (release-table (make-hash-table :test 'equal)))
 
@@ -116,7 +119,9 @@
 
 ;;; Registry operations
 
-(defun clone-registry (name url &key trust-key (kind :git) refresh-trust)
+(defun clone-registry (name url &key trust-key (kind :git) refresh-trust
+                                 quicklisp-systems-sha256
+                                 quicklisp-releases-sha256)
   "Clone or load a registry from URL.
 
 KIND is one of:
@@ -129,7 +134,9 @@ Returns a registry struct."
                              :kind kind
                              :url url
                              :path local-path
-                             :trust-key trust-key)))
+                             :trust-key trust-key
+                             :quicklisp-systems-sha256 quicklisp-systems-sha256
+                             :quicklisp-releases-sha256 quicklisp-releases-sha256)))
     (case kind
       (:git
        (if (uiop:directory-exists-p local-path)

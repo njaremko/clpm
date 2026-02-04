@@ -65,6 +65,8 @@ When not in a project, only the global config registries are used."
              (clpm.project:registry-ref-name ref)
              (clpm.project:registry-ref-url ref)
              :trust-key (clpm.project:registry-ref-trust ref)
+             :quicklisp-systems-sha256 (clpm.project:registry-ref-quicklisp-systems-sha256 ref)
+             :quicklisp-releases-sha256 (clpm.project:registry-ref-quicklisp-releases-sha256 ref)
              :kind (clpm.project:registry-ref-kind ref))))))
 
 ;;; init command
@@ -358,7 +360,9 @@ Returns (values system-id constraint-form-or-nil)."
                   :name ,(clpm.project:registry-ref-name ref)
                   :kind ,(clpm.project:registry-ref-kind ref)
                   :url ,(clpm.project:registry-ref-url ref)
-                  :trust ,(clpm.project:registry-ref-trust ref)))))
+                  :trust ,(clpm.project:registry-ref-trust ref)
+                  :systems-sha256 ,(clpm.project:registry-ref-quicklisp-systems-sha256 ref)
+                  :releases-sha256 ,(clpm.project:registry-ref-quicklisp-releases-sha256 ref)))))
     (setf items
           (sort items
                 (lambda (a b)
@@ -2192,9 +2196,15 @@ Manifest schema:
       (let* ((name (clpm.project:registry-ref-name ref))
              (kind (clpm.project:registry-ref-kind ref))
              (url (clpm.project:registry-ref-url ref))
-             (trust (clpm.project:registry-ref-trust ref)))
+             (trust (clpm.project:registry-ref-trust ref))
+             (ql-systems (clpm.project:registry-ref-quicklisp-systems-sha256 ref))
+             (ql-releases (clpm.project:registry-ref-quicklisp-releases-sha256 ref)))
         (log-verbose "Loading registry: ~A" name)
-        (push (clpm.registry:clone-registry name url :trust-key trust :kind kind)
+        (push (clpm.registry:clone-registry name url
+                                            :trust-key trust
+                                            :quicklisp-systems-sha256 ql-systems
+                                            :quicklisp-releases-sha256 ql-releases
+                                            :kind kind)
               registries)))
     (nreverse registries)))
 
@@ -3104,12 +3114,16 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                              (when (eq (clpm.project:locked-registry-kind reg) :quicklisp)
                                (let* ((name (clpm.project:locked-registry-name reg))
                                       (trust (clpm.project:locked-registry-trust reg))
-                                      (pin (and (stringp trust)
-                                                (starts-with-p (string-downcase trust) "sha256:")
-                                                trust)))
+                                      (distinfo-pin (and (stringp trust)
+                                                         (starts-with-p (string-downcase trust) "sha256:")
+                                                         trust))
+                                      (systems (clpm.project:locked-registry-quicklisp-systems-sha256 reg))
+                                      (releases (clpm.project:locked-registry-quicklisp-releases-sha256 reg)))
                                  (push (list :object
                                              (list (cons "name" name)
-                                                   (cons "pin" (or pin ""))))
+                                                   (cons "distinfoPin" (or distinfo-pin ""))
+                                                   (cons "systemsSha256" (or systems ""))
+                                                   (cons "releasesSha256" (or releases ""))))
                                        pins))))
                            (nreverse pins))))
                   (clpm.io.json:write-json
@@ -3165,18 +3179,24 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                       (when (eq (clpm.project:locked-registry-kind reg) :quicklisp)
                         (let* ((name (clpm.project:locked-registry-name reg))
                                (trust (clpm.project:locked-registry-trust reg))
-                               (pin (cond
-                                      ((and (stringp trust)
-                                            (starts-with-p (string-downcase trust) "sha256:"))
-                                       trust)
-                                      ((and (stringp trust) (plusp (length trust))) trust)
-                                      (t "-"))))
-                          (push (cons name pin) pins))))
+                               (distinfo (cond
+                                          ((and (stringp trust)
+                                                (starts-with-p (string-downcase trust) "sha256:"))
+                                           trust)
+                                          ((and (stringp trust) (plusp (length trust))) trust)
+                                          (t "-")))
+                               (systems (or (clpm.project:locked-registry-quicklisp-systems-sha256 reg) "-"))
+                               (releases (or (clpm.project:locked-registry-quicklisp-releases-sha256 reg) "-")))
+                          (push (list name distinfo systems releases) pins))))
                     (setf pins (sort pins #'string< :key #'car))
                     (when pins
-                      (format t "Quicklisp distinfo pins:~%")
+                      (format t "Quicklisp snapshot pins:~%")
                       (dolist (p pins)
-                        (format t "  ~A~C~A~%" (car p) #\Tab (cdr p)))))
+                        (format t "  ~A~Cdistinfo: ~A~Csystems: ~A~Creleases: ~A~%"
+                                (first p) #\Tab
+                                (second p) #\Tab
+                                (third p) #\Tab
+                                (fourth p)))))))
 
                   (format t "Sources:~%")
                   (format t "  tarball: ~D~%" tarball-count)
@@ -3186,7 +3206,7 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                     (format t "Warnings:~%")
                     (dolist (w warnings)
                       (format t "  - ~A~%" w)))
-                  0))))))))
+                  0))))))
 
 ;;; sbom command
 
@@ -3250,6 +3270,8 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                    (kind (clpm.project:locked-registry-kind lr))
                    (url (clpm.project:locked-registry-url lr))
                    (trust (clpm.project:locked-registry-trust lr))
+                   (ql-systems (clpm.project:locked-registry-quicklisp-systems-sha256 lr))
+                   (ql-releases (clpm.project:locked-registry-quicklisp-releases-sha256 lr))
                    (local (clpm.registry:registry-local-path name)))
               (when (and (stringp name) (plusp (length name)))
                 (let ((loadp t))
@@ -3267,6 +3289,8 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                     (handler-case
                         (push (clpm.registry:clone-registry name url
                                                             :trust-key trust
+                                                            :quicklisp-systems-sha256 ql-systems
+                                                            :quicklisp-releases-sha256 ql-releases
                                                             :kind kind)
                               registries)
                       (error (c)

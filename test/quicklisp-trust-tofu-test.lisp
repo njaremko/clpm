@@ -225,7 +225,11 @@ Returns (values base-url stop-fn)."
 
              (let* ((sha1 (clpm.crypto.sha256:sha256-file distinfo))
                     (sha (clpm.crypto.sha256:bytes-to-hex sha1))
-                    (pinned (format nil "sha256:~A" sha)))
+                    (pinned (format nil "sha256:~A" sha))
+                    (systems-pin (clpm.crypto.sha256:bytes-to-hex
+                                  (clpm.crypto.sha256:sha256-file systems-txt)))
+                    (releases-pin (clpm.crypto.sha256:bytes-to-hex
+                                   (clpm.crypto.sha256:sha256-file releases-txt))))
                ;; Config: Quicklisp registry in TOFU mode.
                (write-sexp
                 (merge-pathnames "config/config.sxp" clpm-home)
@@ -235,7 +239,7 @@ Returns (values base-url stop-fn)."
                                 :trust "tofu"))
                   :defaults nil))
 
-               ;; First update pins distinfo digest into config.
+               ;; First update pins into config.
                (multiple-value-bind (code _stdout stderr)
                    (run-cli-captured '("registry" "update" "quicklisp"))
                  (declare (ignore _stdout))
@@ -248,7 +252,13 @@ Returns (values base-url stop-fn)."
                  (assert-true ref "quicklisp registry ref missing from config after update")
                  (assert-true (string= pinned (clpm.project:registry-ref-trust ref))
                               "Expected pinned trust ~S, got ~S"
-                              pinned (clpm.project:registry-ref-trust ref)))
+                              pinned (clpm.project:registry-ref-trust ref))
+                 (assert-true (string= systems-pin (clpm.project:registry-ref-quicklisp-systems-sha256 ref))
+                              "Expected pinned systems sha256 ~S, got ~S"
+                              systems-pin (clpm.project:registry-ref-quicklisp-systems-sha256 ref))
+                 (assert-true (string= releases-pin (clpm.project:registry-ref-quicklisp-releases-sha256 ref))
+                              "Expected pinned releases sha256 ~S, got ~S"
+                              releases-pin (clpm.project:registry-ref-quicklisp-releases-sha256 ref)))
 
                ;; Mutate served distinfo; update should now fail without refresh.
                (write-text
@@ -259,7 +269,11 @@ Returns (values base-url stop-fn)."
                   (format s "# changed~%")))
                (let* ((sha2 (clpm.crypto.sha256:bytes-to-hex
                              (clpm.crypto.sha256:sha256-file distinfo)))
-                      (pinned2 (format nil "sha256:~A" sha2)))
+                      (pinned2 (format nil "sha256:~A" sha2))
+                      (systems-pin2 (clpm.crypto.sha256:bytes-to-hex
+                                     (clpm.crypto.sha256:sha256-file systems-txt)))
+                      (releases-pin2 (clpm.crypto.sha256:bytes-to-hex
+                                      (clpm.crypto.sha256:sha256-file releases-txt))))
                  (multiple-value-bind (code _stdout stderr)
                      (run-cli-captured '("registry" "update" "quicklisp"))
                    (declare (ignore _stdout))
@@ -280,7 +294,13 @@ Returns (values base-url stop-fn)."
                    (assert-true ref "quicklisp registry ref missing from config after refresh")
                    (assert-true (string= pinned2 (clpm.project:registry-ref-trust ref))
                                 "Expected refreshed pin ~S, got ~S"
-                                pinned2 (clpm.project:registry-ref-trust ref)))))))
+                                pinned2 (clpm.project:registry-ref-trust ref))
+                   (assert-true (string= systems-pin2 (clpm.project:registry-ref-quicklisp-systems-sha256 ref))
+                                "Expected pinned systems sha256 ~S, got ~S"
+                                systems-pin2 (clpm.project:registry-ref-quicklisp-systems-sha256 ref))
+                   (assert-true (string= releases-pin2 (clpm.project:registry-ref-quicklisp-releases-sha256 ref))
+                                "Expected pinned releases sha256 ~S, got ~S"
+                                releases-pin2 (clpm.project:registry-ref-quicklisp-releases-sha256 ref)))))))
         (ignore-errors (funcall stop-server))
         (if old-home
             (sb-posix:setenv "CLPM_HOME" old-home 1)

@@ -152,8 +152,10 @@
                (assert-contains stdout
                                 (format nil "quicklisp~Cquicklisp~Chttps://beta.quicklisp.org/dist/quicklisp.txt~Ctrust: -~Ccommit: -~Csnapshot-sig: -~Cverified: -"
                                         #\Tab #\Tab #\Tab #\Tab #\Tab #\Tab))
-               (assert-contains stdout "Quicklisp distinfo pins:")
-               (assert-contains stdout (format nil "quicklisp~C-" #\Tab))
+               (assert-contains stdout "Quicklisp snapshot pins:")
+               (assert-contains stdout
+                                (format nil "quicklisp~Cdistinfo: -~Csystems: -~Creleases: -"
+                                        #\Tab #\Tab #\Tab))
                (assert-contains stdout "Sources:")
                (assert-contains stdout "tarball: 1")
                (assert-contains stdout "git: 1")
