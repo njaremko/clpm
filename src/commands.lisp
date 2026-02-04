@@ -8,6 +8,7 @@
 (defvar *offline* nil "Offline mode - fail if artifacts missing")
 (defvar *insecure* nil "Skip signature verification")
 (defvar *jobs* 1 "Number of parallel jobs")
+(defvar *lisp* nil "Selected Lisp implementation kind (:sbcl/:ccl/:ecl), from --lisp.")
 (defvar *target-package* nil "Workspace member to target (from -p/--package).")
 
 ;;; Helper functions
@@ -1260,10 +1261,14 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
       (return-from cmd-build 1))
     (log-info "Building dependencies...")
     (let* ((project (clpm.project:read-project-file manifest-path))
+           (kind (effective-lisp-kind project))
            (effective-build (nth-value 1 (clpm.config:merge-project-config project)))
            (compile-options (or compile-options effective-build))
            (lockfile (clpm.project:read-lock-file lock-path))
            (registries (load-project-registries project)))
+      (unless (eq kind :sbcl)
+        (log-error "Build cache only supports SBCL in this phase; re-run with --lisp sbcl")
+        (return-from cmd-build 1))
       ;; First check native deps
       (handler-case
           (clpm.build:check-native-deps lockfile)
@@ -1299,7 +1304,11 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
         (log-error "No clpm.project found"))
       (return-from cmd-install 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
+           (kind (effective-lisp-kind project))
            (compile-options (nth-value 1 (clpm.config:merge-project-config project))))
+      (unless (eq kind :sbcl)
+        (log-error "Build cache only supports SBCL in this phase; re-run with --lisp sbcl")
+        (return-from cmd-install 1))
       ;; Resolve to ensure clpm.lock matches current clpm.project.
       (let ((result (cmd-resolve)))
         (unless (zerop result)
@@ -1319,7 +1328,7 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
         (clpm.build:activate-project project-root lockfile
                                      :compile-options compile-options))
       (log-info "Project installed successfully")
-      (log-info "Run 'clpm repl' to start SBCL with project loaded"))
+      (log-info "Run 'clpm repl' to start a REPL with the project loaded"))
     0))
 
 ;;; update command
@@ -1363,36 +1372,35 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
 ;;; repl command
 
 (defun cmd-repl (&key load-system)
-  "Start SBCL REPL with project activated."
+  "Start a REPL with the project activated."
   (multiple-value-bind (project-root manifest-path lock-path)
       (clpm.project:find-project-root)
-    (declare (ignore manifest-path))
     (unless lock-path
       (log-error "No clpm.lock found - run 'clpm install' first")
       (return-from cmd-repl 1))
-    (let* ((config-path (merge-pathnames ".clpm/asdf-config.lisp" project-root))
-           (args (list "sbcl")))
+    (let* ((project (when manifest-path
+                      (clpm.project:read-project-file manifest-path)))
+           (kind (effective-lisp-kind project))
+           (config-path (merge-pathnames ".clpm/asdf-config.lisp" project-root)))
       (unless (uiop:file-exists-p config-path)
         (log-error "Project not activated - run 'clpm install' first")
         (return-from cmd-repl 1))
-      ;; Build SBCL args
-      (push "--load" args)
-      (push (namestring config-path) args)
-      (when load-system
-        (push "--eval" args)
-        (push (format nil "(asdf:load-system ~S)" load-system) args))
-      (setf args (nreverse args))
-      ;; Replace current process with SBCL
-      (log-info "Starting SBCL...")
-      ;; Use run-program since we can't exec in portable CL
+      (let ((argv (clpm.lisp:lisp-run-argv kind
+                                          :load-files (list (namestring config-path))
+                                          :eval-forms (when load-system
+                                                        (list (format nil "(asdf:load-system ~S)"
+                                                                      load-system)))
+                                          :noinform nil
+                                          :noninteractive nil
+                                          :disable-debugger nil)))
+        (log-info "Starting ~A..." (string-downcase (symbol-name kind)))
       (multiple-value-bind (output error-output exit-code)
-          (uiop:run-program args
-                            :input :interactive
-                            :output :interactive
-                            :error-output :interactive
-                            :ignore-error-status t)
+          (clpm.platform:run-program argv
+                                     :input :interactive
+                                     :output :interactive
+                                     :error-output :interactive)
         (declare (ignore output error-output))
-        exit-code))))
+        exit-code)))))
 
 ;;; run/exec commands
 
@@ -1433,6 +1441,71 @@ SECTIONS is a list of keywords: :DEPENDS, :DEV-DEPENDS, :TEST-DEPENDS."
           (when (and id (stringp id))
             (push id systems)))))
     (sort (remove-duplicates systems :test #'string=) #'string<)))
+
+(defun effective-lisp-kind (project)
+  "Return the effective Lisp kind for PROJECT.
+
+Precedence: CLI `--lisp` (*lisp*) > project :lisp > default :sbcl."
+  (cond
+    (*lisp*
+     (clpm.lisp:parse-lisp-kind *lisp*))
+    ((and project (clpm.project:project-lisp project))
+     (clpm.lisp:parse-lisp-kind (clpm.project:project-lisp project)))
+    (t :sbcl)))
+
+(defun lisp-load-systems-eval-forms (systems)
+  (mapcar (lambda (sys)
+            (format nil "(asdf:load-system ~S)" sys))
+          systems))
+
+(defun run-lisp-with-config (kind project-root config-path eval-forms
+                              &key (noinform t) (noninteractive t) (timeout 600000))
+  "Run KIND with CONFIG-PATH loaded and EVAL-FORMS evaluated in order."
+  (let* ((argv (clpm.lisp:lisp-run-argv kind
+                                       :load-files (list (namestring config-path))
+                                       :eval-forms eval-forms
+                                       :noinform noinform
+                                       :noninteractive noninteractive
+                                       :disable-debugger t)))
+    (multiple-value-bind (output error-output exit-code)
+        (clpm.platform:run-program argv
+                                   :directory project-root
+                                   :output :interactive
+                                   :error-output :interactive
+                                   :timeout timeout)
+      (declare (ignore output error-output))
+      exit-code)))
+
+(defun run-lisp-entrypoint (kind project-root config-path deps system fn-spec run-args)
+  "Load DEPS and SYSTEM then call FN-SPEC with RUN-ARGS under KIND."
+  (multiple-value-bind (pkg fn)
+      (parse-function-spec fn-spec)
+    (unless (and pkg fn)
+      (log-error "Invalid :function: expected <package>::<fn>, got ~S" fn-spec)
+      (return-from run-lisp-entrypoint 1))
+    (let* ((pkg-name (string-upcase pkg))
+           (fn-name (string-upcase fn))
+           (args-var (intern "CLPM-RUN-ARGS" "CL-USER"))
+           (result-var (intern "CLPM-RUN-RESULT" "CL-USER"))
+           (pkg-var (intern "CLPM-RUN-PKG" "CL-USER"))
+           (sym-var (intern "CLPM-RUN-SYM" "CL-USER"))
+           (call-form
+             `(let ((,args-var ',run-args))
+                (let* ((,pkg-var (find-package ,pkg-name))
+                       (,sym-var (and ,pkg-var (find-symbol ,fn-name ,pkg-var))))
+                  (unless (and ,sym-var (fboundp ,sym-var))
+                    (format *error-output* "~&Entry function not found: ~A::~A~%" ,pkg-name ,fn-name)
+                    (uiop:quit 1))
+                  (let ((,result-var (funcall ,sym-var ,args-var)))
+                    (uiop:quit (if (integerp ,result-var) ,result-var 0))))))
+           (call-form-str
+             (with-standard-io-syntax
+               (let ((*package* (find-package "CL-USER")))
+                 (prin1-to-string call-form))))
+           (eval-forms (append (lisp-load-systems-eval-forms deps)
+                               (list (format nil "(asdf:load-system ~S)" system)
+                                     call-form-str))))
+      (run-lisp-with-config kind project-root config-path eval-forms))))
 
 (defun sbcl-load-systems-argv (systems)
   "Return an argv fragment that loads each system in SYSTEMS via ASDF."
@@ -1509,9 +1582,10 @@ Returns an integer exit code."
           (let* ((run-args (if (and args (string= (first args) "--"))
                                (rest args)
                                args))
-                 (deps (project-dependency-system-ids project '(:depends))))
+                 (deps (project-dependency-system-ids project '(:depends)))
+                 (kind (effective-lisp-kind project)))
             (log-info "Running ~A (~A)..." system fn-spec)
-            (run-sbcl-entrypoint project-root config-path deps system fn-spec run-args)))))))
+            (run-lisp-entrypoint kind project-root config-path deps system fn-spec run-args)))))))
 
 (defun sbcl-loads-config-p (cmd config-path)
   (let ((abs (namestring config-path))
@@ -1722,9 +1796,10 @@ Returns (values parsed-scripts exit-code)."
                      (:lisp
                       (let* ((system (getf script :system))
                              (fn-spec (getf script :function))
-                             (deps (project-dependency-system-ids project '(:depends))))
+                             (deps (project-dependency-system-ids project '(:depends)))
+                             (kind (effective-lisp-kind project)))
                         (log-info "Running script ~A (~A)..." name fn-spec)
-                        (run-sbcl-entrypoint project-root config-path deps system fn-spec forward)))
+                        (run-lisp-entrypoint kind project-root config-path deps system fn-spec forward)))
                      (t
                       (log-error "Unsupported script type: ~S" (getf script :type))
                       1))))))
@@ -1780,24 +1855,16 @@ Uses clpm.project :test metadata:
 	                          (error (,cond-var)
 	                            (format *error-output* "~&FAIL: ~A: ~A~%" ,sys-var ,cond-var)
 	                            (setf ,ok-var nil))))
-	                      (sb-ext:exit :code (if ,ok-var 0 1))))
+	                      (uiop:quit (if ,ok-var 0 1))))
 	                 (call-form-str
 	                   (with-standard-io-syntax
 	                     (let ((*package* (find-package "CL-USER")))
 	                       (prin1-to-string call-form))))
 	                 (deps (project-dependency-system-ids project '(:depends :test-depends)))
-	                 (sbcl-args (append (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
-	                                          "--load" (namestring config-path))
-	                                    (sbcl-load-systems-argv deps)
-	                                    (list "--eval" call-form-str))))
-	            (multiple-value-bind (output error-output exit-code)
-	                (clpm.platform:run-program sbcl-args
-	                                           :directory project-root
-	                                           :output :interactive
-                                           :error-output :interactive
-                                           :timeout 600000)
-              (declare (ignore output error-output))
-              exit-code)))))))
+                   (kind (effective-lisp-kind project))
+                   (eval-forms (append (lisp-load-systems-eval-forms deps)
+                                       (list call-form-str))))
+              (run-lisp-with-config kind project-root config-path eval-forms)))))))
 
 ;;; package command
 

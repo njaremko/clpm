@@ -151,7 +151,7 @@ Returns nil if not in store."
 
 ;;; Build ID computation
 
-(defun compute-build-id (tree-sha256 compile-options)
+(defun compute-build-id (tree-sha256 compile-options &key (lisp-kind :sbcl) lisp-version)
   "Compute deterministic build ID for a source tree.
 TREE-SHA256 is the source tree hash.
 COMPILE-OPTIONS is a plist of compile settings.
@@ -159,7 +159,8 @@ COMPILE-OPTIONS is a plist of compile settings.
 Build ID = sha256(
   'clpm-build-v1\\0' +
   tree-sha256 + '\\0' +
-  sbcl-version + '\\0' +
+  lisp-kind + '\\0' +
+  lisp-version + '\\0' +
   platform-triple + '\\0' +
   asdf-version + '\\0' +
   normalized-compile-policy + '\\0' +
@@ -168,10 +169,17 @@ Build ID = sha256(
                                  (or (getf compile-options :speed) 1)
                                  (or (getf compile-options :safety) 1)
                                  (or (getf compile-options :debug) 1)))
-         (input (format nil "clpm-build-v1~C~A~C~A~C~A~C~A~C~A~C~A"
+         (kind (clpm.lisp:parse-lisp-kind lisp-kind))
+         (kind-str (string-downcase (symbol-name kind)))
+         (version (or lisp-version
+                      (case kind
+                        (:sbcl (clpm.platform:sbcl-version))
+                        (t (clpm.lisp:lisp-version kind)))))
+         (input (format nil "clpm-build-v1~C~A~C~A~C~A~C~A~C~A~C~A~C~A"
                         #\Null
                         tree-sha256 #\Null
-                        (clpm.platform:sbcl-version) #\Null
+                        kind-str #\Null
+                        version #\Null
                         (clpm.platform:platform-triple) #\Null
                         (clpm.platform:asdf-version) #\Null
                         compile-policy #\Null

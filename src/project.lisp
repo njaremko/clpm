@@ -16,6 +16,7 @@
   (dev-depends nil :type list)
   (test-depends nil :type list)
   (registries nil :type list)
+  (lisp nil :type (or null string))
   (sbcl-constraints nil :type list)
   (build-options nil :type list)
   (scripts nil :type list))
@@ -139,6 +140,10 @@
         (:registries
          (setf (project-registries project)
                (mapcar #'parse-registry-ref val)))
+        (:lisp
+         (when (and val (not (stringp val)))
+           (error "Invalid :lisp value: expected a string or nil, got ~S" val))
+         (setf (project-lisp project) val))
         (:sbcl
          (setf (project-sbcl-constraints project) val))
         (:build
@@ -364,6 +369,7 @@ directory pathnames (as strings) for determinism."
                   :dev-depends ,(mapcar #'serialize-dep (project-dev-depends project))
                   :test-depends ,(mapcar #'serialize-dep (project-test-depends project))
                   :registries ,(mapcar #'serialize-registry (project-registries project))
+                  :lisp ,(project-lisp project)
                   :sbcl ,(project-sbcl-constraints project)
                   :build ,(project-build-options project)
                   :scripts ,(project-scripts project))))

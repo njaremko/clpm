@@ -11,7 +11,7 @@
   ((:module "src"
     :serial t
     :components
-    ((:file "packages")
+     ((:file "packages")
      (:file "errors")
      (:module "io"
       :serial t
@@ -27,6 +27,7 @@
        (:file "sha512")
        (:file "ed25519")))
      (:file "platform")
+     (:file "lisp")
      (:file "store")
      (:file "project")
      (:file "workspace")

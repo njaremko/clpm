@@ -56,6 +56,7 @@ Commands:
 Options:
   -v, --verbose    Verbose output
   -j, --jobs N     Parallel jobs (default: 1)
+  --lisp <impl>    Lisp implementation (sbcl|ccl|ecl)
   -p, --package M  Workspace member to target
   --offline        Fail if artifacts not in cache
   --insecure       Skip signature verification (dangerous)
@@ -111,6 +112,19 @@ Returns (values command command-args options)."
                (clpm.errors:signal-error 'clpm.errors:clpm-user-error
                                          "Invalid value for --jobs: ~A" raw))
              (push (cons :jobs n) options)))
+          ((string= arg "--lisp")
+           (incf i)
+           (when (>= i (length args))
+             (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                       "Missing value for ~A" arg))
+           (when (some (lambda (opt)
+                         (and (consp opt) (eq (car opt) :lisp)))
+                       options)
+             (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                       "Duplicate option: ~A" arg))
+           (let* ((raw (nth i args))
+                  (kind (clpm.lisp:parse-lisp-kind raw)))
+             (push (cons :lisp kind) options)))
           ((or (string= arg "-p") (string= arg "--package"))
            (incf i)
            (when (>= i (length args))
@@ -175,6 +189,11 @@ This function must not call `sb-ext:exit` so it can be used from tests."
               (clpm.commands:*offline* *offline*)
               (clpm.commands:*insecure* *insecure*)
               (clpm.commands:*jobs* *jobs*)
+              (clpm.commands:*lisp*
+                (loop for opt in options
+                      when (and (consp opt) (eq (car opt) :lisp))
+                        do (return (cdr opt))
+                      finally (return nil)))
               (clpm.commands:*target-package*
                 (loop for opt in options
                       when (and (consp opt) (eq (car opt) :package))

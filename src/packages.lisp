@@ -92,6 +92,13 @@
            #:find-git
            #:find-tar))
 
+(defpackage #:clpm.lisp
+  (:use #:cl #:clpm.platform #:clpm.errors)
+  (:export #:parse-lisp-kind
+           #:find-lisp
+           #:lisp-version
+           #:lisp-run-argv))
+
 (defpackage #:clpm.store
   (:use #:cl #:clpm.platform #:clpm.crypto.sha256)
   (:export #:store-artifact
@@ -121,6 +128,7 @@
            #:project-dev-depends
            #:project-test-depends
            #:project-registries
+           #:project-lisp
            #:project-sbcl-constraints
            #:project-build-options
            #:project-scripts
@@ -311,6 +319,7 @@
            #:*offline*
            #:*insecure*
            #:*jobs*
+           #:*lisp*
            #:*target-package*
            #:cmd-init
            #:cmd-new
