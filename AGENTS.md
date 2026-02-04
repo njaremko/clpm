@@ -42,3 +42,8 @@
 
 - Avoid weakening integrity guarantees by default; `--insecure` is for debugging only.
 - `CLPM_HOME` overrides the default data directory; keep new paths aligned with XDG-style conventions.
+
+## Agent Skill Requirement
+
+- When working on this repo, load and follow: `/Users/njaremko/.codex/skills/common-lisp-excellence/SKILL.md`
+- Prefer the S-expression tools in `/Users/njaremko/.codex/skills/common-lisp-excellence/scripts/` for structured edits of data-only `.sxp` / `clpm.project` / `clpm.lock`-style files.
