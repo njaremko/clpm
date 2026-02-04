@@ -161,6 +161,25 @@
                      (merge-pathnames "tmp/" (store-dir))))
     (ensure-directories-exist dir)))
 
+;;; Secure randomness
+
+(defun secure-random-bytes (n)
+  "Return N cryptographically secure random bytes.
+
+On Unix-like platforms this reads from /dev/urandom. Signals an error if no
+secure randomness source is available."
+  (unless (and (integerp n) (plusp n))
+    (error "secure-random-bytes expects a positive integer, got ~S" n))
+  (let ((urandom #P"/dev/urandom"))
+    (unless (uiop:file-exists-p urandom)
+      (error "No secure randomness source available (missing /dev/urandom)"))
+    (with-open-file (stream urandom :element-type '(unsigned-byte 8))
+      (let ((buf (make-array n :element-type '(unsigned-byte 8))))
+        (let ((read (read-sequence buf stream)))
+          (unless (= read n)
+            (error "Failed to read ~D random bytes (got ~D)" n read)))
+        buf))))
+
 ;;; Process execution
 
 (defun run-program (command &key (output :string) (error-output :output)

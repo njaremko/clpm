@@ -262,6 +262,63 @@ Supports:
 (defun parse-scalar (bytes)
   (le-bytes-to-int bytes))
 
+(defun %octets (data)
+  (etypecase data
+    (string (map '(vector (unsigned-byte 8)) #'char-code data))
+    ((array (unsigned-byte 8) (*)) data)))
+
+(defun %ensure-32-octets (seed32)
+  (unless (and (typep seed32 '(array (unsigned-byte 8) (*)))
+               (= (length seed32) 32))
+    (error "Expected 32-byte seed, got ~S" seed32))
+  seed32)
+
+(defun %clamp-secret-scalar-bytes (h32)
+  "Clamp the first 32 bytes of SHA-512(seed) per RFC8032."
+  (let ((a (copy-seq h32)))
+    (setf (aref a 0) (logand (aref a 0) #b11111000))
+    (setf (aref a 31) (logand (aref a 31) #b00111111))
+    (setf (aref a 31) (logior (aref a 31) #b01000000))
+    a))
+
+(defun %concat-octets (&rest parts)
+  (let* ((parts (mapcar #'%octets parts))
+         (total (reduce #'+ parts :key #'length :initial-value 0))
+         (out (make-array total :element-type '(unsigned-byte 8)))
+         (pos 0))
+    (dolist (p parts out)
+      (replace out p :start1 pos)
+      (incf pos (length p)))))
+
+(defun derive-public-key-from-seed (seed32)
+  "Derive the 32-byte Ed25519 public key from 32-byte SEED32 (RFC8032)."
+  (let* ((seed32 (%ensure-32-octets seed32))
+         (h (clpm.crypto.sha512:sha512 seed32))
+         (a-bytes (%clamp-secret-scalar-bytes (subseq h 0 32)))
+         (a (le-bytes-to-int a-bytes))
+         (a-point (scalar-mult a (basepoint))))
+    (encode-point a-point)))
+
+(defun sign (message seed32)
+  "Return the 64-byte Ed25519 signature of MESSAGE using 32-byte SEED32 (RFC8032)."
+  (let* ((seed32 (%ensure-32-octets seed32))
+         (msg (%octets message))
+         (h (clpm.crypto.sha512:sha512 seed32))
+         (a-bytes (%clamp-secret-scalar-bytes (subseq h 0 32)))
+         (a (le-bytes-to-int a-bytes))
+         (prefix (subseq h 32 64))
+         (a-point (scalar-mult a (basepoint)))
+         (a-enc (encode-point a-point))
+         (r-digest (clpm.crypto.sha512:sha512 (%concat-octets prefix msg)))
+         (r (reduce-scalar (le-bytes-to-int r-digest)))
+         (r-point (scalar-mult r (basepoint)))
+         (r-enc (encode-point r-point))
+         (k-digest (clpm.crypto.sha512:sha512 (%concat-octets r-enc a-enc msg)))
+         (k (reduce-scalar (le-bytes-to-int k-digest)))
+         (s (mod (+ r (* k a)) +l+))
+         (s-enc (int-to-le-bytes s 32)))
+    (%concat-octets r-enc s-enc)))
+
 (defun verify-signature (message signature public-key)
   "Verify an Ed25519 signature (RFC 8032).
 

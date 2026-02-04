@@ -2261,6 +2261,83 @@ Manifest schema:
           (push (cons system-id source-path) paths))))
     (nreverse paths)))
 
+;;; keys command
+
+(defun %key-id-valid-p (id)
+  (and (stringp id)
+       (plusp (length id))
+       (every (lambda (c)
+                (or (and (char>= c #\a) (char<= c #\z))
+                    (and (char>= c #\A) (char<= c #\Z))
+                    (and (char>= c #\0) (char<= c #\9))
+                    (member c '(#\- #\_ #\.))))
+              id)))
+
+(defun %chmod-if-available (path mode-string)
+  (let ((chmod (clpm.platform:which "chmod")))
+    (when chmod
+      (clpm.platform:run-program (list chmod mode-string (namestring path))
+                                 :output nil
+                                 :error-output nil))))
+
+(defun cmd-keys (&rest args)
+  "Manage Ed25519 keys used for registry signing."
+  (let ((subcommand (first args))
+        (rest (rest args)))
+    (labels ((usage-error (fmt &rest fmt-args)
+               (apply #'log-error fmt fmt-args)
+               (log-error "Usage: clpm keys generate --out <dir> --id <id>")
+               (return-from cmd-keys 1)))
+      (cond
+        ((or (null subcommand) (string= subcommand "help"))
+         (usage-error "Missing keys subcommand"))
+        ((string= subcommand "generate")
+         (let ((out nil)
+               (id nil))
+           (loop while rest do
+             (let ((arg (pop rest)))
+               (cond
+                 ((string= arg "--out")
+                  (setf out (pop rest)))
+                 ((string= arg "--id")
+                  (setf id (pop rest)))
+                 (t
+                  (usage-error "Unknown option: ~A" arg)))))
+           (unless (and (stringp out) (plusp (length out)))
+             (usage-error "Missing --out <dir>"))
+           (unless (%key-id-valid-p id)
+             (usage-error "Invalid --id value (use [A-Za-z0-9._-]+): ~S" id))
+
+           (let* ((out-dir (uiop:ensure-directory-pathname
+                            (clpm.platform:expand-path out)))
+                  (priv-path (merge-pathnames (format nil "~A.key" id) out-dir))
+                  (pub-path (merge-pathnames (format nil "~A.pub" id) out-dir)))
+             (when (or (uiop:file-exists-p priv-path) (uiop:file-exists-p pub-path))
+               (log-error "Key files already exist in: ~A" (namestring out-dir))
+               (return-from cmd-keys 1))
+             (ensure-directories-exist out-dir)
+             (let* ((seed (clpm.platform:secure-random-bytes 32))
+                    (pub (clpm.crypto.ed25519:derive-public-key-from-seed seed))
+                    (seed-hex (clpm.crypto.sha256:bytes-to-hex seed))
+                    (pub-hex (clpm.crypto.sha256:bytes-to-hex pub)))
+               (with-open-file (s priv-path :direction :output
+                                           :if-exists :error
+                                           :external-format :utf-8)
+                 (write-string seed-hex s)
+                 (terpri s))
+               (%chmod-if-available priv-path "600")
+               (with-open-file (s pub-path :direction :output
+                                          :if-exists :error
+                                          :external-format :utf-8)
+                 (write-string pub-hex s)
+                 (terpri s))
+               (%chmod-if-available pub-path "644")
+               (log-info "Wrote private key: ~A" (namestring priv-path))
+               (log-info "Wrote public key:  ~A" (namestring pub-path))
+               0))))
+        (t
+         (usage-error "Unknown keys subcommand: ~A" subcommand))))))
+
 ;;; help command
 
 (defun print-command-help (command &key subcommand)
@@ -2385,10 +2462,13 @@ Manifest schema:
        (p "Not implemented yet.")
        0)
       (:keys
-       (p "Usage: clpm keys <generate|list|show> [args]")
+       (p "Usage: clpm keys generate --out <dir> --id <id>")
        (p "")
        (p "Manage Ed25519 keys for signing registries and releases.")
-       (p "Not implemented yet.")
+       (p "")
+       (p "Generated files:")
+       (p "  <id>.key  32-byte seed as ASCII hex (64 chars) (keep secret)")
+       (p "  <id>.pub  32-byte public key as ASCII hex (64 chars)")
        0)
       (:publish
        (p "Usage: clpm publish --registry <path-or-url> [--project <dir>]")

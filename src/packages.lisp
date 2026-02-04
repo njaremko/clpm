@@ -67,6 +67,8 @@
   (:use #:cl)
   (:export #:verify-signature
            #:verify-file-signature
+           #:derive-public-key-from-seed
+           #:sign
            #:load-public-key
            #:parse-key-id))
 
@@ -85,6 +87,7 @@
            #:asdf-version
            #:features-hash
            #:ensure-directories
+           #:secure-random-bytes
            #:run-program
            #:which
            #:expand-path
@@ -343,6 +346,7 @@
            #:cmd-clean
            #:cmd-gc
            #:cmd-scripts
+           #:cmd-keys
            #:cmd-help
            #:cmd-doctor))
 
