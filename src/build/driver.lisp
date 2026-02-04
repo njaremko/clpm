@@ -142,12 +142,16 @@
          (roots (remove-duplicates (cons root existing) :test #'string=)))
     (%write-project-index-roots index-path roots)))
 
-(defun activate-project (project-root lockfile &key compile-options (lisp-kind :sbcl) lisp-version)
+(defun activate-project (project-root lockfile &key lockfile-path compile-options (lisp-kind :sbcl) lisp-version)
   "Activate a project for use.
 Creates .clpm/ directory with ASDF configuration."
   (let* ((clpm-dir (merge-pathnames ".clpm/" project-root))
          (config-path (merge-pathnames "asdf-config.lisp" clpm-dir))
-         (env-path (merge-pathnames "env.sexp" clpm-dir)))
+         (env-path (merge-pathnames "env.sexp" clpm-dir))
+         (lockfile-sha256
+           (when (and lockfile-path (uiop:file-exists-p lockfile-path))
+             (clpm.crypto.sha256:bytes-to-hex
+              (clpm.crypto.sha256:sha256-file lockfile-path)))))
     (ensure-directories-exist clpm-dir)
     (%upsert-project-index-root project-root)
     ;; Collect dependency source dirs and build cache dirs
@@ -188,11 +192,12 @@ Creates .clpm/ directory with ASDF configuration."
       ;; Write environment info
       (with-open-file (s env-path :direction :output
                                   :if-exists :supersede)
-        (clpm.io.sexp:write-canonical-sexp
+         (clpm.io.sexp:write-canonical-sexp
          `(:env
            :format 1
            :project-root ,(namestring project-root)
            :generated-at ,(clpm.project:rfc3339-timestamp)
+           :lockfile-sha256 ,lockfile-sha256
            :lisp-kind ,(clpm.lisp:parse-lisp-kind lisp-kind)
            :lisp-version ,(or lisp-version
                               (case (clpm.lisp:parse-lisp-kind lisp-kind)

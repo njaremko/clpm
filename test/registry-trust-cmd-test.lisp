@@ -194,6 +194,10 @@ Returns (values base-url stop-fn)."
                       (ignore-errors (sb-bsd-sockets:socket-close sock))
                       (ignore-errors (sb-thread:join-thread th))))))))))
 
+(defun file-base-url (root)
+  "Return a file:// base URL for ROOT (directory)."
+  (format nil "file://~A" (namestring (uiop:ensure-directory-pathname root))))
+
 (format t "Testing `clpm registry trust` subcommands...~%")
 
 (clpm.store:with-temp-dir (tmp)
@@ -206,7 +210,12 @@ Returns (values base-url stop-fn)."
     (ensure-directories-exist clpm-home)
     (ensure-directories-exist dist-root)
     (multiple-value-bind (base-url stop-server)
-        (start-file-http-server dist-root)
+        (handler-case
+            (start-file-http-server dist-root)
+          (sb-bsd-sockets:operation-not-permitted-error ()
+            (values (file-base-url dist-root) (lambda () nil)))
+          (error ()
+            (values (file-base-url dist-root) (lambda () nil))))
       (unwind-protect
            (progn
              (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)

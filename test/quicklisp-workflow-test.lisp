@@ -167,6 +167,10 @@ Returns (values base-url stop-fn)."
                       (ignore-errors (sb-bsd-sockets:socket-close sock))
                       (ignore-errors (sb-thread:join-thread th))))))))))
 
+(defun file-base-url (root)
+  "Return a file:// base URL for ROOT (directory)."
+  (format nil "file://~A" (namestring (uiop:ensure-directory-pathname root))))
+
 (defun tar-gz-dir (src-dir dest-file)
   "Create a .tgz at DEST-FILE containing SRC-DIR as a top-level directory."
   (let* ((src-dir (uiop:ensure-directory-pathname src-dir))
@@ -215,7 +219,12 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
     (ensure-directories-exist dist-root)
 
     (multiple-value-bind (base-url stop-server)
-        (start-file-http-server dist-root)
+        (handler-case
+            (start-file-http-server dist-root)
+          (sb-bsd-sockets:operation-not-permitted-error ()
+            (values (file-base-url dist-root) (lambda () nil)))
+          (error ()
+            (values (file-base-url dist-root) (lambda () nil))))
       (unwind-protect
            (progn
 	             ;; Build a tiny fake Quicklisp dist served over localhost.
