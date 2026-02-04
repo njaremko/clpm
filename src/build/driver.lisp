@@ -1,4 +1,4 @@
-;;;; build/driver.lisp - Build driver (runs in child SBCL process)
+;;;; build/driver.lisp - Build driver (runs in child Lisp process)
 
 (in-package #:clpm.build)
 
@@ -15,44 +15,63 @@
 
 ;;; Generate build driver script
 
-(defun generate-build-driver-script (spec output-path)
+(defun generate-build-driver-script (spec output-path &key (lisp-kind :sbcl))
   "Generate a Lisp file that will build according to SPEC."
-  (with-open-file (s output-path :direction :output
+  (let* ((lisp-kind (clpm.lisp:parse-lisp-kind lisp-kind))
+         (quit-ok (ecase lisp-kind
+                    (:sbcl "(sb-ext:exit :code 0)")
+                    (:ccl "(ccl:quit 0)")
+                    (:ecl "(ext:quit 0)")))
+         (quit-fail (ecase lisp-kind
+                      (:sbcl "(sb-ext:exit :code 1)")
+                      (:ccl "(ccl:quit 1)")
+                      (:ecl "(ext:quit 1)"))))
+    (with-open-file (s output-path :direction :output
                                  :if-exists :supersede)
-    (format s ";;;; Auto-generated build driver for CLPM~%")
-    (format s ";;;; DO NOT EDIT~%~%")
-    ;; Configure ASDF
-    (format s "(require \"asdf\")~%~%")
-    ;; Set up source registry
-    (format s "(asdf:initialize-source-registry~%")
-    (format s " '(:source-registry~%")
-    (format s "   (:tree ~S)~%" (namestring (build-spec-source-dir spec)))
-    (dolist (dep-dir (build-spec-dependency-dirs spec))
-      (format s "   (:tree ~S)~%" (namestring dep-dir)))
-    (format s "   :ignore-inherited-configuration))~%~%")
-    ;; Set up output translations
-    (format s "(asdf:initialize-output-translations~%")
-    (format s " '(:output-translations~%")
-    (format s "   (t (~S :**/ :*.*.*))~%" (namestring (build-spec-output-dir spec)))
-    (format s "   :ignore-inherited-configuration))~%~%")
-    ;; Set compile policy
-    (let ((opts (build-spec-compile-options spec)))
-      (format s "(declaim (optimize")
-      (format s " (speed ~D)" (or (getf opts :speed) 1))
-      (format s " (safety ~D)" (or (getf opts :safety) 1))
-      (format s " (debug ~D)" (or (getf opts :debug) 1))
-      (format s "))~%~%"))
-    ;; Build systems
-    (format s "(handler-case~%")
-    (format s "    (progn~%")
-    (dolist (system (build-spec-systems spec))
-      (format s "      (format t \"~%Building system: ~A~~%%\" ~S)~%" system system)
-      (format s "      (asdf:load-system ~S)~%" system))
-    (format s "      (format t \"~%Build completed successfully.~~%\")~%")
-    (format s "      (sb-ext:exit :code 0))~%")
-    (format s "  (error (c)~%")
-    (format s "    (format *error-output* \"~%Build failed: ~~A~~%%\" c)~%")
-    (format s "    (sb-ext:exit :code 1)))~%")))
+      (format s ";;;; Auto-generated build driver for CLPM~%")
+      (format s ";;;; DO NOT EDIT~%~%")
+      ;; Configure ASDF
+      (format s "(require \"asdf\")~%~%")
+      ;; Set up source registry
+      (format s "(asdf:initialize-source-registry~%")
+      (format s " '(:source-registry~%")
+      (format s "   (:tree ~S)~%" (namestring (build-spec-source-dir spec)))
+      (dolist (dep-dir (build-spec-dependency-dirs spec))
+        (format s "   (:tree ~S)~%" (namestring dep-dir)))
+      (format s "   :ignore-inherited-configuration))~%~%")
+      ;; Set up output translations
+      (format s "(asdf:initialize-output-translations~%")
+      (format s " '(:output-translations~%")
+      (format s "   (t (~S :**/ :*.*.*))~%"
+              (namestring (build-spec-output-dir spec)))
+      (format s "   :ignore-inherited-configuration))~%~%")
+      ;; Set compile policy
+      (let ((opts (build-spec-compile-options spec)))
+        (format s "(declaim (optimize")
+        (format s " (speed ~D)" (or (getf opts :speed) 1))
+        (format s " (safety ~D)" (or (getf opts :safety) 1))
+        (format s " (debug ~D)" (or (getf opts :debug) 1))
+        (format s "))~%~%"))
+      ;; Build systems
+      (format s "(handler-case~%")
+      (format s "    (progn~%")
+      (dolist (system (build-spec-systems spec))
+        (format s "      (format t \"~%Building system: ~A~~%%\" ~S)~%"
+                system system)
+        (format s "      (asdf:load-system ~S)~%" system))
+      (format s "      (format t \"~%Build completed successfully.~~%\")~%")
+      (format s "      ~A)~%" quit-ok)
+      (format s "  (error (c)~%")
+      (format s "    (format *error-output* \"~%Build failed: ~~A~~%%\" c)~%")
+      (format s "    ~A)))~%" quit-fail))))
+
+(defun build-driver-argv (lisp-kind driver-path)
+  "Return argv for invoking the generated build driver under LISP-KIND."
+  (clpm.lisp:lisp-run-argv (clpm.lisp:parse-lisp-kind lisp-kind)
+                           :load-files (list (namestring driver-path))
+                           :noinform t
+                           :noninteractive t
+                           :disable-debugger t))
 
 ;;; ASDF configuration for activation
 
@@ -123,7 +142,7 @@
          (roots (remove-duplicates (cons root existing) :test #'string=)))
     (%write-project-index-roots index-path roots)))
 
-(defun activate-project (project-root lockfile &key compile-options)
+(defun activate-project (project-root lockfile &key compile-options (lisp-kind :sbcl) lisp-version)
   "Activate a project for use.
 Creates .clpm/ directory with ASDF configuration."
   (let* ((clpm-dir (merge-pathnames ".clpm/" project-root))
@@ -145,7 +164,9 @@ Creates .clpm/ directory with ASDF configuration."
                               (clpm.store:get-source-path tree-sha256))))
           (when (stringp tree-sha256)
             (pushnew tree-sha256 tree-sha256s :test #'string=)
-            (pushnew (clpm.store:compute-build-id tree-sha256 compile-options)
+            (pushnew (clpm.store:compute-build-id tree-sha256 compile-options
+                                                  :lisp-kind lisp-kind
+                                                  :lisp-version lisp-version)
                      build-ids
                      :test #'string=))
           (when (stringp artifact-sha256)
@@ -154,7 +175,9 @@ Creates .clpm/ directory with ASDF configuration."
             (pushnew source-path dep-source-dirs :test #'equal)
             ;; Check for cached build
             (let* ((build-id (clpm.store:compute-build-id
-                              tree-sha256 compile-options))
+                              tree-sha256 compile-options
+                              :lisp-kind lisp-kind
+                              :lisp-version lisp-version))
                    (build-path (clpm.store:get-build-path build-id)))
               (when build-path
                 (push (cons source-path
@@ -170,7 +193,11 @@ Creates .clpm/ directory with ASDF configuration."
            :format 1
            :project-root ,(namestring project-root)
            :generated-at ,(clpm.project:rfc3339-timestamp)
-           :sbcl-version ,(clpm.platform:sbcl-version)
+           :lisp-kind ,(clpm.lisp:parse-lisp-kind lisp-kind)
+           :lisp-version ,(or lisp-version
+                              (case (clpm.lisp:parse-lisp-kind lisp-kind)
+                                (:sbcl (clpm.platform:sbcl-version))
+                                (t (clpm.lisp:lisp-version (clpm.lisp:parse-lisp-kind lisp-kind)))))
            :dep-count ,(length dep-source-dirs)
            :source-tree-sha256s ,(sort (copy-list tree-sha256s) #'string<)
            :artifact-sha256s ,(sort (copy-list artifact-sha256s) #'string<)
@@ -181,13 +208,16 @@ Creates .clpm/ directory with ASDF configuration."
 ;;; Build a single release
 
 (defun build-release (source-path systems tree-sha256 dep-source-dirs
-                      &key compile-options)
+                      &key compile-options (lisp-kind :sbcl) lisp-version)
   "Build a release from SOURCE-PATH.
 SYSTEMS is list of system names to build.
 TREE-SHA256 is the source tree hash.
 DEP-SOURCE-DIRS is list of dependency source directories.
 Returns build-id on success, signals error on failure."
-  (let* ((build-id (clpm.store:compute-build-id tree-sha256 compile-options))
+  (let* ((lisp-kind (clpm.lisp:parse-lisp-kind lisp-kind))
+         (build-id (clpm.store:compute-build-id tree-sha256 compile-options
+                                                :lisp-kind lisp-kind
+                                                :lisp-version lisp-version))
          (build-cache (clpm.store:get-build-path build-id)))
     ;; Check if already built
     (when build-cache
@@ -208,13 +238,11 @@ Returns build-id on success, signals error on failure."
         (ensure-directories-exist output-dir)
         (ensure-directories-exist log-path)
         ;; Generate driver script
-        (generate-build-driver-script spec driver-path)
+        (generate-build-driver-script spec driver-path :lisp-kind lisp-kind)
         ;; Run build
         (multiple-value-bind (output error-output exit-code)
             (clpm.platform:run-program
-             (list "sbcl" "--noinform" "--non-interactive"
-                   "--disable-debugger"
-                   "--load" (namestring driver-path))
+             (build-driver-argv lisp-kind driver-path)
              :timeout 600000)  ; 10 minute timeout
           ;; Write log
           (with-open-file (s log-path :direction :output

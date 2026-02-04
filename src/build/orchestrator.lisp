@@ -108,7 +108,7 @@ SOURCE-PATHS is alist of (system-id . source-path)."
 ;;; Execute build plan
 
 (defun build-all (resolution lockfile source-paths
-                  &key (jobs 1) compile-options)
+                  &key (jobs 1) compile-options (lisp-kind :sbcl) lisp-version)
   "Build all releases in RESOLUTION.
 SOURCE-PATHS is alist of (system-id . source-path).
 JOBS is number of parallel build jobs.
@@ -158,7 +158,9 @@ Returns list of (system-id . build-id) pairs."
                                                   (build-task-systems task)
                                                   tree-sha256
                                                   dep-source-dirs
-                                                  :compile-options compile-options)))
+                                                  :compile-options compile-options
+                                                  :lisp-kind lisp-kind
+                                                  :lisp-version lisp-version)))
                              (setf (build-task-build-id task) build-id
                                    (build-task-status task) :done)
                              (when tree-sha256
@@ -245,7 +247,9 @@ Returns list of (system-id . build-id) pairs."
                                                        (build-task-systems task)
                                                        tree-sha256
                                                        dep-source-dirs
-                                                       :compile-options compile-options)))
+                                                       :compile-options compile-options
+                                                       :lisp-kind lisp-kind
+                                                       :lisp-version lisp-version)))
                                   (when tree-sha256
                                     (sb-thread:with-mutex (mutex)
                                       (setf (gethash tree-sha256 built-sources) build-id)))

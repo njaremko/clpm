@@ -1262,13 +1262,13 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
     (log-info "Building dependencies...")
     (let* ((project (clpm.project:read-project-file manifest-path))
            (kind (effective-lisp-kind project))
+           (lisp-version (case kind
+                           (:sbcl (clpm.platform:sbcl-version))
+                           (t (clpm.lisp:lisp-version kind))))
            (effective-build (nth-value 1 (clpm.config:merge-project-config project)))
            (compile-options (or compile-options effective-build))
            (lockfile (clpm.project:read-lock-file lock-path))
            (registries (load-project-registries project)))
-      (unless (eq kind :sbcl)
-        (log-error "Build cache only supports SBCL in this phase; re-run with --lisp sbcl")
-        (return-from cmd-build 1))
       ;; First check native deps
       (handler-case
           (clpm.build:check-native-deps lockfile)
@@ -1285,7 +1285,9 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
               (let ((build-results
                       (clpm.build:build-all resolution lockfile source-paths
                                             :jobs *jobs*
-                                            :compile-options compile-options)))
+                                            :compile-options compile-options
+                                            :lisp-kind kind
+                                            :lisp-version lisp-version)))
                 (log-info "Built ~D systems" (length build-results)))
             (clpm.errors:clpm-build-error (c)
               (log-error "~A" c)
@@ -1305,10 +1307,10 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
       (return-from cmd-install 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
            (kind (effective-lisp-kind project))
+           (lisp-version (case kind
+                           (:sbcl (clpm.platform:sbcl-version))
+                           (t (clpm.lisp:lisp-version kind))))
            (compile-options (nth-value 1 (clpm.config:merge-project-config project))))
-      (unless (eq kind :sbcl)
-        (log-error "Build cache only supports SBCL in this phase; re-run with --lisp sbcl")
-        (return-from cmd-install 1))
       ;; Resolve to ensure clpm.lock matches current clpm.project.
       (let ((result (cmd-resolve)))
         (unless (zerop result)
@@ -1326,7 +1328,9 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
       (log-info "Activating project...")
       (let ((lockfile (clpm.project:read-lock-file lock-path)))
         (clpm.build:activate-project project-root lockfile
-                                     :compile-options compile-options))
+                                     :compile-options compile-options
+                                     :lisp-kind kind
+                                     :lisp-version lisp-version))
       (log-info "Project installed successfully")
       (log-info "Run 'clpm repl' to start a REPL with the project loaded"))
     0))
