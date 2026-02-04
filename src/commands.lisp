@@ -90,11 +90,21 @@ When not in a project, only the global config registries are used."
                (write-string text s)))
            (usage-error (fmt &rest fmt-args)
              (apply #'log-error fmt fmt-args)
-             (log-error "Usage: clpm new <name> --bin|--lib [--dir <path>]")
-             (return-from cmd-new 1)))
+             (log-error "Usage:")
+             (log-error "  clpm new <name> --workspace [--dir <path>]")
+             (log-error "  clpm new <name> --bin|--lib [--dir <path>]")
+             (log-error "  clpm new <name> --bin|--lib --member-of <workspace-dir>")
+             (return-from cmd-new 1))
+           (ensure-dir-arg (path)
+             (uiop:ensure-directory-pathname
+              (uiop:ensure-pathname (clpm.platform:expand-path path)
+                                    :defaults (uiop:getcwd)
+                                    :want-existing nil))))
     (let ((name (first args))
           (kind nil)
-          (dir nil))
+          (dir nil)
+          (workspace-p nil)
+          (member-of nil))
       (unless (and name (plusp (length name)) (not (char= (char name 0) #\-)))
         (usage-error "Missing project name"))
       ;; Parse flags
@@ -102,6 +112,8 @@ When not in a project, only the global config registries are used."
         (loop while (< i (length args)) do
           (let ((arg (nth i args)))
             (cond
+              ((string= arg "--workspace")
+               (setf workspace-p t))
               ((string= arg "--bin")
                (when kind
                  (usage-error "Only one of --bin or --lib may be specified"))
@@ -115,93 +127,158 @@ When not in a project, only the global config registries are used."
                (when (>= i (length args))
                  (usage-error "Missing value for --dir"))
                (setf dir (nth i args)))
+              ((string= arg "--member-of")
+               (incf i)
+               (when (>= i (length args))
+                 (usage-error "Missing value for --member-of"))
+               (setf member-of (nth i args)))
               (t
                (usage-error "Unknown option: ~A" arg))))
           (incf i)))
-      (unless kind
-        (usage-error "Missing project kind: specify --bin or --lib"))
 
-      (let* ((base (if dir
-                       (uiop:ensure-directory-pathname
-                        (uiop:ensure-pathname (clpm.platform:expand-path dir)
-                                              :defaults (uiop:getcwd)
-                                              :want-existing nil))
-                       (uiop:getcwd)))
-             (project-root (merge-pathnames (format nil "~A/" name) base))
-             (src-dir (merge-pathnames "src/" project-root))
-             (test-dir (merge-pathnames "test/" project-root))
-             (asd-path (merge-pathnames (format nil "~A.asd" name) project-root))
-             (src-path (merge-pathnames (format nil "src/~A.lisp" name) project-root))
-             (test-path (merge-pathnames (format nil "test/~A-test.lisp" name) project-root))
-             (manifest-path (merge-pathnames "clpm.project" project-root)))
-        (when (uiop:directory-exists-p project-root)
-          (log-error "Destination already exists: ~A" (namestring project-root))
-          (return-from cmd-new 1))
-        (ensure-directories-exist src-dir)
-        (ensure-directories-exist test-dir)
+      (when (and workspace-p kind)
+        (usage-error "--workspace may not be combined with --bin/--lib"))
+      (when (and workspace-p member-of)
+        (usage-error "--workspace may not be combined with --member-of"))
 
-        ;; clpm.project
-        (let ((project (clpm.project:make-project
-                        :name name
-                        :version "0.1.0"
-                        :systems (list name)
-                        :run (when (eq kind :bin)
-                               (list :system name
-                                     :function (format nil "~A::main" name)))
-                        :test (list :systems (list (format nil "~A/test" name)))
-                        :package (when (eq kind :bin)
-                                   (list :output (format nil "dist/~A" name)
-                                         :system name
-                                         :function (format nil "~A::main" name)))
-                        :scripts nil)))
-          (clpm.project:write-project-file project manifest-path))
+      (labels ((compute-base ()
+                 (if dir
+                     (ensure-dir-arg dir)
+                     (uiop:getcwd)))
+               (make-project-scaffold (project-root)
+                 (let* ((src-dir (merge-pathnames "src/" project-root))
+                        (test-dir (merge-pathnames "test/" project-root))
+                        (asd-path (merge-pathnames (format nil "~A.asd" name) project-root))
+                        (src-path (merge-pathnames (format nil "src/~A.lisp" name) project-root))
+                        (test-path (merge-pathnames (format nil "test/~A-test.lisp" name) project-root))
+                        (manifest-path (merge-pathnames "clpm.project" project-root)))
+                   (when (uiop:directory-exists-p project-root)
+                     (log-error "Destination already exists: ~A" (namestring project-root))
+                     (return-from cmd-new 1))
+                   (ensure-directories-exist src-dir)
+                   (ensure-directories-exist test-dir)
 
-        ;; ASDF system + test system.
-        (write-text
-         asd-path
-         (with-output-to-string (s)
-           (format s ";;;; ~A.asd~%~%" name)
-           (format s "(asdf:defsystem ~S~%  :version ~S~%  :serial t~%  :pathname ~S~%  :components ((:file ~S))~%  :in-order-to ((asdf:test-op (asdf:test-op ~S))))~%~%"
-                   name "0.1.0" "src" name (format nil "~A/test" name))
-           (format s "(asdf:defsystem ~S~%  :depends-on (~S)~%  :serial t~%  :pathname ~S~%  :components ((:file ~S))~%  :perform (asdf:test-op (op c)~%             (declare (ignore op c))~%             (uiop:symbol-call :~A-test :run)))~%"
-                   (format nil "~A/test" name)
-                   name
-                   "test"
-                   (format nil "~A-test" name)
-                   name)))
+                   ;; clpm.project
+                   (let ((project (clpm.project:make-project
+                                   :name name
+                                   :version "0.1.0"
+                                   :systems (list name)
+                                   :run (when (eq kind :bin)
+                                          (list :system name
+                                                :function (format nil "~A::main" name)))
+                                   :test (list :systems (list (format nil "~A/test" name)))
+                                   :package (when (eq kind :bin)
+                                              (list :output (format nil "dist/~A" name)
+                                                    :system name
+                                                    :function (format nil "~A::main" name)))
+                                   :scripts nil)))
+                     (clpm.project:write-project-file project manifest-path))
 
-        ;; src/<name>.lisp
-        (write-text
-         src-path
-         (with-output-to-string (s)
-           (format s ";;;; ~A.lisp~%~%" name)
-           (format s "(defpackage #:~A~%  (:use #:cl)~%  (:export #:~A))~%~%"
-                   name (if (eq kind :bin) "main" "hello"))
-           (format s "(in-package #:~A)~%~%" name)
-           (ecase kind
-             (:bin
-              (format s "(defun main (&optional (args nil))~%  (declare (ignore args))~%  (format t \"Hello from ~A!~%\")~%  0)~%"
-                      name))
-             (:lib
-              (format s "(defun hello ()~%  :ok)~%")))))
+                   ;; ASDF system + test system.
+                   (write-text
+                    asd-path
+                    (with-output-to-string (s)
+                      (format s ";;;; ~A.asd~%~%" name)
+                      (format s "(asdf:defsystem ~S~%  :version ~S~%  :serial t~%  :pathname ~S~%  :components ((:file ~S))~%  :in-order-to ((asdf:test-op (asdf:test-op ~S))))~%~%"
+                              name "0.1.0" "src" name (format nil "~A/test" name))
+                      (format s "(asdf:defsystem ~S~%  :depends-on (~S)~%  :serial t~%  :pathname ~S~%  :components ((:file ~S))~%  :perform (asdf:test-op (op c)~%             (declare (ignore op c))~%             (uiop:symbol-call :~A-test :run)))~%"
+                              (format nil "~A/test" name)
+                              name
+                              "test"
+                              (format nil "~A-test" name)
+                              name)))
 
-        ;; test/<name>-test.lisp
-        (write-text
-         test-path
-         (with-output-to-string (s)
-           (format s ";;;; ~A-test.lisp~%~%" name)
-           (format s "(defpackage #:~A-test~%  (:use #:cl)~%  (:export #:run))~%~%"
-                   name)
-           (format s "(in-package #:~A-test)~%~%" name)
-           (format s "(defun run ()~%  (format t \"Running tests for ~A...~%\")~%  (assert ~A)~%  (format t \"All tests passed.~%\"))~%"
-                   name
-                   (if (eq kind :bin)
-                       (format nil "(eql 0 (uiop:symbol-call :~A :main))" name)
-                       (format nil "(eql :ok (uiop:symbol-call :~A :hello))" name)))))
+                   ;; src/<name>.lisp
+                   (write-text
+                    src-path
+                    (with-output-to-string (s)
+                      (format s ";;;; ~A.lisp~%~%" name)
+                      (format s "(defpackage #:~A~%  (:use #:cl)~%  (:export #:~A))~%~%"
+                              name (if (eq kind :bin) "main" "hello"))
+                      (format s "(in-package #:~A)~%~%" name)
+                      (ecase kind
+                        (:bin
+                         (format s "(defun main (&optional (args nil))~%  (declare (ignore args))~%  (format t \"Hello from ~A!~%\")~%  0)~%"
+                                 name))
+                        (:lib
+                         (format s "(defun hello ()~%  :ok)~%")))))
 
-        (log-info "Created ~A project: ~A" (string-downcase (symbol-name kind))
-                  (namestring project-root))
-        0))))
+                   ;; test/<name>-test.lisp
+                   (write-text
+                    test-path
+                    (with-output-to-string (s)
+                      (format s ";;;; ~A-test.lisp~%~%" name)
+                      (format s "(defpackage #:~A-test~%  (:use #:cl)~%  (:export #:run))~%~%"
+                              name)
+                      (format s "(in-package #:~A-test)~%~%" name)
+                      (format s "(defun run ()~%  (format t \"Running tests for ~A...~%\")~%  (assert ~A)~%  (format t \"All tests passed.~%\"))~%"
+                              name
+                              (if (eq kind :bin)
+                                  (format nil "(eql 0 (uiop:symbol-call :~A :main))" name)
+                                  (format nil "(eql :ok (uiop:symbol-call :~A :hello))" name))))))))
+        (cond
+          (workspace-p
+           (let* ((base (compute-base))
+                  (ws-root (merge-pathnames (format nil "~A/" name) base))
+                  (ws-path (merge-pathnames "clpm.workspace" ws-root))
+                  (readme-path (merge-pathnames "README.md" ws-root)))
+             (when (uiop:directory-exists-p ws-root)
+               (log-error "Destination already exists: ~A" (namestring ws-root))
+               (return-from cmd-new 1))
+             (ensure-directories-exist ws-path)
+             (clpm.workspace:write-workspace-file
+              (clpm.workspace:make-workspace :format 1 :members '())
+              ws-path)
+             (write-text
+              readme-path
+              (with-output-to-string (s)
+                (format s "# ~A~%~%" name)
+                (format s "This is a CLPM workspace.~%~%")
+                (format s "## Common commands~%~%")
+                (format s "Add a binary member:~%~%")
+                (format s "  clpm new app --bin --member-of .~%~%")
+                (format s "Target a member:~%~%")
+                (format s "  clpm -p app install~%")
+                (format s "  clpm -p app test~%")))
+             (log-info "Created workspace: ~A" (namestring ws-root))
+             0))
+          (t
+           (unless kind
+             (usage-error "Missing project kind: specify --bin or --lib"))
+           (when (and member-of dir)
+             (usage-error "--dir may not be combined with --member-of"))
+           (if member-of
+               (let* ((ws-root (ensure-dir-arg member-of))
+                      (ws-path (merge-pathnames "clpm.workspace" ws-root)))
+                 (unless (uiop:file-exists-p ws-path)
+                   (log-error "Workspace not found: ~A" (namestring ws-root))
+                   (log-error "Expected to find: ~A" (namestring ws-path))
+                   (return-from cmd-new 1))
+                 (let* ((project-root (merge-pathnames (format nil "~A/" name) ws-root))
+                        (member-rel (namestring
+                                     (uiop:ensure-directory-pathname
+                                      (uiop:enough-pathname project-root ws-root)))))
+                   (make-project-scaffold project-root)
+                   (let* ((ws (clpm.workspace:read-workspace-file ws-path))
+                          (members (remove-duplicates
+                                    (append (clpm.workspace:workspace-members ws)
+                                            (list member-rel))
+                                    :test #'string=)))
+                     (setf (clpm.workspace:workspace-members ws)
+                           (sort members #'string<))
+                     (clpm.workspace:write-workspace-file ws ws-path))
+                   (log-info "Added workspace member: ~A" member-rel)
+                   (log-info "Created ~A project: ~A"
+                             (string-downcase (symbol-name kind))
+                             (namestring project-root))
+                   0))
+               (let* ((base (compute-base))
+                      (project-root (merge-pathnames (format nil "~A/" name) base)))
+                 (make-project-scaffold project-root)
+                 (log-info "Created ~A project: ~A"
+                           (string-downcase (symbol-name kind))
+                           (namestring project-root))
+                 0))))))))
 
 ;;; add/remove commands
 
