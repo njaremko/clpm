@@ -29,6 +29,10 @@ Commands:
   init [name]      Initialize new project
   add <dep> ...    Add a dependency
   remove <dep>     Remove a dependency
+  search <query>   Search registries
+  info <system>    Show system details
+  tree             Show dependency tree
+  why <system>     Explain why a system is included
   registry ...     Manage registries
   resolve          Resolve dependencies and write lockfile
   fetch            Download dependencies
@@ -42,6 +46,12 @@ Commands:
   package          Build a distributable executable
   clean            Remove project-local outputs
   gc               Garbage collect store
+  scripts ...      Run project scripts
+  audit            Show provenance report
+  sbom             Generate an SBOM for the lockfile
+  keys ...         Key management (registry signing)
+  publish ...      Publish to a registry
+  workspace ...    Workspace management
 
 Options:
   -v, --verbose    Verbose output
