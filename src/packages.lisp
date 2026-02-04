@@ -158,6 +158,8 @@
            #:make-lockfile
            #:lockfile-format
            #:lockfile-generated-at
+           #:lockfile-project-sha256
+           #:lockfile-registries-sha256
            #:lockfile-project
            #:lockfile-registries
            #:lockfile-resolved
@@ -191,6 +193,7 @@
            #:locked-registry-signature
            #:read-project-file
            #:write-project-file
+           #:serialize-project
            #:read-lock-file
            #:write-lock-file
            #:find-project-root

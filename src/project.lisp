@@ -47,6 +47,11 @@
   (generated-at nil :type (or null string))
   (project-name nil :type (or null string))
   (clpm-version nil :type (or null string))
+  ;; Input fingerprints for safe resolve short-circuiting.
+  ;; - PROJECT-SHA256 hashes the canonical project manifest form.
+  ;; - REGISTRIES-SHA256 hashes the effective registry configuration used for resolve.
+  (project-sha256 nil :type (or null string))
+  (registries-sha256 nil :type (or null string))
   (registries nil :type list)
   (resolved nil :type list))
 
@@ -253,6 +258,8 @@
       (case key
         (:format (setf (lockfile-format lock) val))
         (:generated-at (setf (lockfile-generated-at lock) val))
+        (:project-sha256 (setf (lockfile-project-sha256 lock) val))
+        (:registries-sha256 (setf (lockfile-registries-sha256 lock) val))
         (:project
          (setf (lockfile-project-name lock) (getf val :name))
          (setf (lockfile-clpm-version lock) (getf val :clpm-version)))
@@ -310,6 +317,10 @@
   `(:lock
     :format ,(lockfile-format lock)
     :generated-at ,(lockfile-generated-at lock)
+    ,@(when (lockfile-project-sha256 lock)
+        (list :project-sha256 (lockfile-project-sha256 lock)))
+    ,@(when (lockfile-registries-sha256 lock)
+        (list :registries-sha256 (lockfile-registries-sha256 lock)))
     :project (:name ,(lockfile-project-name lock)
               :clpm-version ,(lockfile-clpm-version lock))
     :registries ,(mapcar #'serialize-locked-registry
@@ -352,8 +363,8 @@ directory pathnames (as strings) for determinism."
   (let ((form (clpm.io.sexp:read-manifest path)))
     (normalize-project-path-dependencies (parse-manifest form) path)))
 
-(defun write-project-file (project path)
-  "Write a project struct to a clpm.project file."
+(defun serialize-project (project)
+  "Serialize PROJECT to a canonical S-expression form."
   (labels ((serialize-dep (d)
              (let ((form `(:dep
                            :system ,(dependency-system d)
@@ -370,31 +381,34 @@ directory pathnames (as strings) for determinism."
                :url ,(registry-ref-url r)
                :name ,(registry-ref-name r)
                :trust ,(registry-ref-trust r))))
-	    (let ((form `(:project
-	                  :name ,(project-name project)
-	                  :version ,(project-version project)
-	                  ,@(when (project-license project)
-	                      (list :license (project-license project)))
-	                  ,@(when (project-homepage project)
-	                      (list :homepage (project-homepage project)))
-	                  ,@(when (project-description project)
-	                      (list :description (project-description project)))
-	                  :systems ,(project-systems project)
-	                  ,@(when (project-run project)
-	                      (list :run (project-run project)))
-	                  ,@(when (project-test project)
-                      (list :test (project-test project)))
-                  ,@(when (project-package project)
-                      (list :package (project-package project)))
-                  :depends ,(mapcar #'serialize-dep (project-depends project))
-                  :dev-depends ,(mapcar #'serialize-dep (project-dev-depends project))
-                  :test-depends ,(mapcar #'serialize-dep (project-test-depends project))
-                  :registries ,(mapcar #'serialize-registry (project-registries project))
-                  :lisp ,(project-lisp project)
-                  :sbcl ,(project-sbcl-constraints project)
-                  :build ,(project-build-options project)
-                  :scripts ,(project-scripts project))))
-      (clpm.io.sexp:write-canonical-sexp-to-file form path))))
+    `(:project
+      :name ,(project-name project)
+      :version ,(project-version project)
+      ,@(when (project-license project)
+          (list :license (project-license project)))
+      ,@(when (project-homepage project)
+          (list :homepage (project-homepage project)))
+      ,@(when (project-description project)
+          (list :description (project-description project)))
+      :systems ,(project-systems project)
+      ,@(when (project-run project)
+          (list :run (project-run project)))
+      ,@(when (project-test project)
+          (list :test (project-test project)))
+      ,@(when (project-package project)
+          (list :package (project-package project)))
+      :depends ,(mapcar #'serialize-dep (project-depends project))
+      :dev-depends ,(mapcar #'serialize-dep (project-dev-depends project))
+      :test-depends ,(mapcar #'serialize-dep (project-test-depends project))
+      :registries ,(mapcar #'serialize-registry (project-registries project))
+      :lisp ,(project-lisp project)
+      :sbcl ,(project-sbcl-constraints project)
+      :build ,(project-build-options project)
+      :scripts ,(project-scripts project))))
+
+(defun write-project-file (project path)
+  "Write a project struct to a clpm.project file."
+  (clpm.io.sexp:write-canonical-sexp-to-file (serialize-project project) path))
 
 (defun read-lock-file (path)
   "Read a clpm.lock file and return a lockfile struct."

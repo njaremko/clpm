@@ -342,6 +342,30 @@ Returns (values system-id constraint-form-or-nil)."
 (defun sorted-deps (deps)
   (sort (copy-list deps) #'string< :key #'clpm.project:dependency-system))
 
+(defun %sha256-hex-of-string (s)
+  (clpm.crypto.sha256:bytes-to-hex
+   (clpm.crypto.sha256:sha256 s)))
+
+(defun %canonical-sexp-sha256 (sexp)
+  (%sha256-hex-of-string
+   (clpm.io.sexp:write-canonical-sexp-to-string sexp)))
+
+(defun %registry-input-sexp (refs)
+  (let ((items
+          (loop for ref in refs
+                collect
+                `(:registry
+                  :name ,(clpm.project:registry-ref-name ref)
+                  :kind ,(clpm.project:registry-ref-kind ref)
+                  :url ,(clpm.project:registry-ref-url ref)
+                  :trust ,(clpm.project:registry-ref-trust ref)))))
+    (setf items
+          (sort items
+                (lambda (a b)
+                  (string< (or (getf (cdr a) :name) "")
+                           (or (getf (cdr b) :name) "")))))
+    `(:registries :items ,items)))
+
 (defun find-effective-project-root (&optional (start (uiop:getcwd)))
   "Find the effective project root for commands that operate on a project.
 
@@ -1186,32 +1210,47 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
       (when (null workspace-root)
         (log-no-project-found))
       (return-from cmd-resolve 1))
-    (log-info "Resolving dependencies...")
     (let* ((project (clpm.project:read-project-file manifest-path))
+           (project-hash (%canonical-sexp-sha256 (clpm.project:serialize-project project)))
+           (registries-hash
+             (multiple-value-bind (refs _build-options)
+                 (clpm.config:merge-project-config project)
+               (declare (ignore _build-options))
+               (%canonical-sexp-sha256 (%registry-input-sexp refs))))
            (lockfile (when lock-path
-                       (clpm.project:read-lock-file lock-path)))
-           (registries (load-project-registries project)))
-      ;; Resolve
-      (handler-case
-          (let ((resolution (clpm.solver:solve project registries
-                                               :lockfile lockfile)))
-            (let ((new-lockfile (clpm.solver:resolution-to-lockfile
-                                 resolution project registries)))
-              ;; Write lockfile
+                       (ignore-errors (clpm.project:read-lock-file lock-path)))))
+
+      (when (and lockfile
+                 (stringp (clpm.project:lockfile-project-sha256 lockfile))
+                 (stringp (clpm.project:lockfile-registries-sha256 lockfile))
+                 (string= (clpm.project:lockfile-project-sha256 lockfile) project-hash)
+                 (string= (clpm.project:lockfile-registries-sha256 lockfile) registries-hash))
+        (log-info "clpm.lock is up to date (inputs unchanged); skipping resolve")
+        (return-from cmd-resolve 0))
+
+      (log-info "Resolving dependencies...")
+      (let ((registries (load-project-registries project)))
+        (handler-case
+            (let* ((resolution (clpm.solver:solve project registries
+                                                 :lockfile lockfile))
+                   (new-lockfile (clpm.solver:resolution-to-lockfile
+                                  resolution project registries)))
+              (setf (clpm.project:lockfile-project-sha256 new-lockfile) project-hash
+                    (clpm.project:lockfile-registries-sha256 new-lockfile) registries-hash)
               (let ((lock-out (merge-pathnames "clpm.lock" project-root)))
-                (clpm.project:write-lock-file new-lockfile lock-out)
-                (log-info "Wrote clpm.lock")
-                (log-info "Resolved ~D systems"
-                          (length (clpm.project:lockfile-resolved new-lockfile))))))
-        (clpm.errors:clpm-resolve-error (c)
-          (log-error "Failed to resolve dependencies: ~A"
-                     (clpm.errors:clpm-error-message c))
-          (let ((chain (clpm.errors:clpm-resolve-error-conflict-chain c)))
-            (when chain
-              (format *error-output* "~&Conflict chain:~%")
-              (dolist (line chain)
-                (format *error-output* "  ~A~%" line))))
-          (return-from cmd-resolve 2))))
+                (clpm.project:write-lock-file new-lockfile lock-out))
+              (log-info "Wrote clpm.lock")
+              (log-info "Resolved ~D systems"
+                        (length (clpm.project:lockfile-resolved new-lockfile))))
+          (clpm.errors:clpm-resolve-error (c)
+            (log-error "Failed to resolve dependencies: ~A"
+                       (clpm.errors:clpm-error-message c))
+            (let ((chain (clpm.errors:clpm-resolve-error-conflict-chain c)))
+              (when chain
+                (format *error-output* "~&Conflict chain:~%")
+                (dolist (line chain)
+                  (format *error-output* "  ~A~%" line))))
+            (return-from cmd-resolve 2)))))
     0))
 
 ;;; fetch command
