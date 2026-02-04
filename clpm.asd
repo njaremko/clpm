@@ -17,6 +17,7 @@
       :serial t
       :components
       ((:file "sexp")
+       (:file "json")
        (:file "fs")))
      (:module "crypto"
       :serial t

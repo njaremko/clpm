@@ -85,7 +85,8 @@
   (declare (ignore stderr))
   (assert-eql 0 code)
   (assert-contains stdout "Usage: clpm search")
-  (assert-contains stdout "Not implemented yet."))
+  (assert-contains stdout "--limit")
+  (assert-contains stdout "--json"))
 (format t "  `clpm help search` PASSED~%")
 
 (format t "Testing `<cmd> --help` output...~%")

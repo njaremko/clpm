@@ -37,6 +37,11 @@
   (:export #:list-directory-entries
            #:walk-files))
 
+(defpackage #:clpm.io.json
+  (:use #:cl)
+  (:export #:write-json
+           #:write-json-to-string))
+
 (defpackage #:clpm.crypto.sha256
   (:use #:cl)
   (:export #:sha256
@@ -299,6 +304,7 @@
            #:cmd-new
            #:cmd-add
            #:cmd-remove
+           #:cmd-search
            #:cmd-resolve
            #:cmd-fetch
            #:cmd-build

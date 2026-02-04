@@ -438,6 +438,143 @@ Returns (values system-id constraint-form-or-nil)."
               (cmd-install)
               (cmd-resolve)))))))
 
+;;; search command
+
+(defun cmd-search (&rest args)
+  "Search configured registries for systems matching a query string."
+  (labels ((usage-error (fmt &rest fmt-args)
+             (apply #'log-error fmt fmt-args)
+             (log-error "Usage: clpm search <query> [--limit N] [--json]")
+             (return-from cmd-search 1))
+           (parse-release-ref (release-ref)
+             (let ((at-pos (and (stringp release-ref)
+                                (position #\@ release-ref))))
+               (if at-pos
+                   (values (subseq release-ref 0 at-pos)
+                           (subseq release-ref (1+ at-pos)))
+                   (values release-ref nil))))
+           (load-merged-registries ()
+             (clpm.platform:ensure-directories)
+             (multiple-value-bind (_project-root manifest-path _lock-path)
+                 (clpm.project:find-project-root)
+               (declare (ignore _project-root _lock-path))
+               (let ((refs
+                       (if manifest-path
+                           (let ((project (clpm.project:read-project-file manifest-path)))
+                             (nth-value 0 (clpm.config:merge-project-config project)))
+                           (clpm.config:config-registries (clpm.config:read-config)))))
+                 (loop for ref in refs
+                       collect
+                       (clpm.registry:clone-registry
+                        (clpm.project:registry-ref-name ref)
+                        (clpm.project:registry-ref-url ref)
+                        :trust-key (clpm.project:registry-ref-trust ref)
+                        :kind (clpm.project:registry-ref-kind ref)))))))
+    (let ((query nil)
+          (limit nil)
+          (jsonp nil))
+      ;; Parse args
+      (let ((i 0))
+        (loop while (< i (length args)) do
+          (let ((arg (nth i args)))
+            (cond
+              ((string= arg "--limit")
+               (incf i)
+               (when (>= i (length args))
+                 (usage-error "Missing value for --limit"))
+               (let* ((raw (nth i args))
+                      (n (ignore-errors (parse-integer raw :junk-allowed nil))))
+                 (unless (and (integerp n) (plusp n))
+                   (usage-error "Invalid value for --limit: ~A" raw))
+                 (setf limit n)))
+              ((string= arg "--json")
+               (setf jsonp t))
+              ((and (stringp arg) (plusp (length arg)) (char= (char arg 0) #\-))
+               (usage-error "Unknown option: ~A" arg))
+              ((null query)
+               (setf query arg))
+              (t
+               (usage-error "Unexpected argument: ~A" arg))))
+          (incf i)))
+
+      (unless (and (stringp query) (plusp (length query)))
+        (usage-error "Missing search query"))
+
+      (let ((registries (load-merged-registries)))
+        (when (null registries)
+          (log-error "No registries configured (run: clpm registry add ...)")
+          (return-from cmd-search 1))
+
+        (let* ((q (string-downcase query))
+               (results '()))
+          (dolist (reg registries)
+            (let* ((reg-name (clpm.registry:registry-name reg))
+                   (snap (clpm.registry:registry-snapshot reg))
+                   (best (make-hash-table :test 'equal)))
+              (when snap
+                (dolist (entry (clpm.registry:snapshot-provides snap))
+                  (let ((system-id (car entry))
+                        (release-ref (cdr entry)))
+                    (when (and (stringp system-id)
+                               (search q system-id :test #'char-equal))
+                      (multiple-value-bind (_pkg ver)
+                          (parse-release-ref release-ref)
+                        (declare (ignore _pkg))
+                        (let ((existing (gethash system-id best)))
+                          (cond
+                            ((null existing)
+                             (setf (gethash system-id best) (cons release-ref ver)))
+                            (t
+                             (let ((existing-ref (car existing))
+                                   (existing-ver (cdr existing)))
+                               (when (or (and ver existing-ver
+                                              (clpm.solver.version:version> ver existing-ver))
+                                         (and ver existing-ver
+                                              (clpm.solver.version:version= ver existing-ver)
+                                              (string< release-ref existing-ref))
+                                         (and ver (null existing-ver))
+                                         (and (null ver) (null existing-ver)
+                                              (string< release-ref existing-ref)))
+                                 (setf (gethash system-id best) (cons release-ref ver))))))))))))
+              (maphash (lambda (system-id info)
+                         (push (list system-id reg-name (car info)) results))
+                       best)))
+
+          (setf results
+                (sort results
+                      (lambda (a b)
+                        (destructuring-bind (asys areg arel) a
+                          (destructuring-bind (bsys breg brel) b
+                            (cond
+                              ((string< asys bsys) t)
+                              ((string> asys bsys) nil)
+                              ((string< areg breg) t)
+                              ((string> areg breg) nil)
+                              (t (string< arel brel))))))))
+
+          (when limit
+            (setf results (subseq results 0 (min limit (length results)))))
+
+          (if jsonp
+              (progn
+                (clpm.io.json:write-json
+                 (list :array
+                       (mapcar (lambda (r)
+                                 (destructuring-bind (sys reg-name rel) r
+                                   (list :object
+                                         (list (cons "system" sys)
+                                               (cons "registry" reg-name)
+                                               (cons "release" rel)))))
+                               results))
+                 *standard-output*)
+                (terpri)
+                0)
+              (progn
+                (dolist (r results)
+                  (destructuring-bind (sys reg-name rel) r
+                    (format t "~A~C~A~C~A~%" sys #\Tab reg-name #\Tab rel)))
+                0)))))))
+
 ;;; resolve command
 
 (defun cmd-resolve ()
@@ -1262,7 +1399,10 @@ Manifest schema:
        (p "Usage: clpm search <query> [--limit N] [--json]")
        (p "")
        (p "Search registries for systems matching <query>.")
-       (p "Not implemented yet.")
+       (p "")
+       (p "Options:")
+       (p "  --limit N  Limit number of results (after sorting)")
+       (p "  --json     Emit a stable JSON array")
        0)
       (:info
        (p "Usage: clpm info <system> [--json]")
