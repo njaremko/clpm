@@ -102,6 +102,12 @@ For pinned/local sources, registry is NIL."
   "Add a dependency constraint to solver state."
   (let ((system-id (clpm.project:dependency-system dep))
         (constraint (parse-constraint (clpm.project:dependency-constraint dep))))
+    (let ((dep-source (clpm.project:dependency-source dep)))
+      (when dep-source
+        (when (constraint-pinned-source constraint)
+          (signal-conflict state system-id constraint
+                           (format nil "Multiple pinned sources for ~A" system-id)))
+        (setf (constraint-pinned-source constraint) dep-source)))
     (record-constraint-reason
      state system-id
      (case source
@@ -276,7 +282,18 @@ For pinned/local sources, registry is NIL."
 
 (defun find-candidates (state system-id constraint)
   "Find release candidates for SYSTEM-ID satisfying CONSTRAINT."
-  (let ((pinned-source (constraint-pinned-source constraint)))
+  (let ((pinned-source (constraint-pinned-source constraint))
+        (registry-filter nil))
+    (when (and pinned-source (not (consp pinned-source)))
+      (signal-conflict state system-id constraint
+                       (format nil "Invalid pinned source: ~S" pinned-source)))
+    (when (and (consp pinned-source) (eq (car pinned-source) :registry))
+      (let ((name (second pinned-source)))
+        (unless (and (stringp name) (plusp (length name)))
+          (signal-conflict state system-id constraint
+                           (format nil "Invalid :registry pinned source: ~S" pinned-source)))
+        (setf registry-filter name)
+        (setf pinned-source nil)))
     (when pinned-source
       (labels ((project->system-deps (project)
                  (let* ((systems (or (clpm.project:project-systems project) '()))
@@ -389,25 +406,28 @@ For pinned/local sources, registry is NIL."
                (return-from find-candidates (list (cons release-ref meta))))))
           (t
            (signal-conflict state system-id constraint
-                            (format nil "Unknown pinned source: ~S" pinned-source)))))))
+                            (format nil "Unknown pinned source: ~S" pinned-source))))))
 
-  (let ((index (solver-state-index state))
-        (candidates '()))
-    ;; Get candidates from index
-    (let ((entries (clpm.registry:index-lookup-system index system-id)))
-      (dolist (entry entries)
-        (let* ((release-ref (cdr entry))
-               (meta-entry (clpm.registry:index-lookup-release index release-ref)))
-          (when meta-entry
-            (let* ((meta (cdr meta-entry))
-                   (version (clpm.registry:release-metadata-version meta)))
-              ;; Check constraint
-              (when (constraint-satisfies-p constraint version)
-                (push (cons release-ref meta) candidates)))))))
-    ;; Sort by version descending
-    (sort candidates #'version>
-          :key (lambda (c) (parse-version
-                            (clpm.registry:release-metadata-version (cdr c)))))))
+    (let ((index (solver-state-index state))
+          (candidates '()))
+      ;; Get candidates from index
+      (let ((entries (clpm.registry:index-lookup-system index system-id)))
+        (dolist (entry entries)
+          (let* ((reg (car entry))
+                 (release-ref (cdr entry))
+                 (meta-entry (clpm.registry:index-lookup-release index release-ref)))
+            (when (and meta-entry
+                       (or (null registry-filter)
+                           (string= (clpm.registry:registry-name reg) registry-filter)))
+              (let* ((meta (cdr meta-entry))
+                     (version (clpm.registry:release-metadata-version meta)))
+                ;; Check constraint
+                (when (constraint-satisfies-p constraint version)
+                  (push (cons release-ref meta) candidates)))))))
+      ;; Sort by version descending
+      (sort candidates #'version>
+            :key (lambda (c) (parse-version
+                              (clpm.registry:release-metadata-version (cdr c))))))))
 
 (defun choose-candidate (state system-id candidates)
   "Choose best candidate for SYSTEM-ID from CANDIDATES.

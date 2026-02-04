@@ -167,7 +167,7 @@
            (write-registry remote)
            (init-git-registry remote)
            (let ((url (format nil "file://~A" (namestring remote))))
-             ;; Project 1: implicit constraint picks highest version.
+             ;; Project 1: implicit constraint is nil (any version).
              (write-empty-project proj1 url)
              (uiop:with-current-directory (proj1)
                (assert-eql 0 (clpm:run-cli '("add" "foo"))))
@@ -176,9 +176,8 @@
                     (dep (find-dep deps "foo")))
                (assert-eql 1 (length deps))
                (assert-true dep "Expected foo in depends")
-               (assert-true (equal '(:semver "^2.0.0")
-                                   (clpm.project:dependency-constraint dep))
-                            "Expected caret constraint for highest version, got ~S"
+               (assert-true (null (clpm.project:dependency-constraint dep))
+                            "Expected nil constraint by default, got ~S"
                             (clpm.project:dependency-constraint dep)))
 
              ;; Idempotency: add again doesn't duplicate.
@@ -196,6 +195,19 @@
                 "2.0.0"
                 (clpm.project:locked-release-version
                  (clpm.project:locked-system-release locked))))
+
+             ;; --caret should choose a caret constraint based on highest version.
+             (uiop:with-current-directory (proj1)
+               (assert-eql 0 (clpm:run-cli '("add" "--caret" "foo"))))
+             (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj1)))
+                    (deps (clpm.project:project-depends project))
+                    (dep (find-dep deps "foo")))
+               (assert-eql 1 (length deps))
+               (assert-true dep "Expected foo in depends")
+               (assert-true (equal '(:semver "^2.0.0")
+                                   (clpm.project:dependency-constraint dep))
+                            "Expected caret constraint for highest version, got ~S"
+                            (clpm.project:dependency-constraint dep)))
 
              ;; Explicit semver constraint.
              (uiop:with-current-directory (proj1)
@@ -318,4 +330,3 @@
 
 (format t "~%Add/remove tests PASSED!~%")
 (sb-ext:exit :code 0)
-

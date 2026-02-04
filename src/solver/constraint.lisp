@@ -111,33 +111,47 @@
 
 (defun constraint-satisfies-p (constraint version)
   "Check if CONSTRAINT allows VERSION."
-  (when (constraint-pinned-source constraint)
-    ;; Pinned sources always satisfy (version is determined by source)
-    (return-from constraint-satisfies-p t))
+  (let ((pinned (constraint-pinned-source constraint)))
+    (when (and (consp pinned)
+               (member (car pinned) '(:git :path) :test #'eq))
+      ;; For pinned :git/:path sources, version is determined by the source.
+      (return-from constraint-satisfies-p t)))
   (let ((v (if (version-p version) version (parse-version version))))
     (some (lambda (r) (range-contains-p r v))
           (constraint-ranges constraint))))
 
 (defun constraint-empty-p (constraint)
   "Check if CONSTRAINT is unsatisfiable."
-  (and (null (constraint-pinned-source constraint))
-       (null (constraint-ranges constraint))))
+  (let ((pinned (constraint-pinned-source constraint)))
+    (cond
+      ((and (consp pinned)
+            (member (car pinned) '(:git :path) :test #'eq))
+       nil)
+      (t
+       (null (constraint-ranges constraint))))))
 
 (defun constraint-intersect (a b)
   "Compute intersection of constraints A and B."
-  ;; If either is pinned, they must match
-  (when (constraint-pinned-source a)
-    (return-from constraint-intersect a))
-  (when (constraint-pinned-source b)
-    (return-from constraint-intersect b))
-  ;; Intersect all range pairs
-  (let ((result-ranges '()))
-    (dolist (ra (constraint-ranges a))
-      (dolist (rb (constraint-ranges b))
-        (let ((intersection (range-intersect ra rb)))
-          (when intersection
-            (push intersection result-ranges)))))
-    (make-constraint :ranges (nreverse result-ranges))))
+  (let* ((pa (constraint-pinned-source a))
+         (pb (constraint-pinned-source b))
+         (pinned
+           (cond
+             ((and pa pb (equal pa pb)) pa)
+             ((and pa pb) :conflict)
+             (pa pa)
+             (pb pb)
+             (t nil))))
+    (when (eq pinned :conflict)
+      (return-from constraint-intersect (none-constraint)))
+    ;; Intersect all range pairs.
+    (let ((result-ranges '()))
+      (dolist (ra (constraint-ranges a))
+        (dolist (rb (constraint-ranges b))
+          (let ((intersection (range-intersect ra rb)))
+            (when intersection
+              (push intersection result-ranges)))))
+      (make-constraint :ranges (nreverse result-ranges)
+                       :pinned-source pinned))))
 
 (defun constraint-union (a b)
   "Compute union of constraints A and B."
@@ -145,8 +159,17 @@
   (make-constraint
    :ranges (append (constraint-ranges a)
                    (constraint-ranges b))
-   :pinned-source (or (constraint-pinned-source a)
-                      (constraint-pinned-source b))))
+   :pinned-source (cond
+                    ((and (constraint-pinned-source a)
+                          (constraint-pinned-source b)
+                          (equal (constraint-pinned-source a)
+                                 (constraint-pinned-source b)))
+                     (constraint-pinned-source a))
+                    ((constraint-pinned-source a)
+                     (constraint-pinned-source a))
+                    ((constraint-pinned-source b)
+                     (constraint-pinned-source b))
+                    (t nil))))
 
 ;;; Constraint parsing
 

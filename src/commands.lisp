@@ -255,6 +255,9 @@ Returns (values system-id constraint-form-or-nil)."
           (dev-p nil)
           (test-p nil)
           (install-p nil)
+          (any-p nil)
+          (caret-p nil)
+          (registry-name nil)
           (path nil)
           (git-url nil)
           (git-ref nil))
@@ -269,6 +272,19 @@ Returns (values system-id constraint-form-or-nil)."
                (setf test-p t))
               ((string= arg "--install")
                (setf install-p t))
+              ((string= arg "--any")
+               (setf any-p t))
+              ((string= arg "--caret")
+               (setf caret-p t))
+              ((string= arg "--registry")
+               (incf i)
+               (when (>= i (length args))
+                 (log-error "Missing value for --registry")
+                 (return-from cmd-add 1))
+               (when registry-name
+                 (log-error "Duplicate option: --registry")
+                 (return-from cmd-add 1))
+               (setf registry-name (nth i args)))
               ((string= arg "--path")
                (incf i)
                (when (>= i (length args))
@@ -307,7 +323,11 @@ Returns (values system-id constraint-form-or-nil)."
           (incf i)))
 
       (unless spec
-        (log-error "Usage: clpm add <system>[@^<semver>|@=<exact>] [--dev|--test] [--path <path>|--git <url> --ref <ref>] [--install]")
+        (log-error "Usage: clpm add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]")
+        (return-from cmd-add 1))
+
+      (when (and any-p caret-p)
+        (log-error "Only one of --any or --caret may be specified")
         (return-from cmd-add 1))
 
       (when (and dev-p test-p)
@@ -316,6 +336,10 @@ Returns (values system-id constraint-form-or-nil)."
 
       (when (and path git-url)
         (log-error "Only one of --path or --git may be specified")
+        (return-from cmd-add 1))
+
+      (when (and registry-name (or path git-url))
+        (log-error "Do not combine --registry with --path/--git")
         (return-from cmd-add 1))
 
       (when (and git-url (null git-ref))
@@ -333,7 +357,8 @@ Returns (values system-id constraint-form-or-nil)."
                         (test-p :test-depends)
                         (t :depends)))
              (system-id nil)
-             (constraint-form nil))
+             (constraint-form nil)
+             (dep-source nil))
         (multiple-value-bind (sys parsed-constraint)
             (parse-dep-spec spec)
           (setf system-id sys)
@@ -343,19 +368,58 @@ Returns (values system-id constraint-form-or-nil)."
           (when (and parsed-constraint (or path git-url))
             (log-error "Do not combine @<constraint> with --path/--git")
             (return-from cmd-add 1))
+          (when (and parsed-constraint (or any-p caret-p))
+            (log-error "Do not combine @<constraint> with --any/--caret")
+            (return-from cmd-add 1))
+
+          ;; Registry disambiguation for non-pinned sources.
+          (when (and (null path) (null git-url))
+            (let* ((index (clpm.registry:build-registry-index registries))
+                   (entries (clpm.registry:index-lookup-system index system-id))
+                   (provider-names
+                     (sort (remove-duplicates
+                            (mapcar (lambda (e)
+                                      (clpm.registry:registry-name (car e)))
+                                    (or entries '()))
+                            :test #'string=)
+                           #'string<)))
+              (when (null provider-names)
+                (log-error "System not found in configured registries: ~A" system-id)
+                (return-from cmd-add 1))
+              (when (and (null registry-name) (> (length provider-names) 1))
+                (log-error "System ~A is provided by multiple registries; use --registry <name>:" system-id)
+                (dolist (n provider-names)
+                  (log-error "  ~A" n))
+                (return-from cmd-add 1))
+              (when registry-name
+                (unless (member registry-name provider-names :test #'string=)
+                  (log-error "Registry ~A does not provide ~A. Providers:" registry-name system-id)
+                  (dolist (n provider-names)
+                    (log-error "  ~A" n))
+                  (return-from cmd-add 1))
+                (setf dep-source (list :registry registry-name)))))
+
           (cond
             (path
              (setf constraint-form (list :path path)))
             (git-url
-              (setf constraint-form (list :git :url git-url :ref git-ref)))
+             (setf constraint-form (list :git :url git-url :ref git-ref)))
             (parsed-constraint
              (setf constraint-form parsed-constraint))
-            (t
-             (let ((v-max (highest-system-version registries system-id)))
+            (caret-p
+             (let* ((regs (if registry-name
+                              (let ((r (find registry-name registries
+                                             :key #'clpm.registry:registry-name
+                                             :test #'string=)))
+                                (if r (list r) registries))
+                              registries))
+                    (v-max (highest-system-version regs system-id)))
                (unless v-max
                  (log-error "No versions found for ~A in configured registries" system-id)
                  (return-from cmd-add 1))
-               (setf constraint-form (list :semver (format nil "^~A" v-max)))))))
+               (setf constraint-form (list :semver (format nil "^~A" v-max)))))
+            (t
+             (setf constraint-form nil))))
 
         (labels ((deps-slot ()
                    (ecase section
@@ -376,8 +440,11 @@ Returns (values system-id constraint-form-or-nil)."
                   (setf (clpm.project:dependency-constraint existing) constraint-form))
                 (push (clpm.project:make-dependency
                        :system system-id
-                       :constraint constraint-form)
+                       :constraint constraint-form
+                       :source dep-source)
                       deps))
+            (when (and existing dep-source)
+              (setf (clpm.project:dependency-source existing) dep-source))
             (set-deps-slot (sorted-deps deps))
             (clpm.project:write-project-file project manifest-path)))
 
@@ -1841,10 +1908,11 @@ Manifest schema:
        (p "Creates clpm.project in the current directory.")
        0)
       (:add
-       (p "Usage: clpm add [--dev|--test] [--path <dir> | --git <url> --ref <ref>] <dep>[@<constraint>]")
+       (p "Usage: clpm add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]")
        (p "")
        (p "Examples:")
        (p "  clpm add alexandria")
+       (p "  clpm add --caret alexandria")
        (p "  clpm add alexandria@^1.4.0")
        (p "  clpm add --path ../my-lib my-lib")
        (p "  clpm add --git https://example.invalid/repo.git --ref main my-lib")
@@ -1852,6 +1920,9 @@ Manifest schema:
        (p "Options:")
        (p "  --dev         Add to :dev-depends")
        (p "  --test        Add to :test-depends")
+       (p "  --any         Explicitly set :constraint nil (any version)")
+       (p "  --caret       Set caret constraint based on highest available version")
+       (p "  --registry    Select registry when multiple provide the system")
        (p "  --install     Run 'clpm install' after updating manifests")
        (p "  --path <dir>  Use a local path dependency")
        (p "  --git <url>   Use a git dependency")
