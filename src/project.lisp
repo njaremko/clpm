@@ -316,7 +316,8 @@ directory pathnames (as strings) for determinism."
                           (pn (uiop:ensure-pathname expanded
                                                     :defaults base-dir
                                                     :want-existing nil))
-                          (abs (uiop:ensure-directory-pathname pn))
+                          (merged (merge-pathnames pn base-dir))
+                          (abs (uiop:ensure-directory-pathname merged))
                           (tru (uiop:ensure-directory-pathname (truename abs))))
                      (setf (dependency-constraint dep)
                            (list :path (namestring tru))))))

@@ -56,6 +56,7 @@ Commands:
 Options:
   -v, --verbose    Verbose output
   -j, --jobs N     Parallel jobs (default: 1)
+  -p, --package M  Workspace member to target
   --offline        Fail if artifacts not in cache
   --insecure       Skip signature verification (dangerous)
   -h, --help       Show this help
@@ -110,6 +111,21 @@ Returns (values command command-args options)."
                (clpm.errors:signal-error 'clpm.errors:clpm-user-error
                                          "Invalid value for --jobs: ~A" raw))
              (push (cons :jobs n) options)))
+          ((or (string= arg "-p") (string= arg "--package"))
+           (incf i)
+           (when (>= i (length args))
+             (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                       "Missing value for ~A" arg))
+           (when (some (lambda (opt)
+                         (and (consp opt) (eq (car opt) :package)))
+                       options)
+             (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                       "Duplicate option: ~A" arg))
+           (let ((raw (nth i args)))
+             (unless (and (stringp raw) (plusp (length raw)))
+               (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                         "Invalid value for --package: ~S" raw))
+             (push (cons :package raw) options)))
           ((string= arg "--offline")
            (push :offline options))
           ((string= arg "--insecure")
@@ -158,7 +174,12 @@ This function must not call `sb-ext:exit` so it can be used from tests."
         (let ((clpm.commands:*verbose* *verbose*)
               (clpm.commands:*offline* *offline*)
               (clpm.commands:*insecure* *insecure*)
-              (clpm.commands:*jobs* *jobs*))
+              (clpm.commands:*jobs* *jobs*)
+              (clpm.commands:*target-package*
+                (loop for opt in options
+                      when (and (consp opt) (eq (car opt) :package))
+                        do (return (cdr opt))
+                      finally (return nil))))
           ;; Dispatch command
           (case command
             (:help

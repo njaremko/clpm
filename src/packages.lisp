@@ -311,6 +311,7 @@
            #:*offline*
            #:*insecure*
            #:*jobs*
+           #:*target-package*
            #:cmd-init
            #:cmd-new
            #:cmd-add
