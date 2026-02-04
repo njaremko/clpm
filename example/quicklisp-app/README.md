@@ -22,6 +22,14 @@ clpm registry update quicklisp
 # Install deps from Quicklisp and activate the project
 clpm install
 
+# Inspect provenance/trust and generate an SBOM
+clpm audit
+clpm sbom --format cyclonedx-json --out sbom.json
+
+# Inspect dependency graph
+clpm tree
+clpm why alexandria
+
 # Run tests
 clpm test
 

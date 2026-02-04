@@ -347,6 +347,7 @@
            #:cmd-build
            #:cmd-install
            #:cmd-update
+           #:cmd-workspace
            #:cmd-registry
            #:cmd-repl
            #:cmd-run

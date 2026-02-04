@@ -16,6 +16,9 @@ From the repo root:
 ```bash
 cd example/workspace
 
+# List workspace members (from workspace root)
+clpm workspace list
+
 # Target the `app` member from the workspace root
 clpm -p app install
 clpm -p app test

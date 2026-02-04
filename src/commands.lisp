@@ -2119,6 +2119,124 @@ Manifest schema:
               registries)))
     (nreverse registries)))
 
+;;; workspace command
+
+(defun %normalize-workspace-member-arg (raw)
+  "Normalize and validate a workspace member path string."
+  (unless (and (stringp raw) (plusp (length raw)))
+    (log-error "Workspace member path must be a non-empty string, got ~S" raw)
+    (return-from %normalize-workspace-member-arg nil))
+  (let ((trimmed (string-right-trim '(#\/ #\\) raw)))
+    (when (zerop (length trimmed))
+      (log-error "Workspace member path must not be empty")
+      (return-from %normalize-workspace-member-arg nil))
+    (let ((pn (uiop:ensure-pathname trimmed
+                                    :defaults (uiop:getcwd)
+                                    :want-relative nil
+                                    :want-absolute nil)))
+      (when (uiop:absolute-pathname-p pn)
+        (log-error "Workspace member path must be relative, got ~S" raw)
+        (return-from %normalize-workspace-member-arg nil)))
+    trimmed))
+
+(defun cmd-workspace (&rest args)
+  "Manage workspaces and workspace members."
+  (labels ((usage-error (fmt &rest fmt-args)
+             (apply #'log-error fmt fmt-args)
+             (log-error "Usage:")
+             (log-error "  clpm workspace init [--dir <path>]")
+             (log-error "  clpm workspace add <member> [--dir <path>]")
+             (log-error "  clpm workspace list [--dir <path>]")
+             (return-from cmd-workspace 1))
+           (parse-dir-arg (rest)
+             (let ((dir nil)
+                   (out '()))
+               (loop while rest do
+                 (let ((a (pop rest)))
+                   (cond
+                     ((string= a "--dir")
+                      (setf dir (pop rest))
+                      (unless (and (stringp dir) (plusp (length dir)))
+                        (usage-error "Missing value for --dir")))
+                     (t
+                      (push a out)))))
+               (values dir (nreverse out))))
+           (workspace-root-and-path (dir)
+             (if dir
+                 (let* ((root (uiop:ensure-directory-pathname
+                               (clpm.platform:expand-path dir)))
+                        (path (merge-pathnames "clpm.workspace" root)))
+                   (values root path))
+                 (clpm.workspace:find-workspace-root (uiop:getcwd)))))
+    (let* ((sub (and (first args) (string-downcase (first args))))
+           (rest (rest args)))
+      (cond
+        ((or (null sub) (string= sub "help") (string= sub "--help"))
+         (log-info "Usage:")
+         (log-info "  clpm workspace init [--dir <path>]")
+         (log-info "  clpm workspace add <member> [--dir <path>]")
+         (log-info "  clpm workspace list [--dir <path>]")
+         0)
+        ((string= sub "init")
+         (multiple-value-bind (dir extra)
+             (parse-dir-arg rest)
+           (when extra
+             (usage-error "Unexpected arguments: ~{~A~^ ~}" extra))
+           (let ((root (if dir
+                           (uiop:ensure-directory-pathname
+                            (clpm.platform:expand-path dir))
+                           (uiop:getcwd))))
+             (let ((path (merge-pathnames "clpm.workspace" root)))
+               (when (uiop:file-exists-p path)
+                 (usage-error "clpm.workspace already exists: ~A" (namestring path)))
+               (clpm.workspace:write-workspace-file
+                (clpm.workspace:make-workspace :format 1 :members '())
+                path)
+               (log-info "Initialized workspace: ~A" (namestring root))
+               0))))
+        ((string= sub "add")
+         (multiple-value-bind (dir extra)
+             (parse-dir-arg rest)
+           (let ((member (first extra))
+                 (extra (rest extra)))
+             (when (or (null member) extra)
+               (usage-error "Usage: clpm workspace add <member> [--dir <path>]"))
+             (let ((norm (%normalize-workspace-member-arg member)))
+               (unless norm
+                 (return-from cmd-workspace 1))
+               (multiple-value-bind (root ws-path)
+                   (workspace-root-and-path dir)
+                 (unless (and root ws-path (uiop:file-exists-p ws-path))
+                   (usage-error "No clpm.workspace found (run: clpm workspace init)"))
+                 (let* ((ws (clpm.workspace:read-workspace-file ws-path))
+                        (members (sort (remove-duplicates
+                                        (append (or (clpm.workspace:workspace-members ws) '())
+                                                (list norm))
+                                        :test #'string=)
+                                       #'string<)))
+                   (setf (clpm.workspace:workspace-members ws) members)
+                   (clpm.workspace:write-workspace-file ws ws-path)
+                   (log-info "Added member: ~A" norm)
+                   0))))))
+        ((string= sub "list")
+         (multiple-value-bind (dir extra)
+             (parse-dir-arg rest)
+           (when extra
+             (usage-error "Unexpected arguments: ~{~A~^ ~}" extra))
+           (multiple-value-bind (root ws-path)
+               (workspace-root-and-path dir)
+             (declare (ignore root))
+             (unless (and ws-path (uiop:file-exists-p ws-path))
+               (usage-error "No clpm.workspace found (run: clpm workspace init)"))
+             (let* ((ws (clpm.workspace:read-workspace-file ws-path))
+                    (members (sort (copy-list (or (clpm.workspace:workspace-members ws) '()))
+                                   #'string<)))
+               (dolist (m members)
+                 (format t "~A~%" m))
+               0))))
+        (t
+         (usage-error "Unknown subcommand: ~A" sub))))))
+
 ;;; registry command
 
 (defun cmd-registry (&rest args)
@@ -2544,10 +2662,11 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
         (keys-dir nil)
         (project-dir nil)
         (tarball-url nil)
+        (tarball-out nil)
         (git-commit-p nil))
     (labels ((usage-error (fmt &rest fmt-args)
                (apply #'log-error fmt fmt-args)
-               (log-error "Usage: clpm publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--project <dir>] [--git-commit]")
+               (log-error "Usage: clpm publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>] [--git-commit]")
                (return-from cmd-publish 1)))
       ;; Parse args.
       (loop while args do
@@ -2558,6 +2677,7 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
             ((string= arg "--keys-dir") (setf keys-dir (pop args)))
             ((string= arg "--project") (setf project-dir (pop args)))
             ((string= arg "--tarball-url") (setf tarball-url (pop args)))
+            ((string= arg "--tarball-out") (setf tarball-out (pop args)))
             ((string= arg "--git-commit") (setf git-commit-p t))
             (t
              (usage-error "Unknown option: ~A" arg)))))
@@ -2570,6 +2690,9 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
         (usage-error "Missing --keys-dir <dir>"))
       (unless (and (stringp tarball-url) (plusp (length tarball-url)))
         (usage-error "Missing --tarball-url <url>"))
+      (when tarball-out
+        (unless (and (stringp tarball-out) (plusp (length tarball-out)))
+          (usage-error "Missing --tarball-out <path>")))
 
       (let* ((registry-root (uiop:ensure-directory-pathname
                              (clpm.platform:expand-path registry)))
@@ -2627,7 +2750,7 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                            (write-string sig-hex s)
                            (terpri s)))))
               (let* ((seed (read-seed32 priv-key-path))
-                     ;; Create tarball in temp dir.
+                     ;; Create tarball (optionally at a user-provided path).
                      (tar (clpm.platform:find-tar)))
                 (unless tar
                   (error 'clpm.errors:clpm-missing-tool-error
@@ -2635,7 +2758,18 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                          :install-hints (clpm.platform:tool-install-hints "tar")))
                 (clpm.store:with-temp-dir (tmp)
                   (let* ((tarball-name (format nil "~A-~A.tar.gz" name version))
-                         (tarball-path (merge-pathnames tarball-name tmp)))
+                         (tarball-path
+                           (if tarball-out
+                               (let* ((pn (uiop:ensure-pathname
+                                           (clpm.platform:expand-path tarball-out)
+                                           :defaults project-root
+                                           :want-existing nil))
+                                      (pn (if (uiop:directory-pathname-p pn)
+                                              (merge-pathnames tarball-name (uiop:ensure-directory-pathname pn))
+                                              pn)))
+                                 pn)
+                               (merge-pathnames tarball-name tmp))))
+                    (ensure-directories-exist tarball-path)
                     (multiple-value-bind (_out err exit-code)
                         (clpm.platform:run-program
                          (list tar
@@ -2651,10 +2785,13 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                       (unless (zerop exit-code)
                         (usage-error "tar failed: ~A" err)))
 
-                    (let* ((artifact-sha256
-                             (clpm.crypto.sha256:bytes-to-hex
-                              (clpm.crypto.sha256:sha256-file tarball-path)))
-                           (system-deps (%compute-system-deps-from-asd project-root systems))
+                    (when tarball-out
+                      (log-info "Wrote tarball: ~A" (namestring tarball-path)))
+
+	                    (let* ((artifact-sha256
+	                             (clpm.crypto.sha256:bytes-to-hex
+	                              (clpm.crypto.sha256:sha256-file tarball-path)))
+	                           (system-deps (%compute-system-deps-from-asd project-root systems))
                            (release-ref (format nil "~A@~A" name version))
                            (release-dir (merge-pathnames (format nil "registry/packages/~A/~A/" name version)
                                                          registry-root))
@@ -3225,7 +3362,7 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
        (p "Print the resolved dependency tree for the current project/workspace.")
        (p "")
        (p "Options:")
-       (p "  --package <member>  Workspace member to target (reserved; workspaces land later)")
+       (p "  --package <member>  Workspace member to target (same as global -p/--package)")
        (p "  --depth N           Max depth (0 = roots only)")
        0)
       (:why
@@ -3234,7 +3371,7 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
        (p "Explain why <system> appears in the resolved dependency graph.")
        (p "")
        (p "Options:")
-       (p "  --package <member>  Workspace member to target (reserved; workspaces land later)")
+       (p "  --package <member>  Workspace member to target (same as global -p/--package)")
        0)
       (:scripts
        (p "Usage:")
@@ -3267,19 +3404,22 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
        (p "  <id>.pub  32-byte public key as ASCII hex (64 chars)")
        0)
       (:publish
-       (p "Usage: clpm publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--project <dir>] [--git-commit]")
+       (p "Usage: clpm publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>] [--git-commit]")
        (p "")
        (p "Publish the current project to a git-backed registry.")
        (p "")
        (p "Notes:")
        (p "  - This writes files into the registry directory; it does not push.")
+       (p "  - Use --tarball-out to write the tarball to a file/dir (optional).")
        (p "  - Use --git-commit to commit the changes inside the registry (optional).")
        0)
       (:workspace
-       (p "Usage: clpm workspace <init|add|list> [args]")
+       (p "Usage:")
+       (p "  clpm workspace init [--dir <path>]")
+       (p "  clpm workspace add <member> [--dir <path>]")
+       (p "  clpm workspace list [--dir <path>]")
        (p "")
        (p "Manage workspaces and workspace members.")
-       (p "Not implemented yet.")
        0)
       (:registry
        (p "Usage: clpm registry <add|list|update|trust|init> [options]")

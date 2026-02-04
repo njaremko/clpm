@@ -231,6 +231,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
              (apply #'clpm.commands:cmd-why command-args))
             (:registry
              (apply #'clpm.commands:cmd-registry command-args))
+            (:workspace
+             (apply #'clpm.commands:cmd-workspace command-args))
             (:resolve
              (clpm.commands:cmd-resolve))
             (:fetch

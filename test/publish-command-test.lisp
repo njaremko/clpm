@@ -39,12 +39,23 @@
     (write-string text s)
     (terpri s)))
 
+(defun run-cli-captured (args)
+  (let ((out (make-string-output-stream))
+        (err (make-string-output-stream)))
+    (let ((*standard-output* out)
+          (*error-output* err))
+      (let ((code (clpm:run-cli args)))
+        (values code
+                (get-output-stream-string out)
+                (get-output-stream-string err))))))
+
 (format t "Testing `clpm publish`...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
          (keys-dir (merge-pathnames "keys/" tmp))
          (reg-root (merge-pathnames "reg/" tmp))
+         (tarballs-dir (merge-pathnames "tarballs/" tmp))
          (old-home (sb-posix:getenv "CLPM_HOME"))
          (key-id "testkey")
          ;; RFC8032 vector 1 seed/public key (deterministic).
@@ -57,6 +68,7 @@
     (ensure-directories-exist clpm-home)
     (ensure-directories-exist keys-dir)
     (ensure-directories-exist reg-root)
+    (ensure-directories-exist tarballs-dir)
     (write-text priv-path seed-hex)
     (write-text pub-path pub-hex)
 
@@ -78,14 +90,24 @@
             (clpm:run-cli (list "new" project-name "--lib" "--dir" (namestring tmp))))
 
            ;; Publish into the local registry.
-           (assert-eql
-            0
-            (clpm:run-cli (list "publish"
-                                "--registry" (namestring reg-root)
-                                "--key-id" key-id
-                                "--keys-dir" (namestring keys-dir)
-                                "--project" (namestring project-root)
-                                "--tarball-url" "https://example.invalid/mylib-0.1.0.tar.gz")))
+           (multiple-value-bind (code stdout _stderr)
+               (run-cli-captured (list "publish"
+                                       "--registry" (namestring reg-root)
+                                       "--key-id" key-id
+                                       "--keys-dir" (namestring keys-dir)
+                                       "--project" (namestring project-root)
+                                       "--tarball-url" "https://example.invalid/mylib-0.1.0.tar.gz"
+                                       "--tarball-out" (namestring tarballs-dir)))
+             (declare (ignore _stderr))
+             (assert-eql 0 code)
+             (assert-true (search "Wrote tarball:" stdout :test #'char-equal)
+                          "Expected publish output to mention tarball write, got:~%~A"
+                          stdout))
+
+           (let ((tarball (merge-pathnames "mylib-0.1.0.tar.gz" tarballs-dir)))
+             (assert-true (uiop:file-exists-p tarball)
+                          "Expected tarball to exist: ~A"
+                          (namestring tarball)))
 
            (let* ((release-dir (merge-pathnames "registry/packages/mylib/0.1.0/" reg-root))
                   (release (merge-pathnames "release.sxp" release-dir))

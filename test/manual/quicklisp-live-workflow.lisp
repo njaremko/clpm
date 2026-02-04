@@ -69,6 +69,7 @@
                                            "--quicklisp"
                                            "--name" "quicklisp"
                                            "--url" "https://beta.quicklisp.org/dist/quicklisp.txt")))
+         (assert-eql 0 (clpm:run-cli (list "registry" "trust" "set" "quicklisp" "tofu")))
          (assert-eql 0 (clpm:run-cli (list "registry" "update" "quicklisp")))
 
          ;; Create a new project.
@@ -110,6 +111,21 @@
 
              ;; Run tests and build a binary.
              (assert-eql 0 (clpm:run-cli (list "test")))
+
+             ;; Exercise provenance and SBOM outputs.
+             (assert-eql 0 (clpm:run-cli (list "audit")))
+             (let ((sbom-path (merge-pathnames "sbom.json" app-root)))
+               (assert-eql 0 (clpm:run-cli (list "sbom" "--format" "cyclonedx-json" "--out" (namestring sbom-path))))
+               (assert-true (uiop:file-exists-p sbom-path)
+                            "Missing SBOM output: ~A" (namestring sbom-path))
+               (assert-true (search "CycloneDX" (uiop:read-file-string sbom-path) :test #'char-equal)
+                            "Expected CycloneDX SBOM, got:~%~A"
+                            (uiop:read-file-string sbom-path)))
+
+             ;; Exercise tree/why UX (best-effort).
+             (assert-eql 0 (clpm:run-cli (list "tree" "--depth" "2")))
+             (assert-eql 0 (clpm:run-cli (list "why" "alexandria")))
+
              (assert-eql 0 (clpm:run-cli (list "package")))
              (assert-true (uiop:file-exists-p dist-bin)
                           "Missing packaged binary: ~A" (namestring dist-bin))
