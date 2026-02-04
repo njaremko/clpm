@@ -1390,6 +1390,7 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
       (log-info "Activating project...")
       (let ((lockfile (clpm.project:read-lock-file lock-path)))
         (clpm.build:activate-project project-root lockfile
+                                     :lockfile-path lock-path
                                      :compile-options compile-options
                                      :lisp-kind kind
                                      :lisp-version lisp-version))
@@ -1476,17 +1477,62 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
 ;;; run/exec commands
 
 (defun ensure-project-activated (project-root)
-  "Ensure PROJECT-ROOT has an activation config; returns (values config-path exit-code)."
-  (let ((config-path (merge-pathnames ".clpm/asdf-config.lisp" project-root)))
-    (unless (uiop:file-exists-p config-path)
-      (log-info "Project not activated; running 'clpm install'...")
-      (let ((rc (uiop:with-current-directory (project-root)
-                  (cmd-install))))
-        (unless (zerop rc)
-          (return-from ensure-project-activated (values nil rc)))))
-    (if (uiop:file-exists-p config-path)
-        (values config-path 0)
-        (values nil 1))))
+  "Ensure PROJECT-ROOT is installed and activated; returns (values config-path exit-code)."
+  (labels ((lock-path ()
+             (merge-pathnames "clpm.lock" project-root))
+           (config-path ()
+             (merge-pathnames ".clpm/asdf-config.lisp" project-root))
+           (env-path ()
+             (merge-pathnames ".clpm/env.sexp" project-root))
+           (lockfile-sha256-hex (path)
+             (clpm.crypto.sha256:bytes-to-hex
+              (clpm.crypto.sha256:sha256-file path)))
+           (read-env-lockfile-sha256 (path)
+             (when (uiop:file-exists-p path)
+               (handler-case
+                   (let ((form (clpm.io.sexp:read-safe-sexp-from-file path)))
+                     (when (and (consp form) (eq (car form) :env))
+                       (let ((plist (cdr form)))
+                         (getf plist :lockfile-sha256))))
+                 (error ()
+                   nil))))
+           (installed-and-fresh-p ()
+             (clpm.platform:ensure-directories)
+             (let ((lp (lock-path))
+                   (cp (config-path))
+                   (ep (env-path)))
+               (when (or (not (uiop:file-exists-p lp))
+                         (not (uiop:file-exists-p cp))
+                         (not (uiop:file-exists-p ep)))
+                 (return-from installed-and-fresh-p nil))
+               (let* ((env-lock (read-env-lockfile-sha256 ep))
+                      (cur-lock (lockfile-sha256-hex lp)))
+                 (unless (and (stringp env-lock) (stringp cur-lock)
+                              (string= env-lock cur-lock))
+                   (return-from installed-and-fresh-p nil))
+                 ;; Ensure lockfile is fully fetched (tree hashes present) and
+                 ;; store entries exist. This avoids confusing ASDF missing-system
+                 ;; errors during `clpm run` when the activation is stale or incomplete.
+                 (let ((lockfile (ignore-errors (clpm.project:read-lock-file lp))))
+                   (unless lockfile
+                     (return-from installed-and-fresh-p nil))
+                   (dolist (locked (clpm.project:lockfile-resolved lockfile))
+                     (let* ((release (clpm.project:locked-system-release locked))
+                            (tree (clpm.project:locked-release-tree-sha256 release)))
+                       (when (or (null tree)
+                                 (not (clpm.store:source-exists-p tree)))
+                         (return-from installed-and-fresh-p nil))))
+                   t)))))
+    (let ((cp (config-path)))
+      (unless (installed-and-fresh-p)
+        (log-info "Project not installed/activated (or out of date); running 'clpm install'...")
+        (let ((rc (uiop:with-current-directory (project-root)
+                    (cmd-install))))
+          (unless (zerop rc)
+            (return-from ensure-project-activated (values nil rc)))))
+      (if (uiop:file-exists-p cp)
+          (values cp 0)
+          (values nil 1)))))
 
 (defun parse-function-spec (spec)
   "Parse \"<package>::<fn>\" and return (values package-name function-name).

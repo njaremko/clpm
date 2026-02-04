@@ -44,13 +44,20 @@
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
          (project-root (merge-pathnames "app/" tmp))
          (src-dir (merge-pathnames "src/" project-root))
+         (dep-root (merge-pathnames "dep/" tmp))
+         (dep-src-dir (merge-pathnames "src/" dep-root))
          (asdf-config (merge-pathnames ".clpm/asdf-config.lisp" project-root))
+         (env-path (merge-pathnames ".clpm/env.sexp" project-root))
+         (lock-path (merge-pathnames "clpm.lock" project-root))
          (args-path (merge-pathnames "run-args.sexp" project-root))
          (loaded-path (merge-pathnames "exec-loaded.txt" project-root))
+         (dep-loaded-path (merge-pathnames "dep-loaded.txt" project-root))
          (old-home (sb-posix:getenv "CLPM_HOME")))
     (ensure-directories-exist clpm-home)
     (ensure-directories-exist project-root)
     (ensure-directories-exist src-dir)
+    (ensure-directories-exist dep-root)
+    (ensure-directories-exist dep-src-dir)
 
     (unwind-protect
          (progn
@@ -93,6 +100,19 @@
            ;; `clpm run` should auto-install/activate if needed and propagate exit code.
            (uiop:with-current-directory (project-root)
              (assert-eql 17 (clpm:run-cli '("run" "--" "hello" "world"))))
+           (assert-true (uiop:file-exists-p env-path)
+                        "Missing activation env: ~A" (namestring env-path))
+           (assert-true (uiop:file-exists-p lock-path)
+                        "Missing lockfile: ~A" (namestring lock-path))
+           (let* ((env (clpm.io.sexp:read-safe-sexp-from-file env-path))
+                  (env-lock (and (consp env) (eq (car env) :env)
+                                 (getf (cdr env) :lockfile-sha256)))
+                  (cur-lock (clpm.crypto.sha256:bytes-to-hex
+                             (clpm.crypto.sha256:sha256-file lock-path))))
+             (assert-true (and (stringp env-lock) (stringp cur-lock))
+                          "Expected :lockfile-sha256 in env.sexp")
+             (assert-true (string= env-lock cur-lock)
+                          "Expected env lock hash to match clpm.lock"))
            (assert-true (uiop:file-exists-p args-path)
                         "Missing args file: ~A" (namestring args-path))
            (let ((args (clpm.io.sexp:read-safe-sexp-from-file args-path)))
@@ -118,6 +138,52 @@
                                            "--eval" "(sb-ext:exit :code 0)"))))
            (assert-true (uiop:file-exists-p loaded-path)
                         "Expected exec-loaded.txt to be created by injected --load"))
+
+           ;; Stale activation should be detected and repaired automatically.
+           ;;
+           ;; Add a new local dependency via `clpm add --path` (this updates the
+           ;; manifest + lockfile but does not activate by default), then `clpm run`
+           ;; should run `clpm install` to refresh activation before launching.
+           (write-file
+            (merge-pathnames "dep.asd" dep-root)
+            (format nil "~S~%"
+                    '(asdf:defsystem "dep"
+                       :version "0.1.0"
+                       :serial t
+                       :pathname "src"
+                       :components ((:file "dep")))))
+           (write-file
+            (merge-pathnames "src/dep.lisp" dep-root)
+            (with-output-to-string (s)
+              (format s "(defpackage #:dep (:use #:cl))~%")
+              (format s "(in-package #:dep)~%")
+              (format s "(with-open-file (s \"dep-loaded.txt\" :direction :output :if-exists :supersede :external-format :utf-8)~%")
+              (format s "  (write-string \"loaded\" s))~%")))
+           (when (uiop:file-exists-p dep-loaded-path)
+             (delete-file dep-loaded-path))
+           (uiop:with-current-directory (project-root)
+             (assert-eql 0 (clpm:run-cli '("add" "--path" "../dep" "dep"))))
+           ;; Ensure lockfile changed but activation did not (yet).
+           (let* ((env (clpm.io.sexp:read-safe-sexp-from-file env-path))
+                  (env-lock (and (consp env) (eq (car env) :env)
+                                 (getf (cdr env) :lockfile-sha256)))
+                  (cur-lock (clpm.crypto.sha256:bytes-to-hex
+                             (clpm.crypto.sha256:sha256-file lock-path))))
+             (assert-true (and (stringp env-lock) (stringp cur-lock))
+                          "Expected :lockfile-sha256 in env.sexp (pre-refresh)")
+             (assert-true (not (string= env-lock cur-lock))
+                          "Expected env to be stale after `clpm add` without install"))
+           (uiop:with-current-directory (project-root)
+             (assert-eql 17 (clpm:run-cli '("run"))))
+           (assert-true (uiop:file-exists-p dep-loaded-path)
+                        "Expected dep-loaded.txt to be created after activation refresh")
+           (let* ((env (clpm.io.sexp:read-safe-sexp-from-file env-path))
+                  (env-lock (and (consp env) (eq (car env) :env)
+                                 (getf (cdr env) :lockfile-sha256)))
+                  (cur-lock (clpm.crypto.sha256:bytes-to-hex
+                             (clpm.crypto.sha256:sha256-file lock-path))))
+             (assert-true (string= env-lock cur-lock)
+                          "Expected activation env to be refreshed to match clpm.lock"))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME")))))
