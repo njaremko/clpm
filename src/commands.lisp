@@ -1440,6 +1440,49 @@ SECTIONS is a list of keywords: :DEPENDS, :DEV-DEPENDS, :TEST-DEPENDS."
             (list "--eval" (format nil "(asdf:load-system ~S)" sys)))
           systems))
 
+(defun run-sbcl-entrypoint (project-root config-path deps system fn-spec run-args)
+  "Run SYSTEM and call FN-SPEC under SBCL in the activated project environment.
+
+Returns an integer exit code."
+  (multiple-value-bind (pkg fn)
+      (parse-function-spec fn-spec)
+    (unless (and pkg fn)
+      (log-error "Invalid :function: expected <package>::<fn>, got ~S" fn-spec)
+      (return-from run-sbcl-entrypoint 1))
+
+    (let* ((pkg-name (string-upcase pkg))
+           (fn-name (string-upcase fn))
+           (args-var (intern "CLPM-RUN-ARGS" "CL-USER"))
+           (result-var (intern "CLPM-RUN-RESULT" "CL-USER"))
+           (pkg-var (intern "CLPM-RUN-PKG" "CL-USER"))
+           (sym-var (intern "CLPM-RUN-SYM" "CL-USER"))
+           (call-form
+             `(let ((,args-var ',run-args))
+                (let* ((,pkg-var (find-package ,pkg-name))
+                       (,sym-var (and ,pkg-var (find-symbol ,fn-name ,pkg-var))))
+                  (unless (and ,sym-var (fboundp ,sym-var))
+                    (format *error-output* "~&Entry function not found: ~A::~A~%" ,pkg-name ,fn-name)
+                    (sb-ext:exit :code 1))
+                  (let ((,result-var (funcall ,sym-var ,args-var)))
+                    (sb-ext:exit :code (if (integerp ,result-var) ,result-var 0))))))
+           (call-form-str
+             (with-standard-io-syntax
+               (let ((*package* (find-package "CL-USER")))
+                 (prin1-to-string call-form))))
+           (sbcl-args (append (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
+                                    "--load" (namestring config-path))
+                              (sbcl-load-systems-argv deps)
+                              (list "--eval" (format nil "(asdf:load-system ~S)" system)
+                                    "--eval" call-form-str))))
+      (multiple-value-bind (output error-output exit-code)
+          (clpm.platform:run-program sbcl-args
+                                     :directory project-root
+                                     :output :interactive
+                                     :error-output :interactive
+                                     :timeout 600000)
+        (declare (ignore output error-output))
+        exit-code))))
+
 (defun cmd-run (&rest args)
   "Run the project entrypoint defined in clpm.project :run."
   (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
@@ -1463,43 +1506,12 @@ SECTIONS is a list of keywords: :DEPENDS, :DEV-DEPENDS, :TEST-DEPENDS."
             (ensure-project-activated project-root)
           (unless (zerop rc)
             (return-from cmd-run rc))
-
-          (multiple-value-bind (pkg fn)
-              (parse-function-spec fn-spec)
-            (unless (and pkg fn)
-              (log-error "Invalid :run :function: expected <package>::<fn>, got ~S" fn-spec)
-              (return-from cmd-run 1))
-
-	            (let* ((run-args (if (and args (string= (first args) "--"))
-	                                 (rest args)
-	                                 args))
-	                   (pkg-key (intern (string-upcase pkg) :keyword))
-	                   (fn-key (intern (string-upcase fn) :keyword))
-	                   (args-var (intern "CLPM-RUN-ARGS" "CL-USER"))
-	                   (result-var (intern "CLPM-RUN-RESULT" "CL-USER"))
-	                   (call-form
-	                     `(let ((,args-var ',run-args))
-	                        (let ((,result-var (uiop:symbol-call ,pkg-key ,fn-key ,args-var)))
-	                          (sb-ext:exit :code (if (integerp ,result-var) ,result-var 0)))))
-	                   (call-form-str
-	                     (with-standard-io-syntax
-	                       (let ((*package* (find-package "CL-USER")))
-	                         (prin1-to-string call-form))))
-	                   (deps (project-dependency-system-ids project '(:depends)))
-	                   (sbcl-args (append (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
-	                                            "--load" (namestring config-path))
-	                                      (sbcl-load-systems-argv deps)
-	                                      (list "--eval" (format nil "(asdf:load-system ~S)" system)
-	                                            "--eval" call-form-str))))
-	              (log-info "Running ~A (~A)..." system fn-spec)
-	              (multiple-value-bind (output error-output exit-code)
-	                  (clpm.platform:run-program sbcl-args
-	                                             :directory project-root
-                                             :output :interactive
-                                             :error-output :interactive
-                                             :timeout 600000)
-                (declare (ignore output error-output))
-                exit-code))))))))
+          (let* ((run-args (if (and args (string= (first args) "--"))
+                               (rest args)
+                               args))
+                 (deps (project-dependency-system-ids project '(:depends))))
+            (log-info "Running ~A (~A)..." system fn-spec)
+            (run-sbcl-entrypoint project-root config-path deps system fn-spec run-args)))))))
 
 (defun sbcl-loads-config-p (cmd config-path)
   (let ((abs (namestring config-path))
@@ -1568,6 +1580,157 @@ Usage: clpm exec -- <cmd...>"
                                            :error-output :interactive)
               (declare (ignore output error-output))
               exit-code)))))))
+
+;;; scripts command
+
+(defun parse-script-form (form)
+  "Parse a (:script ...) form from clpm.project.
+
+Returns (values script-plist nil) on success.
+Returns (values nil error-message) on failure."
+  (unless (and (consp form) (eq (car form) :script))
+    (return-from parse-script-form
+      (values nil (format nil "Script must be a list starting with :script, got ~S" form))))
+  (when (oddp (length (cdr form)))
+    (return-from parse-script-form
+      (values nil (format nil "Script form has an odd number of elements: ~S" form))))
+  (let ((name nil)
+        (type nil)
+        (command nil)
+        (system nil)
+        (fn nil))
+    (loop for (key val) on (cdr form) by #'cddr do
+      (case key
+        (:name (setf name val))
+        (:type (setf type val))
+        (:command (setf command val))
+        (:system (setf system val))
+        (:function (setf fn val))
+        (t
+         (return-from parse-script-form
+           (values nil (format nil "Unknown key in script form: ~S" key))))))
+    (unless (and (stringp name) (plusp (length name)))
+      (return-from parse-script-form
+        (values nil (format nil "Script :name must be a non-empty string, got ~S" name))))
+    (unless (keywordp type)
+      (return-from parse-script-form
+        (values nil (format nil "Script :type must be a keyword, got ~S" type))))
+    (case type
+      (:shell
+       (unless (and (listp command) command (every #'stringp command))
+         (return-from parse-script-form
+           (values nil (format nil "Shell script :command must be a non-empty list of strings, got ~S" command))))
+       (values (list :name name :type :shell :command command) nil))
+      (:lisp
+       (unless (and (stringp system) (plusp (length system)))
+         (return-from parse-script-form
+           (values nil (format nil "Lisp script :system must be a non-empty string, got ~S" system))))
+       (unless (and (stringp fn) (plusp (length fn)))
+         (return-from parse-script-form
+           (values nil (format nil "Lisp script :function must be a non-empty string, got ~S" fn))))
+       (values (list :name name :type :lisp :system system :function fn) nil))
+      (t
+       (values nil (format nil "Unsupported script :type: ~S" type)))))
+    )
+
+(defun parse-project-scripts (scripts)
+  "Validate and parse SCRIPTS from a clpm.project file.
+
+Returns (values parsed-scripts exit-code)."
+  (cond
+    ((null scripts) (values '() 0))
+    ((not (listp scripts))
+     (log-error "Invalid :scripts: expected a list, got ~S" scripts)
+     (values nil 1))
+    (t
+     (let ((parsed '())
+           (seen (make-hash-table :test #'equal)))
+       (dolist (form scripts)
+         (multiple-value-bind (script err)
+             (parse-script-form form)
+           (when err
+             (log-error "~A" err)
+             (return-from parse-project-scripts (values nil 1)))
+           (let ((name (getf script :name)))
+             (when (gethash name seen)
+               (log-error "Duplicate script name: ~S" name)
+               (return-from parse-project-scripts (values nil 1)))
+             (setf (gethash name seen) t))
+           (push script parsed)))
+       (values (nreverse parsed) 0)))))
+
+(defun cmd-scripts (&rest args)
+  "List and run project scripts defined in clpm.project."
+  (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
+      (find-effective-project-root)
+    (declare (ignore lock-path _workspace-path))
+    (unless manifest-path
+      (when (null workspace-root)
+        (log-error "No clpm.project found"))
+      (return-from cmd-scripts 1))
+    (let* ((project (clpm.project:read-project-file manifest-path))
+           (scripts (clpm.project:project-scripts project)))
+      (multiple-value-bind (parsed rc)
+          (parse-project-scripts scripts)
+        (unless (zerop rc)
+          (return-from cmd-scripts rc))
+        (let ((sub (and (first args) (string-downcase (first args)))))
+          (cond
+            ((or (null sub) (string= sub "help") (string= sub "--help"))
+             (log-info "Usage:")
+             (log-info "  clpm scripts list")
+             (log-info "  clpm scripts run <name> [-- <args...>]")
+             0)
+            ((string= sub "list")
+             (dolist (name (sort (mapcar (lambda (s) (getf s :name)) parsed) #'string<))
+               (format t "~A~%" name))
+             0)
+            ((string= sub "run")
+             (let ((name (second args)))
+               (unless (and (stringp name) (plusp (length name)))
+                 (log-error "Usage: clpm scripts run <name> [-- <args...>]")
+                 (return-from cmd-scripts 1))
+               (let* ((rest (cddr args))
+                      (forward (if (and rest (string= (first rest) "--"))
+                                   (rest rest)
+                                   rest))
+                      (script (find name parsed :test #'string= :key (lambda (s) (getf s :name)))))
+                 (unless script
+                   (log-error "Unknown script: ~A" name)
+                   (return-from cmd-scripts 1))
+                 (multiple-value-bind (config-path act-rc)
+                     (ensure-project-activated project-root)
+                   (unless (zerop act-rc)
+                     (return-from cmd-scripts act-rc))
+                   (case (getf script :type)
+                     (:shell
+                      (let* ((cmd (append (getf script :command) forward))
+                             (env (clpm.platform:which "env"))
+                             (cmd-with-env
+                               (if env
+                                   (cons env
+                                         (cons (format nil "CLPM_PROJECT_ROOT=~A" (namestring project-root))
+                                               cmd))
+                                   cmd)))
+                        (multiple-value-bind (output error-output exit-code)
+                            (clpm.platform:run-program cmd-with-env
+                                                       :directory project-root
+                                                       :output :interactive
+                                                       :error-output :interactive)
+                          (declare (ignore output error-output))
+                          exit-code)))
+                     (:lisp
+                      (let* ((system (getf script :system))
+                             (fn-spec (getf script :function))
+                             (deps (project-dependency-system-ids project '(:depends))))
+                        (log-info "Running script ~A (~A)..." name fn-spec)
+                        (run-sbcl-entrypoint project-root config-path deps system fn-spec forward)))
+                     (t
+                      (log-error "Unsupported script type: ~S" (getf script :type))
+                      1))))))
+            (t
+             (log-error "Usage: clpm scripts <list|run> [args]")
+             1)))))))
 
 ;;; test command
 
@@ -2124,10 +2287,15 @@ Manifest schema:
        (p "  --package <member>  Workspace member to target (reserved; workspaces land later)")
        0)
       (:scripts
-       (p "Usage: clpm scripts <list|run> [args]")
+       (p "Usage:")
+       (p "  clpm scripts list")
+       (p "  clpm scripts run <name> [-- <args...>]")
        (p "")
        (p "List and run project scripts defined in clpm.project.")
-       (p "Not implemented yet.")
+       (p "")
+       (p "Script forms in clpm.project:")
+       (p "  (:script :name \"fmt\" :type :shell :command (\"sh\" \"-c\" \"...\"))")
+       (p "  (:script :name \"task\" :type :lisp :system \"my-app\" :function \"my-app::main\")")
        0)
       (:audit
        (p "Usage: clpm audit [--json]")

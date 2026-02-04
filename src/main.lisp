@@ -239,6 +239,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
              (clpm.commands:cmd-gc
               :dry-run (member "--dry-run" command-args
                                :test #'string=)))
+            (:scripts
+             (apply #'clpm.commands:cmd-scripts command-args))
             (t
              (format *error-output* "Unknown command: ~A~%" command)
              (print-usage)

@@ -333,6 +333,7 @@
            #:cmd-package
            #:cmd-clean
            #:cmd-gc
+           #:cmd-scripts
            #:cmd-help
            #:cmd-doctor))
 
