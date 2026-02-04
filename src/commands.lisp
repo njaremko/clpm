@@ -256,9 +256,12 @@ When not in a project, only the global config registries are used."
                    (log-error "Expected to find: ~A" (namestring ws-path))
                    (return-from cmd-new 1))
                  (let* ((project-root (merge-pathnames (format nil "~A/" name) ws-root))
-                        (member-rel (namestring
-                                     (uiop:ensure-directory-pathname
-                                      (uiop:enough-pathname project-root ws-root)))))
+                        (member-rel
+                          (string-right-trim
+                           '(#\/ #\\)
+                           (namestring
+                            (uiop:ensure-directory-pathname
+                             (uiop:enough-pathname project-root ws-root))))))
                    (make-project-scaffold project-root)
                    (let* ((ws (clpm.workspace:read-workspace-file ws-path))
                           (members (remove-duplicates

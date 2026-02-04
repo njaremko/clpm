@@ -60,9 +60,8 @@
                  "Expected member directory alpha/")
 
     (let ((ws (clpm.workspace:read-workspace-file ws-path)))
-      (assert-equal '("alpha/" "zeta/") (clpm.workspace:workspace-members ws)))))
+      (assert-equal '("alpha" "zeta") (clpm.workspace:workspace-members ws)))))
 
 (format t "  Workspace scaffolding PASSED~%")
 (format t "~%Workspace new tests PASSED!~%")
 (sb-ext:exit :code 0)
-

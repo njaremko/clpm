@@ -14,6 +14,16 @@ It contains:
 From the repo root:
 
 ```bash
+cd example/workspace
+
+# Target the `app` member from the workspace root
+clpm -p app install
+clpm -p app test
+clpm -p app run -- hello world
+clpm -p app package
+./app/dist/app hello world
+
+# Or: work directly in a member directory
 cd example/workspace/app
 
 # Install dependencies and activate the project
@@ -32,4 +42,3 @@ clpm package
 # Clean project-local outputs
 clpm clean --dist
 ```
-

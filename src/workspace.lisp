@@ -7,6 +7,20 @@
   (format 1 :type integer)
   (members nil :type list))
 
+(defun %normalize-workspace-member (member &key file)
+  (unless (and (stringp member) (plusp (length member)))
+    (clpm.errors:signal-error 'clpm.errors:clpm-parse-error
+                              "Workspace member path must be a non-empty string, got ~S" member
+                              :file file))
+  ;; Accept either "member" or "member/" in files, but store without the
+  ;; trailing directory separator for a nicer `-p member` UX.
+  (let ((trimmed (string-right-trim '(#\/ #\\) member)))
+    (when (zerop (length trimmed))
+      (clpm.errors:signal-error 'clpm.errors:clpm-parse-error
+                                "Workspace member path must not be empty"
+                                :file file))
+    trimmed))
+
 (defun parse-workspace (form &key file)
   "Parse a workspace manifest FORM.
 
@@ -30,20 +44,21 @@ Expected schema:
            (clpm.errors:signal-error 'clpm.errors:clpm-parse-error
                                      "Workspace :members must be a list of strings, got ~S" val
                                      :file file))
-         (dolist (m val)
-           (when (zerop (length m))
-             (clpm.errors:signal-error 'clpm.errors:clpm-parse-error
-                                       "Workspace member path must not be empty"
-                                       :file file))
-           (let ((pn (uiop:ensure-pathname m
-                                           :defaults (uiop:getcwd)
-                                           :want-relative nil
-                                           :want-absolute nil)))
-             (when (uiop:absolute-pathname-p pn)
-             (clpm.errors:signal-error 'clpm.errors:clpm-parse-error
-                                       "Workspace member path must be relative, got ~S" m
-                                       :file file))))
-         (setf (workspace-members ws) val))
+         (let ((members '()))
+           (dolist (m val)
+             (let* ((norm (%normalize-workspace-member m :file file))
+                    (pn (uiop:ensure-pathname norm
+                                              :defaults (uiop:getcwd)
+                                              :want-relative nil
+                                              :want-absolute nil)))
+               (when (uiop:absolute-pathname-p pn)
+                 (clpm.errors:signal-error 'clpm.errors:clpm-parse-error
+                                           "Workspace member path must be relative, got ~S" m
+                                           :file file))
+               (push norm members)))
+           (setf (workspace-members ws)
+                 (sort (remove-duplicates (nreverse members) :test #'string=)
+                       #'string<))))
         (t
          (clpm.errors:signal-error 'clpm.errors:clpm-parse-error
                                    "Unknown key in workspace manifest: ~S" key
@@ -58,7 +73,8 @@ Expected schema:
   "Serialize workspace WS to a canonical S-expression."
   `(:workspace
     :format ,(workspace-format ws)
-    :members ,(or (workspace-members ws) '())))
+    :members ,(sort (copy-list (or (workspace-members ws) '()))
+                    #'string<)))
 
 (defun read-workspace-file (path)
   "Read a clpm.workspace file and return a workspace struct."

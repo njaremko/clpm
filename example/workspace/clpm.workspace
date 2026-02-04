@@ -1,0 +1,4 @@
+(:workspace
+  :format 1
+  :members ("app" "lib-a" "lib-b"))
+
