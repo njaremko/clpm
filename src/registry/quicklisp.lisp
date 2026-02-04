@@ -217,7 +217,7 @@ Returns a hash table mapping project -> plist(:url :sha1 :version :prefix)."
                       (list :url url :sha1 sha1 :version version :prefix prefix))))))))
     tbl))
 
-(defun clone-quicklisp-registry (registry)
+(defun clone-quicklisp-registry (registry &key refresh-trust)
   "Ensure quicklisp registry metadata exists locally and load it."
   (let ((distinfo (%quicklisp-distinfo-path registry))
         (systems (%quicklisp-systems-path registry))
@@ -227,7 +227,7 @@ Returns a hash table mapping project -> plist(:url :sha1 :version :prefix)."
              (uiop:file-exists-p systems)
              (uiop:file-exists-p releases))
         (load-quicklisp-registry-snapshot registry)
-        (update-quicklisp-registry registry))
+        (update-quicklisp-registry registry :refresh-trust refresh-trust))
     registry))
 
 (defun update-quicklisp-registry (registry &key refresh-trust)

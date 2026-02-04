@@ -1601,7 +1601,7 @@ Manifest schema:
         (rest (rest args)))
     (cond
       ((or (null subcommand) (string= subcommand "help"))
-       (log-error "Usage: clpm registry <list|add|update> [options]")
+       (log-error "Usage: clpm registry <list|add|update|trust> [options]")
        (return-from cmd-registry 1))
 
       ((string= subcommand "list")
@@ -1699,12 +1699,92 @@ Manifest schema:
                                name
                                (clpm.project:registry-ref-url ref)
                                :trust-key (clpm.project:registry-ref-trust ref)
-                               :kind (clpm.project:registry-ref-kind ref))))
+                               :kind (clpm.project:registry-ref-kind ref)
+                               :refresh-trust refresh-trust)))
                      (clpm.registry:update-registry reg :refresh-trust refresh-trust))
                  (error (c)
                    (log-error "Failed to update registry ~A: ~A" name c)
                    (return-from cmd-registry 1))))))
          0))
+
+      ((string= subcommand "trust")
+       (let ((action (first rest))
+             (rest (rest rest)))
+         (labels ((usage-error (fmt &rest fmt-args)
+                    (apply #'log-error fmt fmt-args)
+                    (log-error "Usage: clpm registry trust <list|set|refresh> [args]")
+                    (return-from cmd-registry 1))
+                  (kind->string (k)
+                    (string-downcase (symbol-name k)))
+                  (normalize-trust-arg (s)
+                    (cond
+                      ((null s) nil)
+                      ((or (string= s "none") (string= s "nil")) nil)
+                      (t s))))
+           (cond
+             ((or (null action) (string= action "help"))
+              (usage-error "Missing trust subcommand"))
+
+             ((string= action "list")
+              (let* ((cfg (clpm.config:read-config))
+                     (refs (clpm.config:config-registries cfg)))
+                (if (null refs)
+                    (log-info "No registries configured")
+                    (dolist (ref (sort (copy-list refs) #'string<
+                                       :key (lambda (r)
+                                              (or (clpm.project:registry-ref-name r) ""))))
+                      (let* ((name (clpm.project:registry-ref-name ref))
+                             (kind (clpm.project:registry-ref-kind ref))
+                             (trust (clpm.project:registry-ref-trust ref)))
+                        (log-info "~A~C~A~C~A"
+                                  name #\Tab (kind->string kind) #\Tab (or trust "-"))))))
+              0)
+
+             ((string= action "set")
+              (let ((name (first rest))
+                    (trust-raw (second rest)))
+                (unless (and (stringp name) (plusp (length name))
+                             (stringp trust-raw) (plusp (length trust-raw)))
+                  (usage-error "Usage: clpm registry trust set <name> <trust>"))
+                (let* ((trust (normalize-trust-arg trust-raw))
+                       (cfg (clpm.config:read-config))
+                       (refs (clpm.config:config-registries cfg))
+                       (ref (find name refs
+                                  :key #'clpm.project:registry-ref-name
+                                  :test #'string=)))
+                  (unless ref
+                    (usage-error "Unknown registry: ~A" name))
+                  (setf (clpm.project:registry-ref-trust ref) trust)
+                  (clpm.config:write-config cfg)
+                  (log-info "Updated trust for ~A" name)
+                  0)))
+
+             ((string= action "refresh")
+              (let ((name (first rest)))
+                (unless (and (stringp name) (plusp (length name)) (null (rest rest)))
+                  (usage-error "Usage: clpm registry trust refresh <name>"))
+                (let* ((cfg (clpm.config:read-config))
+                       (refs (clpm.config:config-registries cfg))
+                       (ref (find name refs
+                                  :key #'clpm.project:registry-ref-name
+                                  :test #'string=)))
+                  (unless ref
+                    (usage-error "Unknown registry: ~A" name))
+                  (let ((kind (clpm.project:registry-ref-kind ref)))
+                    (unless (eq kind :quicklisp)
+                      (usage-error "Trust refresh is only supported for Quicklisp registries"))
+                    (let ((reg (clpm.registry:clone-registry
+                                name
+                                (clpm.project:registry-ref-url ref)
+                                :trust-key (clpm.project:registry-ref-trust ref)
+                                :kind kind
+                                :refresh-trust t)))
+                      (clpm.registry:update-registry reg :refresh-trust t)
+                      (log-info "Refreshed trust for ~A" name)
+                      0)))))
+
+             (t
+              (usage-error "Unknown trust subcommand: ~A" action))))))
 
       (t
        (log-error "Unknown registry subcommand: ~A" subcommand)
@@ -1856,7 +1936,7 @@ Manifest schema:
        (p "Not implemented yet.")
        0)
       (:registry
-       (p "Usage: clpm registry <add|list|update> [options]")
+       (p "Usage: clpm registry <add|list|update|trust> [options]")
        (p "")
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
 	         (cond
@@ -1874,11 +1954,20 @@ Manifest schema:
            ((and sub (string= sub "update"))
             (p "Usage: clpm registry update [--refresh-trust] [name ...]")
             0)
+           ((and sub (string= sub "trust"))
+            (p "Usage: clpm registry trust <list|set|refresh> [args]")
+            (p "")
+            (p "Subcommands:")
+            (p "  list                 List registries and trust settings")
+            (p "  set <name> <trust>   Set trust string (use 'none' to clear)")
+            (p "  refresh <name>       Refresh pinned trust (Quicklisp only)")
+            0)
            (t
             (p "Subcommands:")
             (p "  add      Add or update a configured registry")
             (p "  list     List configured registries")
             (p "  update   Update cloned registries (optionally by name)")
+            (p "  trust    Manage registry trust settings")
             0))))
       (:resolve
        (p "Usage: clpm resolve")

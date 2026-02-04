@@ -114,7 +114,7 @@
 
 ;;; Registry operations
 
-(defun clone-registry (name url &key trust-key (kind :git))
+(defun clone-registry (name url &key trust-key (kind :git) refresh-trust)
   "Clone or load a registry from URL.
 
 KIND is one of:
@@ -140,7 +140,7 @@ Returns a registry struct."
              (load-registry-snapshot reg))))
       (:quicklisp
        ;; Download dist metadata if missing, then load.
-       (clone-quicklisp-registry reg))
+       (clone-quicklisp-registry reg :refresh-trust refresh-trust))
       (t
        (error 'clpm.errors:clpm-parse-error
               :message (format nil "Unknown registry kind: ~S" kind))))
