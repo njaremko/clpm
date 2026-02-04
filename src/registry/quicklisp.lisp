@@ -223,6 +223,13 @@ Returns a hash table mapping project -> plist(:url :sha1 :version :prefix)."
         (systems (%quicklisp-systems-path registry))
         (releases (%quicklisp-releases-path registry)))
     (ensure-directories-exist distinfo)
+    ;; Enforce trust even when metadata already exists locally, so switching a
+    ;; registry to TOFU (or a pinned SHA-256) takes effect without requiring an
+    ;; explicit `clpm registry update`.
+    (when (uiop:file-exists-p distinfo)
+      (let ((sha256-hex (%distinfo-sha256-hex distinfo)))
+        (%enforce-quicklisp-distinfo-trust registry sha256-hex
+                                           :refresh-trust refresh-trust)))
     (if (and (uiop:file-exists-p distinfo)
              (uiop:file-exists-p systems)
              (uiop:file-exists-p releases))
