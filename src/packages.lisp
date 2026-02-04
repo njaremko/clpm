@@ -123,6 +123,9 @@
            #:make-project
            #:project-name
            #:project-version
+           #:project-license
+           #:project-homepage
+           #:project-description
            #:project-systems
            #:project-run
            #:project-test
@@ -347,6 +350,7 @@
            #:cmd-gc
            #:cmd-scripts
            #:cmd-keys
+           #:cmd-publish
            #:cmd-help
            #:cmd-doctor))
 

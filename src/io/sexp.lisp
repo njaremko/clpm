@@ -115,24 +115,34 @@ When PRETTY is true, format with indentation for readability."
                ((floatp f)
                 (format stream "~F" f))
                ((consp f)
-                ;; General list
+                ;; General list (supports dotted pairs)
                 (write-char #\( stream)
-                (let ((first t))
-                  (loop for tail on f
-                        for item = (car tail)
-                        do (cond
-                             ((and (consp item)
-                                   (keywordp (car item)))
-                              ;; Nested structure - indent
-                              (unless first
-                                (indent-to (1+ level)))
-                              (write-form item (1+ level)))
-                             (first
-                              (write-form item (1+ level))
-                              (setf first nil))
-                             (t
-                              (write-char #\Space stream)
-                              (write-form item (1+ level))))))
+                (let ((first t)
+                      (tail f))
+                  (loop
+                    (cond
+                      ((null tail)
+                       (return))
+                      ((consp tail)
+                       (let ((item (car tail)))
+                         (cond
+                           ((and (consp item)
+                                 (keywordp (car item)))
+                            ;; Nested structure - indent
+                            (unless first
+                              (indent-to (1+ level)))
+                            (write-form item (1+ level)))
+                           (first
+                            (write-form item (1+ level))
+                            (setf first nil))
+                           (t
+                            (write-char #\Space stream)
+                            (write-form item (1+ level))))
+                         (setf tail (cdr tail))))
+                      (t
+                       (write-string " . " stream)
+                       (write-form tail (1+ level))
+                       (return)))))
                 (write-char #\) stream))
                (t
                 (error "Cannot write ~S in canonical format" f)))))

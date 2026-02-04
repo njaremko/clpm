@@ -2434,6 +2434,250 @@ Manifest schema:
         (t
          (usage-error "Unknown keys subcommand: ~A" subcommand))))))
 
+;;; publish command
+
+(defun %normalize-asdf-dep (dep)
+  (cond
+    ((stringp dep) dep)
+    ((symbolp dep) (string-downcase (symbol-name dep)))
+    (t nil)))
+
+(defun %compute-system-deps-from-asd (project-root systems)
+  "Compute system dependencies for SYSTEMS by loading their .asd files.
+
+Returns an alist: (system-id . ((dep-system . nil) ...))."
+  (let ((project-root (uiop:ensure-directory-pathname project-root))
+        (results '()))
+    (dolist (sys systems)
+      (unless (and (stringp sys) (plusp (length sys)))
+        (log-error "Invalid system name in project :systems: ~S" sys)
+        (return-from %compute-system-deps-from-asd nil))
+      (let ((asd-path (merge-pathnames (format nil "~A.asd" sys) project-root)))
+        (unless (uiop:file-exists-p asd-path)
+          (log-error "Missing .asd for system ~A: ~A" sys (namestring asd-path))
+          (return-from %compute-system-deps-from-asd nil))
+        (handler-case
+            (progn
+              (asdf:load-asd asd-path)
+              (let* ((system (asdf:find-system sys nil))
+                     (deps-raw (and system (asdf:system-depends-on system)))
+                     (deps (remove nil (mapcar #'%normalize-asdf-dep deps-raw))))
+                (setf deps (sort (remove-duplicates deps :test #'string=) #'string<))
+                (push (cons sys (mapcar (lambda (d) (cons d nil)) deps)) results)))
+          (error (c)
+            (log-error "Failed to read ASDF deps for ~A: ~A" sys c)
+            (return-from %compute-system-deps-from-asd nil)))))
+    (sort results #'string< :key #'car)))
+
+(defun cmd-publish (&rest args)
+  "Publish a project into a local git registry directory (writes signed metadata)."
+  (let ((registry nil)
+        (key-id nil)
+        (keys-dir nil)
+        (project-dir nil)
+        (tarball-url nil)
+        (git-commit-p nil))
+    (labels ((usage-error (fmt &rest fmt-args)
+               (apply #'log-error fmt fmt-args)
+               (log-error "Usage: clpm publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--project <dir>] [--git-commit]")
+               (return-from cmd-publish 1)))
+      ;; Parse args.
+      (loop while args do
+        (let ((arg (pop args)))
+          (cond
+            ((string= arg "--registry") (setf registry (pop args)))
+            ((string= arg "--key-id") (setf key-id (pop args)))
+            ((string= arg "--keys-dir") (setf keys-dir (pop args)))
+            ((string= arg "--project") (setf project-dir (pop args)))
+            ((string= arg "--tarball-url") (setf tarball-url (pop args)))
+            ((string= arg "--git-commit") (setf git-commit-p t))
+            (t
+             (usage-error "Unknown option: ~A" arg)))))
+
+      (unless (and (stringp registry) (plusp (length registry)))
+        (usage-error "Missing --registry <dir>"))
+      (unless (%key-id-valid-p key-id)
+        (usage-error "Invalid --key-id (use [A-Za-z0-9._-]+): ~S" key-id))
+      (unless (and (stringp keys-dir) (plusp (length keys-dir)))
+        (usage-error "Missing --keys-dir <dir>"))
+      (unless (and (stringp tarball-url) (plusp (length tarball-url)))
+        (usage-error "Missing --tarball-url <url>"))
+
+      (let* ((registry-root (uiop:ensure-directory-pathname
+                             (clpm.platform:expand-path registry)))
+             (keys-root (uiop:ensure-directory-pathname
+                         (clpm.platform:expand-path keys-dir)))
+             (project-root
+               (if project-dir
+                   (uiop:ensure-directory-pathname (clpm.platform:expand-path project-dir))
+                   (nth-value 0 (clpm.project:find-project-root))))
+             (manifest-path (and project-root (merge-pathnames "clpm.project" project-root))))
+        (unless (uiop:directory-exists-p registry-root)
+          (usage-error "Registry path does not exist or is not a directory: ~A" registry))
+        (unless (uiop:file-exists-p (merge-pathnames "registry/snapshot.sxp" registry-root))
+          (usage-error "Registry is missing registry/snapshot.sxp: ~A" (namestring registry-root)))
+        (unless (and project-root manifest-path (uiop:file-exists-p manifest-path))
+          (usage-error "Missing clpm.project (use --project <dir> from a project root)"))
+
+        (let* ((project (clpm.project:read-project-file manifest-path))
+               (name (clpm.project:project-name project))
+               (version (clpm.project:project-version project))
+               (systems (clpm.project:project-systems project)))
+          (unless (and (stringp name) (plusp (length name))
+                       (stringp version) (plusp (length version)))
+            (usage-error "Project :name and :version must be set in clpm.project"))
+          (unless (and (listp systems) (every #'stringp systems) systems)
+            (usage-error "Project :systems must be a non-empty list of strings"))
+
+          (let* ((priv-key-path (merge-pathnames (format nil "~A.key" key-id) keys-root))
+                 (pub-key-path (merge-pathnames (format nil "~A.pub" key-id) keys-root)))
+            (unless (uiop:file-exists-p priv-key-path)
+              (usage-error "Missing private key: ~A" (namestring priv-key-path)))
+            (unless (uiop:file-exists-p pub-key-path)
+              (usage-error "Missing public key: ~A" (namestring pub-key-path)))
+
+            (labels ((read-seed32 (path)
+                       (let* ((text (uiop:read-file-string path))
+                              (trim (string-trim '(#\Space #\Newline #\Return #\Tab) text))
+                              (bytes (clpm.crypto.sha256:hex-to-bytes trim)))
+                         (unless (= (length bytes) 32)
+                           (usage-error "Invalid private key seed length (expected 32 bytes): ~A"
+                                        (namestring path)))
+                         bytes))
+                     (read-file-bytes (path)
+                       (with-open-file (s path :element-type '(unsigned-byte 8))
+                         (let ((data (make-array (file-length s)
+                                                 :element-type '(unsigned-byte 8))))
+                           (read-sequence data s)
+                           data)))
+                     (write-sig-hex (msg-bytes sig-path seed)
+                       (let* ((sig (clpm.crypto.ed25519:sign msg-bytes seed))
+                              (sig-hex (clpm.crypto.sha256:bytes-to-hex sig)))
+                         (with-open-file (s sig-path :direction :output
+                                                     :if-exists :supersede
+                                                     :external-format :utf-8)
+                           (write-string sig-hex s)
+                           (terpri s)))))
+              (let* ((seed (read-seed32 priv-key-path))
+                     ;; Create tarball in temp dir.
+                     (tar (clpm.platform:find-tar)))
+                (unless tar
+                  (usage-error "tar not found in PATH"))
+                (clpm.store:with-temp-dir (tmp)
+                  (let* ((tarball-name (format nil "~A-~A.tar.gz" name version))
+                         (tarball-path (merge-pathnames tarball-name tmp)))
+                    (multiple-value-bind (_out err exit-code)
+                        (clpm.platform:run-program
+                         (list tar
+                               "-czf" (namestring tarball-path)
+                               "--exclude=.clpm"
+                               "--exclude=dist"
+                               "--exclude=clpm.lock"
+                               "-C" (namestring project-root)
+                               ".")
+                         :output :string
+                         :error-output :string)
+                      (declare (ignore _out))
+                      (unless (zerop exit-code)
+                        (usage-error "tar failed: ~A" err)))
+
+                    (let* ((artifact-sha256
+                             (clpm.crypto.sha256:bytes-to-hex
+                              (clpm.crypto.sha256:sha256-file tarball-path)))
+                           (system-deps (%compute-system-deps-from-asd project-root systems))
+                           (release-ref (format nil "~A@~A" name version))
+                           (release-dir (merge-pathnames (format nil "registry/packages/~A/~A/" name version)
+                                                         registry-root))
+                           (release-path (merge-pathnames "release.sxp" release-dir))
+                           (release-sig-path (merge-pathnames "release.sig" release-dir))
+                           (snapshot-path (merge-pathnames "registry/snapshot.sxp" registry-root))
+                           (snapshot-sig-path (merge-pathnames "registry/snapshot.sig" registry-root)))
+                      (unless system-deps
+                        (usage-error "Failed to compute system dependencies"))
+
+                      ;; Write release metadata.
+                      (ensure-directories-exist release-path)
+                      (clpm.io.sexp:write-canonical-sexp-to-file
+                       `(:release
+                         :format 1
+                         :name ,name
+                         :version ,version
+                         :source (:tarball :url ,tarball-url :sha256 ,artifact-sha256)
+                         :artifact-sha256 ,artifact-sha256
+                         :systems ,(sort (copy-list systems) #'string<)
+                         :system-deps ,system-deps
+                         ,@(when (clpm.project:project-license project)
+                             (list :license (clpm.project:project-license project)))
+                         ,@(when (clpm.project:project-homepage project)
+                             (list :homepage (clpm.project:project-homepage project)))
+                         ,@(when (clpm.project:project-description project)
+                             (list :description (clpm.project:project-description project))))
+                       release-path
+                       :pretty t)
+                      (write-sig-hex (read-file-bytes release-path) release-sig-path seed)
+
+                      ;; Update snapshot.
+                      (let* ((snap-form (clpm.io.sexp:read-registry-snapshot snapshot-path))
+                             (plist (cdr snap-form))
+                             (releases (or (getf plist :releases) '()))
+                             (provides (or (getf plist :provides) '())))
+                        (pushnew release-ref releases :test #'string=)
+                        (setf releases (sort (remove-duplicates releases :test #'string=) #'string<))
+                        (dolist (sys systems)
+                          (pushnew (cons sys release-ref) provides
+                                   :test (lambda (a b)
+                                           (and (string= (car a) (car b))
+                                                (string= (cdr a) (cdr b))))))
+                        (setf provides
+                              (sort (remove-duplicates provides
+                                                       :test (lambda (a b)
+                                                               (and (string= (car a) (car b))
+                                                                    (string= (cdr a) (cdr b)))))
+                                    (lambda (a b)
+                                      (cond
+                                        ((string< (car a) (car b)) t)
+                                        ((string> (car a) (car b)) nil)
+                                        (t (string< (cdr a) (cdr b)))))))
+                        (clpm.io.sexp:write-canonical-sexp-to-file
+                         `(:snapshot
+                           :format 1
+                           :generated-at ,(clpm.project:rfc3339-timestamp)
+                           :releases ,releases
+                           :provides ,provides)
+                         snapshot-path
+                         :pretty t)
+                        (write-sig-hex (read-file-bytes snapshot-path) snapshot-sig-path seed))
+
+                      (when git-commit-p
+                        (let ((git (clpm.platform:find-git)))
+                          (unless git
+                            (usage-error "git not found in PATH"))
+                          (multiple-value-bind (_out err1 rc1)
+                              (clpm.platform:run-program
+                               (list git "add" "registry/snapshot.sxp" "registry/snapshot.sig"
+                                     (format nil "registry/packages/~A/~A/release.sxp" name version)
+                                     (format nil "registry/packages/~A/~A/release.sig" name version))
+                               :directory registry-root
+                               :output :string
+                               :error-output :string)
+                            (declare (ignore _out))
+                            (unless (zerop rc1)
+                              (usage-error "git add failed: ~A" err1)))
+                          (multiple-value-bind (_out err2 rc2)
+                              (clpm.platform:run-program
+                               (list git "commit" "-m" (format nil "publish: ~A" release-ref))
+                               :directory registry-root
+                               :output :string
+                               :error-output :string)
+                            (declare (ignore _out))
+                            (unless (zerop rc2)
+                              (usage-error "git commit failed: ~A" err2)))))
+
+                      (log-info "Published: ~A" release-ref)
+                      (log-info "Release: ~A" (namestring release-path))
+                      (log-info "Updated snapshot: ~A" (namestring snapshot-path))
+                      0)))))))))))
+
 ;;; help command
 
 (defun print-command-help (command &key subcommand)
@@ -2567,10 +2811,13 @@ Manifest schema:
        (p "  <id>.pub  32-byte public key as ASCII hex (64 chars)")
        0)
       (:publish
-       (p "Usage: clpm publish --registry <path-or-url> [--project <dir>]")
+       (p "Usage: clpm publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--project <dir>] [--git-commit]")
        (p "")
        (p "Publish the current project to a git-backed registry.")
-       (p "Not implemented yet.")
+       (p "")
+       (p "Notes:")
+       (p "  - This writes files into the registry directory; it does not push.")
+       (p "  - Use --git-commit to commit the changes inside the registry (optional).")
        0)
       (:workspace
        (p "Usage: clpm workspace <init|add|list> [args]")
