@@ -2130,6 +2130,102 @@ Manifest schema:
            (clpm.config:write-config cfg))
          0))
 
+      ((string= subcommand "init")
+       (let ((dir nil)
+             (key-id nil)
+             (keys-dir nil))
+         (loop while rest do
+           (let ((arg (pop rest)))
+             (cond
+               ((string= arg "--dir") (setf dir (pop rest)))
+               ((string= arg "--key-id") (setf key-id (pop rest)))
+               ((string= arg "--keys-dir") (setf keys-dir (pop rest)))
+               (t
+                (log-error "Unknown option: ~A" arg)
+                (log-error "Usage: clpm registry init --dir <path> --key-id <id> --keys-dir <dir>")
+                (return-from cmd-registry 1)))))
+         (unless (and (stringp dir) (plusp (length dir)))
+           (log-error "Missing --dir <path>")
+           (return-from cmd-registry 1))
+         (unless (%key-id-valid-p key-id)
+           (log-error "Invalid --key-id (use [A-Za-z0-9._-]+): ~S" key-id)
+           (return-from cmd-registry 1))
+         (unless (and (stringp keys-dir) (plusp (length keys-dir)))
+           (log-error "Missing --keys-dir <dir>")
+           (return-from cmd-registry 1))
+
+         (let* ((root (uiop:ensure-directory-pathname
+                       (clpm.platform:expand-path dir)))
+                (keys-root (uiop:ensure-directory-pathname
+                            (clpm.platform:expand-path keys-dir)))
+                (snapshot-path (merge-pathnames "registry/snapshot.sxp" root))
+                (sig-path (merge-pathnames "registry/snapshot.sig" root))
+                (embedded-pub-path (merge-pathnames (format nil "registry/keys/~A.pub" key-id)
+                                                    root))
+                (packages-dir (merge-pathnames "registry/packages/" root))
+                (priv-key-path (merge-pathnames (format nil "~A.key" key-id) keys-root))
+                (pub-key-path (merge-pathnames (format nil "~A.pub" key-id) keys-root)))
+
+           (unless (uiop:file-exists-p priv-key-path)
+             (log-error "Missing private key: ~A" (namestring priv-key-path))
+             (return-from cmd-registry 1))
+           (unless (uiop:file-exists-p pub-key-path)
+             (log-error "Missing public key: ~A" (namestring pub-key-path))
+             (return-from cmd-registry 1))
+           (when (or (uiop:file-exists-p snapshot-path)
+                     (uiop:file-exists-p sig-path))
+             (log-error "Registry already initialized at: ~A" (namestring root))
+             (return-from cmd-registry 1))
+
+           (ensure-directories-exist snapshot-path)
+           (ensure-directories-exist embedded-pub-path)
+           (ensure-directories-exist packages-dir)
+
+           ;; Write initial snapshot.
+           (clpm.io.sexp:write-canonical-sexp-to-file
+            `(:snapshot
+              :format 1
+              :generated-at ,(clpm.project:rfc3339-timestamp)
+              :releases ()
+              :provides ())
+            snapshot-path
+            :pretty t)
+
+           ;; Sign snapshot and write detached signature as hex.
+           (labels ((read-seed32 (path)
+                      (let* ((text (uiop:read-file-string path))
+                             (trim (string-trim '(#\Space #\Newline #\Return #\Tab) text))
+                             (bytes (clpm.crypto.sha256:hex-to-bytes trim)))
+                        (unless (= (length bytes) 32)
+                          (log-error "Invalid private key seed length (expected 32 bytes): ~A"
+                                     (namestring path))
+                          (return-from cmd-registry 1))
+                        bytes))
+                    (read-file-bytes (path)
+                      (with-open-file (s path :element-type '(unsigned-byte 8))
+                        (let ((data (make-array (file-length s)
+                                                :element-type '(unsigned-byte 8))))
+                          (read-sequence data s)
+                          data))))
+             (let* ((seed (read-seed32 priv-key-path))
+                    (msg (read-file-bytes snapshot-path))
+                    (sig (clpm.crypto.ed25519:sign msg seed))
+                    (sig-hex (clpm.crypto.sha256:bytes-to-hex sig)))
+               (with-open-file (s sig-path :direction :output
+                                           :if-exists :error
+                                           :external-format :utf-8)
+                 (write-string sig-hex s)
+                 (terpri s))))
+
+           ;; Embed public key.
+           (uiop:copy-file pub-key-path embedded-pub-path)
+
+           (log-info "Initialized registry at: ~A" (namestring root))
+           (log-info "Snapshot: ~A" (namestring snapshot-path))
+           (log-info "Signature: ~A" (namestring sig-path))
+           (log-info "Key: ~A" (namestring embedded-pub-path))
+           0)))
+
       ((string= subcommand "update")
        (let* ((refresh-trust nil)
               (names '())
@@ -2483,11 +2579,11 @@ Manifest schema:
        (p "Not implemented yet.")
        0)
       (:registry
-       (p "Usage: clpm registry <add|list|update|trust> [options]")
+       (p "Usage: clpm registry <add|list|update|trust|init> [options]")
        (p "")
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
-	         (cond
-	           ((and sub (string= sub "add"))
+		         (cond
+		           ((and sub (string= sub "add"))
 	            (p "Usage: clpm registry add --name <name> --url <git-url> --trust <ed25519:key-id>")
 	            (p "   or: clpm registry add --quicklisp [--name quicklisp] [--url <dist-url>]")
 	            (p "")
@@ -2501,21 +2597,25 @@ Manifest schema:
            ((and sub (string= sub "update"))
             (p "Usage: clpm registry update [--refresh-trust] [name ...]")
             0)
-           ((and sub (string= sub "trust"))
-            (p "Usage: clpm registry trust <list|set|refresh> [args]")
-            (p "")
-            (p "Subcommands:")
-            (p "  list                 List registries and trust settings")
-            (p "  set <name> <trust>   Set trust string (use 'none' to clear)")
-            (p "  refresh <name>       Refresh pinned trust (Quicklisp only)")
-            0)
-           (t
-            (p "Subcommands:")
-            (p "  add      Add or update a configured registry")
-            (p "  list     List configured registries")
-            (p "  update   Update cloned registries (optionally by name)")
-            (p "  trust    Manage registry trust settings")
-            0))))
+	           ((and sub (string= sub "trust"))
+	            (p "Usage: clpm registry trust <list|set|refresh> [args]")
+	            (p "")
+	            (p "Subcommands:")
+	            (p "  list                 List registries and trust settings")
+	            (p "  set <name> <trust>   Set trust string (use 'none' to clear)")
+	            (p "  refresh <name>       Refresh pinned trust (Quicklisp only)")
+	            0)
+	           ((and sub (string= sub "init"))
+	            (p "Usage: clpm registry init --dir <path> --key-id <id> --keys-dir <dir>")
+	            0)
+	           (t
+	            (p "Subcommands:")
+	            (p "  add      Add or update a configured registry")
+	            (p "  list     List configured registries")
+	            (p "  update   Update cloned registries (optionally by name)")
+	            (p "  trust    Manage registry trust settings")
+	            (p "  init     Initialize a new git registry directory")
+	            0))))
       (:resolve
        (p "Usage: clpm resolve")
        (p "")

@@ -130,6 +130,19 @@ registry/
         release.sig ; Signature
 ```
 
+### Creating a New Registry
+
+```bash
+# Generate an Ed25519 keypair (writes <id>.key and <id>.pub)
+clpm keys generate --out ./keys --id mykey
+
+# Initialize a registry directory with an empty signed snapshot
+clpm registry init --dir ./my-registry --key-id mykey --keys-dir ./keys
+
+# Optional: create a git repository (CLPM does not run VCS commands)
+jj git init ./my-registry
+```
+
 ### Key and Signature Encodings
 
 - `registry/keys/<key-id>.pub`: ASCII hex encoding of the 32-byte Ed25519 public key (64 hex chars) with an optional trailing newline.
