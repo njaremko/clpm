@@ -2678,6 +2678,208 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                       (log-info "Updated snapshot: ~A" (namestring snapshot-path))
                       0)))))))))))
 
+;;; audit command
+
+(defun cmd-audit (&rest args)
+  "Print a provenance and trust report for the current lockfile."
+  (let ((jsonp nil))
+    (labels ((usage-error (fmt &rest fmt-args)
+               (apply #'log-error fmt fmt-args)
+               (log-error "Usage: clpm audit [--json]")
+               (return-from cmd-audit 1))
+             (dash (s) (if (and (stringp s) (plusp (length s))) s "-"))
+             (starts-with-p (s prefix)
+               (and (stringp s)
+                    (stringp prefix)
+                    (<= (length prefix) (length s))
+                    (string= prefix (subseq s 0 (length prefix))))))
+      (loop while args do
+        (let ((arg (pop args)))
+          (cond
+            ((string= arg "--json") (setf jsonp t))
+            (t (usage-error "Unknown option: ~A" arg)))))
+
+      (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
+          (find-effective-project-root)
+        (declare (ignore project-root _workspace-path))
+        (unless manifest-path
+          (when (null workspace-root)
+            (log-error "No clpm.project found"))
+          (return-from cmd-audit 1))
+        (unless lock-path
+          (log-error "No clpm.lock found (run: clpm resolve or clpm install)")
+          (return-from cmd-audit 1))
+
+        (let* ((project (clpm.project:read-project-file manifest-path))
+               (lock (clpm.project:read-lock-file lock-path))
+               (proj-name (or (clpm.project:project-name project)
+                              (clpm.project:lockfile-project-name lock)))
+               (proj-version (or (clpm.project:project-version project) "-"))
+               (generated-at (clpm.project:lockfile-generated-at lock))
+               (locked-registries
+                 (sort (copy-list (or (clpm.project:lockfile-registries lock) '()))
+                       (lambda (a b)
+                         (string< (clpm.project:locked-registry-name a)
+                                  (clpm.project:locked-registry-name b)))))
+               (tarball-count 0)
+               (git-count 0)
+               (path-count 0)
+               (path-systems '())
+               (git-unpinned-systems '())
+               (quicklisp-no-trust '())
+               (git-sig-missing '()))
+
+          (dolist (reg locked-registries)
+            (let ((kind (clpm.project:locked-registry-kind reg))
+                  (name (clpm.project:locked-registry-name reg))
+                  (trust (clpm.project:locked-registry-trust reg))
+                  (sig (clpm.project:locked-registry-signature reg)))
+              (when (and (eq kind :quicklisp) (null trust))
+                (push name quicklisp-no-trust))
+              (when (and (eq kind :git) trust (null sig))
+                (push name git-sig-missing))))
+
+          (dolist (locked (clpm.project:lockfile-resolved lock))
+            (let* ((id (clpm.project:locked-system-id locked))
+                   (release (clpm.project:locked-system-release locked))
+                   (source (and release (clpm.project:locked-release-source release))))
+              (when source
+                (case (clpm.project:locked-source-kind source)
+                  (:tarball (incf tarball-count))
+                  (:git
+                   (incf git-count)
+                   (when (null (clpm.project:locked-source-commit source))
+                     (push id git-unpinned-systems)))
+                  (:path
+                   (incf path-count)
+                   (push id path-systems))))))
+
+          (setf path-systems (sort (remove-duplicates path-systems :test #'string=) #'string<)
+                git-unpinned-systems (sort (remove-duplicates git-unpinned-systems :test #'string=) #'string<)
+                quicklisp-no-trust (sort (remove-duplicates quicklisp-no-trust :test #'string=) #'string<)
+                git-sig-missing (sort (remove-duplicates git-sig-missing :test #'string=) #'string<))
+
+          (let ((warnings '()))
+            (when path-systems
+              (push (format nil "path dependencies present: ~{~A~^, ~}" path-systems) warnings))
+            (when git-unpinned-systems
+              (push (format nil "git dependencies missing commit pin: ~{~A~^, ~}" git-unpinned-systems) warnings))
+            (when quicklisp-no-trust
+              (push (format nil "quicklisp trust not configured: ~{~A~^, ~}" quicklisp-no-trust) warnings))
+            (when git-sig-missing
+              (push (format nil "git registry snapshot signature not recorded: ~{~A~^, ~}" git-sig-missing) warnings))
+            (setf warnings (nreverse warnings))
+
+            (if jsonp
+                (let* ((registries-json
+                         (mapcar
+                          (lambda (reg)
+                            (let* ((name (clpm.project:locked-registry-name reg))
+                                   (kind (clpm.project:locked-registry-kind reg))
+                                   (url (clpm.project:locked-registry-url reg))
+                                   (trust (clpm.project:locked-registry-trust reg))
+                                   (commit (clpm.project:locked-registry-commit reg))
+                                   (sig (clpm.project:locked-registry-signature reg))
+                                   (verified (and (eq kind :git) trust sig)))
+                              (list :object
+                                    (list (cons "name" name)
+                                          (cons "kind" (string-downcase (symbol-name kind)))
+                                          (cons "url" (or url ""))
+                                          (cons "trust" (or trust ""))
+                                          (cons "commit" (or commit ""))
+                                          (cons "snapshotSigSha256" (or sig ""))
+                                          (cons "verified" (if verified t :false))))))
+                          locked-registries))
+                       (quicklisp-pins
+                         (let ((pins '()))
+                           (dolist (reg locked-registries)
+                             (when (eq (clpm.project:locked-registry-kind reg) :quicklisp)
+                               (let* ((name (clpm.project:locked-registry-name reg))
+                                      (trust (clpm.project:locked-registry-trust reg))
+                                      (pin (and (stringp trust)
+                                                (starts-with-p (string-downcase trust) "sha256:")
+                                                trust)))
+                                 (push (list :object
+                                             (list (cons "name" name)
+                                                   (cons "pin" (or pin ""))))
+                                       pins))))
+                           (nreverse pins))))
+                  (clpm.io.json:write-json
+                   (list :object
+                         (list (cons "project"
+                                     (list :object
+                                           (list (cons "name" (or proj-name ""))
+                                                 (cons "version" (or proj-version "")))))
+                               (cons "lockfile"
+                                     (list :object
+                                           (list (cons "generatedAt" (or generated-at "")))))
+                               (cons "registries" (list :array registries-json))
+                               (cons "quicklisp"
+                                     (list :object
+                                           (list (cons "distinfoPins" (list :array quicklisp-pins)))))
+                               (cons "sources"
+                                     (list :object
+                                           (list (cons "tarball" tarball-count)
+                                                 (cons "git" git-count)
+                                                 (cons "path" path-count))))
+                               (cons "warnings" (list :array warnings))))
+                   *standard-output*)
+                  (terpri)
+                  0)
+                (progn
+                  (format t "Project: ~A ~A~%" (dash proj-name) (dash proj-version))
+                  (format t "Lockfile: generated-at ~A~%" (dash generated-at))
+                  (format t "Registries:~%")
+                  (dolist (reg locked-registries)
+                    (let* ((name (clpm.project:locked-registry-name reg))
+                           (kind (clpm.project:locked-registry-kind reg))
+                           (url (clpm.project:locked-registry-url reg))
+                           (trust (clpm.project:locked-registry-trust reg))
+                           (commit (clpm.project:locked-registry-commit reg))
+                           (sig (clpm.project:locked-registry-signature reg))
+                           (verified
+                             (cond
+                               ((not (eq kind :git)) "-")
+                               ((and trust sig) "yes")
+                               (trust "no")
+                               (t "-"))))
+                      (format t "  ~A~C~A~C~A~Ctrust: ~A~Ccommit: ~A~Csnapshot-sig: ~A~Cverified: ~A~%"
+                              (dash name) #\Tab
+                              (string-downcase (symbol-name kind)) #\Tab
+                              (dash url) #\Tab
+                              (dash trust) #\Tab
+                              (dash commit) #\Tab
+                              (dash sig) #\Tab
+                              verified)))
+
+                  (let ((pins '()))
+                    (dolist (reg locked-registries)
+                      (when (eq (clpm.project:locked-registry-kind reg) :quicklisp)
+                        (let* ((name (clpm.project:locked-registry-name reg))
+                               (trust (clpm.project:locked-registry-trust reg))
+                               (pin (cond
+                                      ((and (stringp trust)
+                                            (starts-with-p (string-downcase trust) "sha256:"))
+                                       trust)
+                                      ((and (stringp trust) (plusp (length trust))) trust)
+                                      (t "-"))))
+                          (push (cons name pin) pins))))
+                    (setf pins (sort pins #'string< :key #'car))
+                    (when pins
+                      (format t "Quicklisp distinfo pins:~%")
+                      (dolist (p pins)
+                        (format t "  ~A~C~A~%" (car p) #\Tab (cdr p)))))
+
+                  (format t "Sources:~%")
+                  (format t "  tarball: ~D~%" tarball-count)
+                  (format t "  git: ~D~%" git-count)
+                  (format t "  path: ~D~%" path-count)
+                  (when warnings
+                    (format t "Warnings:~%")
+                    (dolist (w warnings)
+                      (format t "  - ~A~%" w)))
+                  0))))))))
+
 ;;; help command
 
 (defun print-command-help (command &key subcommand)
@@ -2793,7 +2995,6 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
        (p "Usage: clpm audit [--json]")
        (p "")
        (p "Show a provenance and trust report for the current lockfile.")
-       (p "Not implemented yet.")
        0)
       (:sbom
        (p "Usage: clpm sbom --format <cyclonedx-json> [--out <path>]")

@@ -349,6 +349,7 @@
            #:cmd-clean
            #:cmd-gc
            #:cmd-scripts
+           #:cmd-audit
            #:cmd-keys
            #:cmd-publish
            #:cmd-help
