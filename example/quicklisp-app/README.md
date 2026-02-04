@@ -14,6 +14,11 @@ From the repo root:
 ```bash
 cd example/quicklisp-app
 
+# If you don't already have Quicklisp configured in CLPM:
+clpm registry add --quicklisp --name quicklisp --url https://beta.quicklisp.org/dist/quicklisp.txt
+clpm registry trust set quicklisp tofu
+clpm registry update quicklisp
+
 # Install deps from Quicklisp and activate the project
 clpm install
 
@@ -27,4 +32,3 @@ clpm run
 clpm package
 ./dist/quicklisp-app
 ```
-

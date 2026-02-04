@@ -10,9 +10,5 @@
   :dev-depends ()
   :test-depends
     ((:dep :system "fiveam" :constraint nil))
-  :registries
-    ((:quicklisp
-      :name "quicklisp"
-      :url "https://beta.quicklisp.org/dist/quicklisp.txt"))
+  :registries ()
   :scripts ())
-

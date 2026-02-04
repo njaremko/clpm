@@ -32,6 +32,26 @@ curl -fsSL https://github.com/clpm/clpm/releases/download/v0.1.0/clpm-bootstrap.
 # Check your environment (will report issues if not configured)
 clpm doctor
 
+# Quicklisp (online): configure + pin distinfo on first use
+clpm registry add --quicklisp --name quicklisp --url https://beta.quicklisp.org/dist/quicklisp.txt
+clpm registry trust set quicklisp tofu
+clpm registry update quicklisp
+
+# Create a new project
+clpm new myproject --bin
+cd myproject
+
+# Add deps from Quicklisp (nil constraint = "any"; lockfile pins a version)
+clpm add alexandria --install
+clpm add --test fiveam --install
+
+# Run commands
+clpm test
+clpm run
+
+# Produce a distributable executable in dist/
+clpm package
+
 # Configure a registry (example values)
 clpm registry add --name main --url https://github.com/clpm/clpm-registry.git --trust ed25519:...
 
