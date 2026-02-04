@@ -266,6 +266,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
 	     (apply #'clpm.commands:cmd-publish command-args))
 	    (:audit
 	     (apply #'clpm.commands:cmd-audit command-args))
+	    (:sbom
+	     (apply #'clpm.commands:cmd-sbom command-args))
 	    (t
 	     (format *error-output* "Unknown command: ~A~%" command)
 	     (print-usage)

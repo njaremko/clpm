@@ -350,6 +350,7 @@
            #:cmd-gc
            #:cmd-scripts
            #:cmd-audit
+           #:cmd-sbom
            #:cmd-keys
            #:cmd-publish
            #:cmd-help

@@ -2880,6 +2880,190 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                       (format t "  - ~A~%" w)))
                   0))))))))
 
+;;; sbom command
+
+(defun cmd-sbom (&rest args)
+  "Generate a software bill of materials (SBOM) from the current lockfile."
+  (let ((format nil)
+        (output nil))
+    (labels ((usage-error (fmt &rest fmt-args)
+               (apply #'log-error fmt fmt-args)
+               (log-error "Usage: clpm sbom --format cyclonedx-json [--output <path>]")
+               (return-from cmd-sbom 1))
+             (nonempty-string (s)
+               (and (stringp s) (plusp (length s))))
+             (safe-license->json (license)
+               ;; Minimal CycloneDX-compatible license entry.
+               (list :object
+                     (list (cons "license"
+                                 (list :object
+                                       (list (cons "id" license))))))))
+      ;; Parse args.
+      (loop while args do
+        (let ((arg (pop args)))
+          (cond
+            ((or (string= arg "--output") (string= arg "--out"))
+             (setf output (pop args))
+             (unless (nonempty-string output)
+               (usage-error "Missing value for ~A" arg)))
+            ((string= arg "--format")
+             (setf format (pop args))
+             (unless (nonempty-string format)
+               (usage-error "Missing value for --format")))
+            (t
+             (usage-error "Unknown option: ~A" arg)))))
+
+      (unless (and (stringp format) (string= format "cyclonedx-json"))
+        (usage-error "Unsupported --format (supported: cyclonedx-json): ~S" format))
+
+      (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
+          (find-effective-project-root)
+        (declare (ignore project-root _workspace-path))
+        (unless manifest-path
+          (when (null workspace-root)
+            (log-error "No clpm.project found"))
+          (return-from cmd-sbom 1))
+        (unless lock-path
+          (log-error "No clpm.lock found (run: clpm resolve or clpm install)")
+          (return-from cmd-sbom 1))
+
+        (let* ((lock (clpm.project:read-lock-file lock-path))
+               (locked-registries
+                 (sort (copy-list (or (clpm.project:lockfile-registries lock) '()))
+                       (lambda (a b)
+                         (string< (clpm.project:locked-registry-name a)
+                                  (clpm.project:locked-registry-name b)))))
+               (registries '()))
+
+          ;; Load registries (best-effort). In offline mode, only load registries
+          ;; that are already present locally.
+          (dolist (lr locked-registries)
+            (let* ((name (clpm.project:locked-registry-name lr))
+                   (kind (clpm.project:locked-registry-kind lr))
+                   (url (clpm.project:locked-registry-url lr))
+                   (trust (clpm.project:locked-registry-trust lr))
+                   (local (clpm.registry:registry-local-path name)))
+              (when (and (stringp name) (plusp (length name)))
+                (let ((loadp t))
+                  (when *offline*
+                    (setf loadp
+                          (case kind
+                            (:git
+                             (uiop:directory-exists-p local))
+                            (:quicklisp
+                             (and (uiop:file-exists-p (merge-pathnames "distinfo.txt" local))
+                                  (uiop:file-exists-p (merge-pathnames "systems.txt" local))
+                                  (uiop:file-exists-p (merge-pathnames "releases.txt" local))))
+                            (t (uiop:directory-exists-p local)))))
+                  (when loadp
+                    (handler-case
+                        (push (clpm.registry:clone-registry name url
+                                                            :trust-key trust
+                                                            :kind kind)
+                              registries)
+                      (error (c)
+                        (declare (ignore c))
+                        nil)))))))
+          (setf registries (nreverse registries))
+
+          ;; Build unique components keyed by (name . version).
+          (let ((components-ht (make-hash-table :test 'equal)))
+            (dolist (locked (clpm.project:lockfile-resolved lock))
+              (let* ((release (clpm.project:locked-system-release locked))
+                     (name (and release (clpm.project:locked-release-name release)))
+                     (version (and release (clpm.project:locked-release-version release)))
+                     (src (and release (clpm.project:locked-release-source release)))
+                     (sha256 (and release (clpm.project:locked-release-artifact-sha256 release)))
+                     (sha1 (and src (clpm.project:locked-source-sha1 src))))
+                (when (and (stringp name) (plusp (length name))
+                           (stringp version) (plusp (length version)))
+                  (setf (gethash (cons name version) components-ht)
+                        (list :name name
+                              :version version
+                              :sha256 sha256
+                              :sha1 sha1)))))
+
+            (let ((components
+                    (sort (loop for k being the hash-keys of components-ht collect k)
+                          (lambda (a b)
+                            (cond
+                              ((string< (car a) (car b)) t)
+                              ((string> (car a) (car b)) nil)
+                              (t (string< (cdr a) (cdr b))))))))
+              (labels ((find-license (pkg ver)
+                         (block found
+                           (dolist (reg registries)
+                             (let ((meta (ignore-errors (clpm.registry:get-release-metadata reg pkg ver))))
+                               (when meta
+                                 (let ((license (clpm.registry:release-metadata-license meta)))
+                                   (when (and (stringp license) (plusp (length license)))
+                                     (return-from found license))))))
+                           nil))
+                       (component->json (pkg ver)
+                         (let* ((info (gethash (cons pkg ver) components-ht))
+                                (sha256 (getf info :sha256))
+                                (sha1 (getf info :sha1))
+                                (license (find-license pkg ver))
+                                (hashes '()))
+                           (when (and (stringp sha256) (plusp (length sha256)))
+                             (push (list :object
+                                         (list (cons "alg" "SHA-256")
+                                               (cons "content" sha256)))
+                                   hashes))
+                           (when (and (stringp sha1) (plusp (length sha1)))
+                             (push (list :object
+                                         (list (cons "alg" "SHA-1")
+                                               (cons "content" sha1)))
+                                   hashes))
+                           (setf hashes (nreverse hashes))
+                           (let ((entries
+                                   (list (cons "name" pkg)
+                                         (cons "version" ver)
+                                         (cons "purl" (format nil "pkg:cl/~A@~A" pkg ver)))))
+                             (when hashes
+                               (setf entries (append entries
+                                                     (list (cons "hashes" (list :array hashes))))))
+                             (when (and (stringp license) (plusp (length license)))
+                               (setf entries
+                                     (append entries
+                                             (list (cons "licenses"
+                                                         (list :array (list (safe-license->json license))))))))
+                             (list :object entries)))))
+
+                (let* ((components-json (mapcar (lambda (k)
+                                                  (component->json (car k) (cdr k)))
+                                                components))
+                       (bom
+                         (list :object
+                               (list (cons "bomFormat" "CycloneDX")
+                                     (cons "specVersion" "1.5")
+                                     (cons "version" 1)
+                                     (cons "metadata"
+                                           (list :object
+                                                 (list (cons "tools"
+                                                             (list :array
+                                                                   (list (list :object
+                                                                               (list (cons "name" "clpm")
+                                                                                     (cons "version" "0.1.0")))))))))
+                                     (cons "components" (list :array components-json))))))
+                  (labels ((write-to-stream (stream)
+                             (clpm.io.json:write-json bom stream)
+                             (terpri stream)))
+                    (cond
+                      ((and output (nonempty-string output))
+                       (let ((out-path (uiop:ensure-pathname (clpm.platform:expand-path output)
+                                                            :defaults (uiop:getcwd)
+                                                            :want-existing nil)))
+                         (ensure-directories-exist out-path)
+                         (with-open-file (s out-path :direction :output
+                                                   :if-exists :supersede
+                                                   :external-format :utf-8)
+                           (write-to-stream s))
+                         0))
+                      (t
+                       (write-to-stream *standard-output*)
+                       0))))))))))))
+
 ;;; help command
 
 (defun print-command-help (command &key subcommand)
@@ -3000,7 +3184,6 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
        (p "Usage: clpm sbom --format <cyclonedx-json> [--out <path>]")
        (p "")
        (p "Generate a software bill of materials (SBOM) from the lockfile.")
-       (p "Not implemented yet.")
        0)
       (:keys
        (p "Usage: clpm keys generate --out <dir> --id <id>")
