@@ -1673,9 +1673,23 @@ Manifest schema:
          0))
 
       ((string= subcommand "update")
-       (let* ((names rest)
+       (let* ((refresh-trust nil)
+              (names '())
               (cfg (clpm.config:read-config))
               (refs (clpm.config:config-registries cfg)))
+         (loop while rest do
+           (let ((arg (pop rest)))
+             (cond
+               ((string= arg "--refresh-trust")
+                (setf refresh-trust t))
+               ((and (stringp arg) (plusp (length arg)) (char= (char arg 0) #\-))
+                (log-error "Unknown option: ~A" arg)
+                (return-from cmd-registry 1))
+               (t
+                (push arg names)))))
+         (setf names (nreverse names))
+         (when (null names)
+           (setf names nil))
          (dolist (ref refs)
            (let ((name (clpm.project:registry-ref-name ref)))
              (when (or (null names) (member name names :test #'string=))
@@ -1686,7 +1700,7 @@ Manifest schema:
                                (clpm.project:registry-ref-url ref)
                                :trust-key (clpm.project:registry-ref-trust ref)
                                :kind (clpm.project:registry-ref-kind ref))))
-                     (clpm.registry:update-registry reg))
+                     (clpm.registry:update-registry reg :refresh-trust refresh-trust))
                  (error (c)
                    (log-error "Failed to update registry ~A: ~A" name c)
                    (return-from cmd-registry 1))))))
@@ -1858,7 +1872,7 @@ Manifest schema:
             (p "Usage: clpm registry list")
             0)
            ((and sub (string= sub "update"))
-            (p "Usage: clpm registry update [name ...]")
+            (p "Usage: clpm registry update [--refresh-trust] [name ...]")
             0)
            (t
             (p "Subcommands:")

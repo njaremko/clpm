@@ -55,6 +55,95 @@
                 (setf (gethash k tbl) v)))))))
     tbl))
 
+(defun %hex-string-p (s)
+  (and (stringp s)
+       (= (length s) 64)
+       (every (lambda (c) (digit-char-p c 16)) s)))
+
+(defun %distinfo-sha256-hex (path)
+  (clpm.crypto.sha256:bytes-to-hex
+   (clpm.crypto.sha256:sha256-file path)))
+
+(defun %parse-quicklisp-trust (trust)
+  "Parse TRUST string for a Quicklisp registry.
+
+Returns one of:
+- :none
+- :tofu
+- (:sha256 <64-lower-hex>)"
+  (cond
+    ((null trust) :none)
+    ((and (stringp trust) (string-equal trust "tofu")) :tofu)
+    ((and (stringp trust)
+          (%starts-with-p (string-downcase trust) "sha256:"))
+     (let* ((hex (string-downcase (subseq trust (length "sha256:")))))
+       (unless (%hex-string-p hex)
+         (error 'clpm.errors:clpm-parse-error
+                :message (format nil "Invalid Quicklisp trust digest: ~S" trust)))
+       (list :sha256 hex)))
+    (t
+     (error 'clpm.errors:clpm-parse-error
+            :message (format nil "Unknown Quicklisp trust scheme: ~S" trust)))))
+
+(defun %write-quicklisp-trust-to-global-config (registry trust)
+  "Persist TRUST for REGISTRY into global config."
+  (let* ((cfg (clpm.config:read-config))
+         (refs (clpm.config:config-registries cfg))
+         (name (registry-name registry))
+         (existing (find name refs
+                         :key #'clpm.project:registry-ref-name
+                         :test #'string=)))
+    (cond
+      ((and existing (eq (clpm.project:registry-ref-kind existing) :quicklisp))
+       (setf (clpm.project:registry-ref-url existing) (registry-url registry)
+             (clpm.project:registry-ref-trust existing) trust))
+      ((null existing)
+       (push (clpm.project::make-registry-ref
+              :kind :quicklisp
+              :name name
+              :url (registry-url registry)
+              :trust trust)
+             refs)
+       (setf (clpm.config:config-registries cfg) refs))
+      (t
+       ;; Name collision with a non-quicklisp registry; do not clobber.
+       nil))
+    (clpm.config:write-config cfg)))
+
+(defun %enforce-quicklisp-distinfo-trust (registry distinfo-sha256-hex
+                                         &key refresh-trust)
+  "Enforce REGISTRY trust settings against DISTINFO-SHA256-HEX.
+
+May update global config and REGISTRY trust key when using TOFU or refresh."
+  (let ((trust (registry-trust-key registry)))
+    (case (%parse-quicklisp-trust trust)
+      (:none
+       t)
+      (:tofu
+       (let ((pinned (format nil "sha256:~A" distinfo-sha256-hex)))
+         (setf (registry-trust-key registry) pinned)
+         (%write-quicklisp-trust-to-global-config registry pinned)
+         t))
+      (t
+       (destructuring-bind (_ hex) (%parse-quicklisp-trust trust)
+         (declare (ignore _))
+         (cond
+           ((string= hex distinfo-sha256-hex)
+            t)
+           (refresh-trust
+            (let ((pinned (format nil "sha256:~A" distinfo-sha256-hex)))
+              (setf (registry-trust-key registry) pinned)
+              (%write-quicklisp-trust-to-global-config registry pinned)
+              t))
+           (t
+            (error 'clpm.errors:clpm-fetch-error
+                   :message (format nil
+                                    "Quicklisp distinfo SHA-256 mismatch for ~A (expected ~A, got ~A). Use --refresh-trust to update."
+                                    (registry-name registry)
+                                    hex
+                                    distinfo-sha256-hex)
+                   :url (registry-url registry)))))))))
+
 (defun %find-yyyymmdd (s)
   "Return the first 8-digit YYYYMMDD substring in S, or NIL."
   (when (stringp s)
@@ -141,17 +230,32 @@ Returns a hash table mapping project -> plist(:url :sha1 :version :prefix)."
         (update-quicklisp-registry registry))
     registry))
 
-(defun update-quicklisp-registry (registry)
+(defun update-quicklisp-registry (registry &key refresh-trust)
   "Download quicklisp dist metadata and load it."
   (let* ((url (registry-url registry))
          (distinfo (%quicklisp-distinfo-path registry))
+         (distinfo-tmp (merge-pathnames "distinfo.txt.tmp"
+                                        (registry-local-path (registry-name registry))))
          (systems (%quicklisp-systems-path registry))
          (releases (%quicklisp-releases-path registry)))
     (unless (and (stringp url) (plusp (length url)))
       (error 'clpm.errors:clpm-fetch-error
              :message "Missing Quicklisp dist URL"))
-    ;; Download distinfo + indexes.
-    (clpm.fetch::fetch-url (%upgrade-quicklisp-url url) distinfo :progress nil)
+    ;; Download distinfo to a temp file, enforce trust, then atomically replace.
+    (when (uiop:file-exists-p distinfo-tmp)
+      (ignore-errors (delete-file distinfo-tmp)))
+    (unwind-protect
+         (progn
+           (clpm.fetch::fetch-url (%upgrade-quicklisp-url url) distinfo-tmp :progress nil)
+           (let ((sha256-hex (%distinfo-sha256-hex distinfo-tmp)))
+             (%enforce-quicklisp-distinfo-trust registry sha256-hex
+                                                :refresh-trust refresh-trust))
+           (when (uiop:file-exists-p distinfo)
+             (ignore-errors (delete-file distinfo)))
+           (rename-file distinfo-tmp distinfo))
+      (when (uiop:file-exists-p distinfo-tmp)
+        (ignore-errors (delete-file distinfo-tmp))))
+    ;; Download indexes.
     (let* ((tbl (%parse-distinfo (%read-lines distinfo)))
            (systems-url (%upgrade-quicklisp-url (gethash "system-index-url" tbl)))
            (releases-url (%upgrade-quicklisp-url (gethash "release-index-url" tbl))))

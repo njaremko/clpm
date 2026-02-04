@@ -146,7 +146,7 @@ Returns a registry struct."
               :message (format nil "Unknown registry kind: ~S" kind))))
     reg))
 
-(defun update-registry (registry)
+(defun update-registry (registry &key refresh-trust)
   "Update a registry by pulling latest changes.
 Returns updated registry."
   (case (registry-kind registry)
@@ -159,7 +159,7 @@ Returns updated registry."
        (load-registry-snapshot registry)
        registry))
     (:quicklisp
-     (update-quicklisp-registry registry))
+     (update-quicklisp-registry registry :refresh-trust refresh-trust))
     (t
      (error 'clpm.errors:clpm-parse-error
             :message (format nil "Unknown registry kind: ~S" (registry-kind registry))))))
