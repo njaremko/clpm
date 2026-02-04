@@ -327,6 +327,10 @@ On POSIX, this produces:
 - OUTPUT-PATH: a tiny sh wrapper that forwards args to OUTPUT-PATH.bin with
   `--end-runtime-options` so SBCL doesn't consume flags like --help/--version.
 - OUTPUT-PATH.bin: the actual SBCL-based executable."
+  ;; Ensure common SBCL contribs that UIOP/ASDF may use are embedded in the
+  ;; saved image, so the resulting executable doesn't depend on SBCL_HOME to
+  ;; locate them at runtime.
+  (ignore-errors (require :sb-posix))
   (let* ((output-path (uiop:ensure-pathname output-path :want-existing nil :want-file t))
          (bin-path (uiop:ensure-pathname (format nil "~A.bin" (namestring output-path))
                                          :want-existing nil :want-file t)))
