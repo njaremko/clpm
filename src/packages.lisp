@@ -306,6 +306,8 @@
            #:cmd-remove
            #:cmd-search
            #:cmd-info
+           #:cmd-tree
+           #:cmd-why
            #:cmd-resolve
            #:cmd-fetch
            #:cmd-build
