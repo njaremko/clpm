@@ -17,6 +17,15 @@
   ()
   (:documentation "Error caused by user input or configuration"))
 
+(define-condition clpm-missing-tool-error (clpm-user-error)
+  ((tool :initarg :tool :initform nil :reader clpm-missing-tool-error-tool)
+   (install-hints :initarg :install-hints :initform nil
+                  :reader clpm-missing-tool-error-install-hints))
+  (:report (lambda (condition stream)
+             (format stream "Missing tool: ~A~@[~%Install with:~%~{  ~A~%~}~]"
+                     (or (clpm-missing-tool-error-tool condition) "?")
+                     (clpm-missing-tool-error-install-hints condition)))))
+
 (define-condition clpm-parse-error (clpm-error)
   ((file :initarg :file :initform nil :reader clpm-parse-error-file)
    (line :initarg :line :initform nil :reader clpm-parse-error-line)

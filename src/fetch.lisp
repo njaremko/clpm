@@ -187,8 +187,9 @@ Signals CLPM-FETCH-ERROR if any entry is unsafe."
   "Validate tar (optionally gzip) contents before extracting."
   (let ((tar (clpm.platform:find-tar)))
     (unless tar
-      (error 'clpm.errors:clpm-fetch-error
-             :message "tar not found in PATH"))
+      (error 'clpm.errors:clpm-missing-tool-error
+             :tool "tar"
+             :install-hints (clpm.platform:tool-install-hints "tar")))
     (let ((args (if gzip
                     (list tar "-tzf" (namestring archive-path))
                     (list tar "-tf" (namestring archive-path)))))
@@ -249,8 +250,9 @@ Supports .tar.gz, .tgz, .tar, .zip"
   "Extract .tar.gz archive."
   (let ((tar (clpm.platform:find-tar)))
     (unless tar
-      (error 'clpm.errors:clpm-fetch-error
-             :message "tar not found in PATH"))
+      (error 'clpm.errors:clpm-missing-tool-error
+             :tool "tar"
+             :install-hints (clpm.platform:tool-install-hints "tar")))
     (validate-tar-contents archive-path :gzip t)
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program
@@ -266,8 +268,9 @@ Supports .tar.gz, .tgz, .tar, .zip"
   "Extract .tar archive."
   (let ((tar (clpm.platform:find-tar)))
     (unless tar
-      (error 'clpm.errors:clpm-fetch-error
-             :message "tar not found in PATH"))
+      (error 'clpm.errors:clpm-missing-tool-error
+             :tool "tar"
+             :install-hints (clpm.platform:tool-install-hints "tar")))
     (validate-tar-contents archive-path :gzip nil)
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program

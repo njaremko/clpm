@@ -54,9 +54,9 @@
   "Clone git repository from URL to DEST."
   (let ((git (clpm.platform:find-git)))
     (unless git
-      (error 'clpm.errors:clpm-fetch-error
-             :message "git not found in PATH"
-             :url url))
+      (error 'clpm.errors:clpm-missing-tool-error
+             :tool "git"
+             :install-hints (clpm.platform:tool-install-hints "git")))
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program
          (list git "clone" "--depth" "1" url (namestring dest)))
@@ -71,8 +71,9 @@
   "Pull updates in repository at REPO-PATH."
   (let ((git (clpm.platform:find-git)))
     (unless git
-      (error 'clpm.errors:clpm-fetch-error
-             :message "git not found in PATH"))
+      (error 'clpm.errors:clpm-missing-tool-error
+             :tool "git"
+             :install-hints (clpm.platform:tool-install-hints "git")))
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program
          (list git "pull" "--ff-only")
@@ -100,8 +101,9 @@
   "Checkout REF (commit/tag/branch) in repository at REPO-PATH."
   (let ((git (clpm.platform:find-git)))
     (unless git
-      (error 'clpm.errors:clpm-fetch-error
-             :message "git not found in PATH"))
+      (error 'clpm.errors:clpm-missing-tool-error
+             :tool "git"
+             :install-hints (clpm.platform:tool-install-hints "git")))
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program
          (list git "checkout" ref)

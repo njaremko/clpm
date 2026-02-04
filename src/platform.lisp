@@ -215,13 +215,52 @@ TIMEOUT, when non-nil, is a number of seconds to allow the process to run."
       (values result-output result-error exit-code))))
 
 (defun which (program)
-  "Find program in PATH. Returns path or nil."
-  (let ((cmd (if (eq *os-type* :windows) "where" "which")))
-    (multiple-value-bind (output error-output exit-code)
-        (run-program (list cmd program))
-      (declare (ignore error-output))
-      (when (zerop exit-code)
-        (string-trim '(#\Space #\Newline #\Return) output)))))
+  "Find PROGRAM on PATH without relying on external `which`.
+
+Returns an absolute path string or NIL."
+  (labels ((nonempty (s) (and (stringp s) (plusp (length s))))
+           (path-separator ()
+             (if (eq *os-type* :windows) #\; #\:))
+           (split-path (s)
+             (let ((sep (path-separator)))
+               (remove-if (lambda (p) (or (null p) (string= p "")))
+                          (uiop:split-string s :separator (list sep)))))
+           (pathlike-p (s)
+             (or (find #\/ s)
+                 (find #\\ s)))
+           (win-exts ()
+             (let* ((raw (or (uiop:getenv "PATHEXT")
+                             ".COM;.EXE;.BAT;.CMD"))
+                    (exts (uiop:split-string raw :separator '(#\;))))
+               (remove-if (lambda (e) (or (null e) (string= e ""))) exts)))
+           (ensure-exe (p)
+             (let ((found (uiop:file-exists-p p)))
+               (when found
+                 (namestring found)))))
+    (unless (nonempty program)
+      (return-from which nil))
+    ;; If PROGRAM contains path separators, treat it as a path and do not
+    ;; consult PATH.
+    (when (pathlike-p program)
+      (return-from which
+        (ensure-exe (uiop:ensure-pathname program
+                                          :defaults (uiop:getcwd)
+                                          :want-existing nil))))
+    (let* ((path (or (uiop:getenv "PATH") ""))
+           (dirs (split-path path)))
+      (dolist (dir dirs)
+        (let* ((dir (uiop:ensure-directory-pathname dir))
+               (base (merge-pathnames program dir))
+               (found (ensure-exe base)))
+          (when found
+            (return-from which found))
+          (when (eq *os-type* :windows)
+            (dolist (ext (win-exts))
+              (let ((cand (merge-pathnames (concatenate 'string program ext) dir)))
+                (let ((found (ensure-exe cand)))
+                  (when found
+                    (return-from which found))))))))
+      nil)))
 
 ;;; Environment helpers
 
@@ -257,3 +296,46 @@ TIMEOUT, when non-nil, is a number of seconds to allow the process to run."
   "Find tar executable. Returns path or nil."
   (or (which "tar")
       (and (eq *os-type* :windows) (which "tar.exe"))))
+
+(defun tool-install-hints (tool)
+  "Return a list of human-readable install hints for TOOL (a program name)."
+  (let* ((tool (string-downcase (or tool "")))
+         (is-mac (uiop:os-macosx-p))
+         (is-win (uiop:os-windows-p)))
+    (labels ((mac (pkg)
+               (format nil "macOS (Homebrew): brew install ~A" pkg))
+             (deb (pkg)
+               (format nil "Debian/Ubuntu: sudo apt-get install ~A" pkg))
+             (fed (pkg)
+               (format nil "Fedora: sudo dnf install ~A" pkg))
+             (win (pkg)
+               (format nil "Windows (chocolatey): choco install ~A" pkg)))
+      (cond
+        ((string= tool "git")
+         (remove nil (list (and is-mac (mac "git"))
+                           (and (not is-win) (deb "git"))
+                           (and (not is-win) (fed "git"))
+                           (and is-win (win "git")))))
+        ((or (string= tool "tar") (string= tool "tar.exe"))
+         (remove nil (list (and is-mac "macOS: tar is typically preinstalled (or install Xcode Command Line Tools)")
+                           (and (not is-win) (deb "tar"))
+                           (and (not is-win) (fed "tar"))
+                           (and is-win "Windows: tar is included in recent Windows 10/11; otherwise install bsdtar or add tar.exe to PATH"))))
+        ((string= tool "sbcl")
+         (remove nil (list (and is-mac (mac "sbcl"))
+                           (and (not is-win) (deb "sbcl"))
+                           (and (not is-win) (fed "sbcl"))
+                           (and is-win "Windows: install SBCL and ensure sbcl.exe is on PATH"))))
+        ((string= tool "ecl")
+         (remove nil (list (and is-mac (mac "ecl"))
+                           (and (not is-win) (deb "ecl"))
+                           (and (not is-win) (fed "ecl"))
+                           (and is-win "Windows: install ECL and ensure ecl.exe is on PATH"))))
+        ((string= tool "ccl")
+         (remove nil (list (and is-mac (mac "clozure-cl"))
+                           (and (not is-win) "Linux: install Clozure CL and ensure `ccl` is on PATH")
+                           (and is-win "Windows: install Clozure CL and ensure ccl.exe is on PATH"))))
+        (t
+         (remove nil (list (and is-mac (format nil "macOS: ensure `~A` is on PATH (Homebrew recommended)" tool))
+                           (and (not is-win) (format nil "Linux: install `~A` and ensure it is on PATH" tool))
+                           (and is-win (format nil "Windows: install `~A` and ensure it is on PATH" tool)))))))))

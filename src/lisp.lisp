@@ -44,9 +44,9 @@ Returns an absolute path string or NIL."
   "Return the implementation version string for KIND by running `<impl> --version`."
   (let ((prog (find-lisp kind)))
     (unless prog
-      (clpm.errors:signal-error 'clpm.errors:clpm-user-error
-                                "Lisp implementation not found on PATH: ~A"
-                                (lisp-program-name kind)))
+      (error 'clpm.errors:clpm-missing-tool-error
+             :tool (lisp-program-name kind)
+             :install-hints (clpm.platform:tool-install-hints (lisp-program-name kind))))
     (multiple-value-bind (output _err exit-code)
         (clpm.platform:run-program (list prog "--version")
                                    :output :string
@@ -72,9 +72,9 @@ EVAL-FORMS is a list of strings to evaluate in order."
   (let* ((kind (parse-lisp-kind kind))
          (prog (find-lisp kind)))
     (unless prog
-      (clpm.errors:signal-error 'clpm.errors:clpm-user-error
-                                "Lisp implementation not found on PATH: ~A"
-                                (lisp-program-name kind)))
+      (error 'clpm.errors:clpm-missing-tool-error
+             :tool (lisp-program-name kind)
+             :install-hints (clpm.platform:tool-install-hints (lisp-program-name kind))))
     (let* ((load-files (%ensure-string-list load-files "load-files"))
            (eval-forms (%ensure-string-list eval-forms "eval-forms"))
            (disable-debugger (if (null disable-debugger)
@@ -109,4 +109,3 @@ EVAL-FORMS is a list of strings to evaluate in order."
                           (t (list "--eval" form))))
                       eval-forms))))
       args)))
-

@@ -26,6 +26,24 @@
   "Print error message."
   (format *error-output* "~&error: ~?~%" format-string args))
 
+(defun %searched-parent-directories (&optional (start (uiop:getcwd)))
+  "Return a list of directory pathnames searched when looking for clpm.project."
+  (let ((dirs '())
+        (dir (uiop:ensure-directory-pathname start)))
+    (loop
+      (push dir dirs)
+      (let ((parent (uiop:pathname-parent-directory-pathname dir)))
+        (when (or (null parent) (equal parent dir))
+          (return (nreverse dirs)))
+        (setf dir parent)))))
+
+(defun log-no-project-found (&optional (start (uiop:getcwd)))
+  "Print an actionable 'no clpm.project found' error, including searched paths."
+  (log-error "No clpm.project found")
+  (format *error-output* "Searched for clpm.project in:~%")
+  (dolist (d (%searched-parent-directories start))
+    (format *error-output* "  ~A~%" (namestring d))))
+
 ;;; Registry loading (global + project)
 
 (defun load-merged-registries ()
@@ -345,7 +363,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                              #'string<))
               (member *target-package*))
          (unless member
-           (log-error "No clpm.project found (workspace root detected). Use -p/--package to select a member.")
+           (log-error "Workspace root detected. Use -p/--package to select a member.")
            (if (null members)
                (log-error "Workspace has no members")
                (progn
@@ -385,7 +403,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
     (declare (ignore lock-path _workspace-path))
     (unless manifest-path
       (when (null workspace-root)
-        (log-error "No clpm.project found"))
+        (log-no-project-found))
       (return-from cmd-add 1))
 
     (let ((spec nil)
@@ -603,7 +621,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
     (declare (ignore lock-path _workspace-path))
     (unless manifest-path
       (when (null workspace-root)
-        (log-error "No clpm.project found"))
+        (log-no-project-found))
       (return-from cmd-remove 1))
 
     (let ((system-id nil)
@@ -990,7 +1008,6 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
              (return-from cmd-tree 1)))
     (let ((package nil)
           (depth-limit nil))
-      (declare (ignore package))
       ;; Parse args
       (let ((i 0))
         (loop while (< i (length args)) do
@@ -1016,24 +1033,26 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
                (usage-error "Unexpected argument: ~A" arg))))
           (incf i)))
 
-      (multiple-value-bind (_project-root manifest-path lock-path)
-          (clpm.project:find-project-root)
-        (declare (ignore _project-root))
-        (unless manifest-path
-          (log-error "No clpm.project found")
-          (return-from cmd-tree 1))
-        (unless lock-path
-          (log-error "No clpm.lock found - run 'clpm resolve' first")
-          (return-from cmd-tree 1))
-        (let* ((project (clpm.project:read-project-file manifest-path))
-               (lockfile (clpm.project:read-lock-file lock-path))
-               (roots (%project-root-system-ids project)))
-          (when (null roots)
-            (log-info "No dependencies")
-            (return-from cmd-tree 0))
-          (%print-dependency-tree roots (%lockfile-graph lockfile)
-                                  :depth-limit depth-limit)
-          0)))))
+      (let ((*target-package* (or package *target-package*)))
+        (multiple-value-bind (_project-root manifest-path lock-path workspace-root _workspace-path)
+            (find-effective-project-root)
+          (declare (ignore _project-root _workspace-path))
+          (unless manifest-path
+            (when (null workspace-root)
+              (log-no-project-found))
+            (return-from cmd-tree 1))
+          (unless lock-path
+            (log-error "No clpm.lock found - run 'clpm resolve' first")
+            (return-from cmd-tree 1))
+          (let* ((project (clpm.project:read-project-file manifest-path))
+                 (lockfile (clpm.project:read-lock-file lock-path))
+                 (roots (%project-root-system-ids project)))
+            (when (null roots)
+              (log-info "No dependencies")
+              (return-from cmd-tree 0))
+            (%print-dependency-tree roots (%lockfile-graph lockfile)
+                                    :depth-limit depth-limit)
+            0))))))
 
 (defun %distinct-shortest-paths (roots graph target &key (limit 10))
   "Return up to LIMIT distinct shortest paths (as lists of system-ids) from ROOTS to TARGET."
@@ -1108,7 +1127,6 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
              (return-from cmd-why 1)))
     (let ((package nil)
           (target nil))
-      (declare (ignore package))
       ;; Parse args
       (let ((i 0))
         (loop while (< i (length args)) do
@@ -1130,30 +1148,32 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
       (unless (and (stringp target) (plusp (length target)))
         (usage-error "Missing <system-id>"))
 
-      (multiple-value-bind (_project-root manifest-path lock-path)
-          (clpm.project:find-project-root)
-        (declare (ignore _project-root))
-        (unless manifest-path
-          (log-error "No clpm.project found")
-          (return-from cmd-why 1))
-        (unless lock-path
-          (log-error "No clpm.lock found - run 'clpm resolve' first")
-          (return-from cmd-why 1))
-        (let* ((project (clpm.project:read-project-file manifest-path))
-               (lockfile (clpm.project:read-lock-file lock-path))
-               (roots (%project-root-system-ids project)))
-          (when (null roots)
-            (log-error "No dependencies to explain")
+      (let ((*target-package* (or package *target-package*)))
+        (multiple-value-bind (_project-root manifest-path lock-path workspace-root _workspace-path)
+            (find-effective-project-root)
+          (declare (ignore _project-root _workspace-path))
+          (unless manifest-path
+            (when (null workspace-root)
+              (log-no-project-found))
             (return-from cmd-why 1))
-          (let* ((graph (%lockfile-graph lockfile))
-                 (paths (%distinct-shortest-paths roots graph target :limit 10)))
-            (unless paths
-              (log-error "System not reachable from project dependencies: ~A" target)
+          (unless lock-path
+            (log-error "No clpm.lock found - run 'clpm resolve' first")
+            (return-from cmd-why 1))
+          (let* ((project (clpm.project:read-project-file manifest-path))
+                 (lockfile (clpm.project:read-lock-file lock-path))
+                 (roots (%project-root-system-ids project)))
+            (when (null roots)
+              (log-error "No dependencies to explain")
               (return-from cmd-why 1))
-            (format t "Why: ~A~%" target)
-            (dolist (path paths)
-              (format t "  ~{~A~^ -> ~}~%" path))
-            0))))))
+            (let* ((graph (%lockfile-graph lockfile))
+                   (paths (%distinct-shortest-paths roots graph target :limit 10)))
+              (unless paths
+                (log-error "System not reachable from project dependencies: ~A" target)
+                (return-from cmd-why 1))
+              (format t "Why: ~A~%" target)
+              (dolist (path paths)
+                (format t "  ~{~A~^ -> ~}~%" path))
+              0)))))))
 
 ;;; resolve command
 
@@ -1164,7 +1184,7 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
     (declare (ignore _workspace-path))
     (unless manifest-path
       (when (null workspace-root)
-        (log-error "No clpm.project found"))
+        (log-no-project-found))
       (return-from cmd-resolve 1))
     (log-info "Resolving dependencies...")
     (let* ((project (clpm.project:read-project-file manifest-path))
@@ -1204,7 +1224,7 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
     (unless lock-path
       (when (null project-root)
         (when (null workspace-root)
-          (log-error "No clpm.project found")
+          (log-no-project-found)
           (return-from cmd-fetch 1))
         (return-from cmd-fetch 1))
       (log-error "No clpm.lock found - run 'clpm resolve' first")
@@ -1257,7 +1277,7 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
     (declare (ignore project-root _workspace-path))
     (unless manifest-path
       (when (null workspace-root)
-        (log-error "No clpm.project found"))
+        (log-no-project-found))
       (return-from cmd-build 1))
     (unless lock-path
       (log-error "No clpm.lock found - run 'clpm resolve' first")
@@ -1306,7 +1326,7 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
     (declare (ignore lock-path _workspace-path))
     (unless manifest-path
       (when (null workspace-root)
-        (log-error "No clpm.project found"))
+        (log-no-project-found))
       (return-from cmd-install 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
            (kind (effective-lisp-kind project))
@@ -1343,11 +1363,12 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
 (defun cmd-update (&rest systems)
   "Update dependencies (re-resolve with latest versions)."
   (declare (ignore systems))  ; TODO: selective update
-  (multiple-value-bind (project-root manifest-path lock-path)
-      (clpm.project:find-project-root)
-    (declare (ignore project-root lock-path))
+  (multiple-value-bind (project-root manifest-path _lock-path workspace-root _workspace-path)
+      (find-effective-project-root)
+    (declare (ignore _lock-path _workspace-path))
     (unless manifest-path
-      (log-error "No clpm.project found")
+      (when (null workspace-root)
+        (log-no-project-found))
       (return-from cmd-update 1))
     (log-info "Updating dependencies...")
     ;; Force fresh resolve by ignoring lockfile
@@ -1367,8 +1388,7 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
             (let ((new-lockfile (clpm.solver:resolution-to-lockfile
                                  resolution project registries)))
               (let ((lock-out (merge-pathnames "clpm.lock"
-                                               (uiop:pathname-directory-pathname
-                                                manifest-path))))
+                                               project-root)))
                 (clpm.project:write-lock-file new-lockfile lock-out)
                 (log-info "Updated clpm.lock"))))
         (clpm.errors:clpm-resolve-error (c)
@@ -1380,8 +1400,13 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
 
 (defun cmd-repl (&key load-system)
   "Start a REPL with the project activated."
-  (multiple-value-bind (project-root manifest-path lock-path)
-      (clpm.project:find-project-root)
+  (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
+      (find-effective-project-root)
+    (declare (ignore _workspace-path))
+    (unless manifest-path
+      (when (null workspace-root)
+        (log-no-project-found))
+      (return-from cmd-repl 1))
     (unless lock-path
       (log-error "No clpm.lock found - run 'clpm install' first")
       (return-from cmd-repl 1))
@@ -1570,7 +1595,7 @@ Returns an integer exit code."
     (declare (ignore lock-path _workspace-path))
     (unless manifest-path
       (when (null workspace-root)
-        (log-error "No clpm.project found"))
+        (log-no-project-found))
       (return-from cmd-run 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
            (run (clpm.project:project-run project)))
@@ -1611,11 +1636,12 @@ Returns an integer exit code."
   "Run an external command in the project's activated environment.
 
 Usage: clpm exec -- <cmd...>"
-  (multiple-value-bind (project-root manifest-path lock-path)
-      (clpm.project:find-project-root)
-    (declare (ignore lock-path))
+  (multiple-value-bind (project-root manifest-path _lock-path workspace-root _workspace-path)
+      (find-effective-project-root)
+    (declare (ignore _lock-path _workspace-path))
     (unless manifest-path
-      (log-error "No clpm.project found")
+      (when (null workspace-root)
+        (log-no-project-found))
       (return-from cmd-exec 1))
     (let ((cmd args))
       (when (and cmd (string= (first cmd) "--"))
@@ -1747,7 +1773,7 @@ Returns (values parsed-scripts exit-code)."
     (declare (ignore lock-path _workspace-path))
     (unless manifest-path
       (when (null workspace-root)
-        (log-error "No clpm.project found"))
+        (log-no-project-found))
       (return-from cmd-scripts 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
            (scripts (clpm.project:project-scripts project)))
@@ -1827,7 +1853,7 @@ Uses clpm.project :test metadata:
     (declare (ignore lock-path _workspace-path))
     (unless manifest-path
       (when (null workspace-root)
-        (log-error "No clpm.project found"))
+        (log-no-project-found))
       (return-from cmd-test 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
            (test (clpm.project:project-test project)))
@@ -1886,7 +1912,7 @@ Manifest schema:
     (declare (ignore _workspace-path))
     (unless manifest-path
       (when (null workspace-root)
-        (log-error "No clpm.project found"))
+        (log-no-project-found))
       (return-from cmd-package 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
            (pkg (clpm.project:project-package project)))
@@ -2012,7 +2038,7 @@ Manifest schema:
       (declare (ignore manifest-path lock-path _workspace-path))
       (unless project-root
         (when (null workspace-root)
-          (log-error "No clpm.project found"))
+          (log-no-project-found))
         (return-from cmd-clean 1))
       (let ((clpm-dir (merge-pathnames ".clpm/" project-root))
             (dist-dir (merge-pathnames "dist/" project-root)))
@@ -2565,7 +2591,9 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                      ;; Create tarball in temp dir.
                      (tar (clpm.platform:find-tar)))
                 (unless tar
-                  (usage-error "tar not found in PATH"))
+                  (error 'clpm.errors:clpm-missing-tool-error
+                         :tool "tar"
+                         :install-hints (clpm.platform:tool-install-hints "tar")))
                 (clpm.store:with-temp-dir (tmp)
                   (let* ((tarball-name (format nil "~A-~A.tar.gz" name version))
                          (tarball-path (merge-pathnames tarball-name tmp)))
@@ -2654,7 +2682,9 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                       (when git-commit-p
                         (let ((git (clpm.platform:find-git)))
                           (unless git
-                            (usage-error "git not found in PATH"))
+                            (error 'clpm.errors:clpm-missing-tool-error
+                                   :tool "git"
+                                   :install-hints (clpm.platform:tool-install-hints "git")))
                           (multiple-value-bind (_out err1 rc1)
                               (clpm.platform:run-program
                                (list git "add" "registry/snapshot.sxp" "registry/snapshot.sig"
@@ -2707,7 +2737,7 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
         (declare (ignore project-root _workspace-path))
         (unless manifest-path
           (when (null workspace-root)
-            (log-error "No clpm.project found"))
+            (log-no-project-found))
           (return-from cmd-audit 1))
         (unless lock-path
           (log-error "No clpm.lock found (run: clpm resolve or clpm install)")
@@ -2924,7 +2954,7 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
         (declare (ignore project-root _workspace-path))
         (unless manifest-path
           (when (null workspace-root)
-            (log-error "No clpm.project found"))
+            (log-no-project-found))
           (return-from cmd-sbom 1))
         (unless lock-path
           (log-error "No clpm.lock found (run: clpm resolve or clpm install)")

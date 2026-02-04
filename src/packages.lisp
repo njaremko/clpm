@@ -5,6 +5,9 @@
   (:export #:clpm-error
            #:clpm-error-message
            #:clpm-user-error
+           #:clpm-missing-tool-error
+           #:clpm-missing-tool-error-tool
+           #:clpm-missing-tool-error-install-hints
            #:clpm-parse-error
            #:clpm-fetch-error
            #:clpm-hash-mismatch-error
@@ -93,7 +96,8 @@
            #:expand-path
            #:find-downloader
            #:find-git
-           #:find-tar))
+           #:find-tar
+           #:tool-install-hints))
 
 (defpackage #:clpm.lisp
   (:use #:cl #:clpm.platform #:clpm.errors)
