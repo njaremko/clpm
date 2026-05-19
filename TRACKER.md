@@ -20,6 +20,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - `2026-05-19` **#014 landed.** `clpm info <sys> --all` (text mode) now emits per-candidate source kind/URL/hash/commit and license — matching the JSON branch. Output without `--all` is unchanged: still one line per candidate. `test/info-command-test.lisp` adds a `--all` case asserting both source URLs and the MIT license tag show up.
 - `2026-05-19` **#015 landed.** Added `clpm workspace remove <member>` (and updated usage/help for both `cmd-workspace`'s error path and `print-command-help :workspace`). Member name is normalized the same way as `add` (trailing slashes stripped); missing members error with the full current member list. Does NOT touch the on-disk member directory — symmetric with `add`. `test/workspace-subcommand-test.lisp` was extended with add → remove round-trip and missing-member error coverage.
 - `2026-05-19` **#016 landed.** `cmd-keys` gained three subcommands: `list [--keys-dir <dir>]`, `import --pub <path> [--id <id>] [--keys-dir <dir>]`, and `verify --pub <path> --file <path> --sig <path>`. List prints one line per `*.pub` file with a 16-hex-char SHA-256 fingerprint; import copies a public key into `~/.config/clpm/keys/` with `<id>.pub` naming, refuses to overwrite, and validates the file is a 64-char hex Ed25519 public key; verify performs an Ed25519 detached-signature round-trip on demand (rc 0 valid, non-zero invalid/error). Help text in `print-command-help :keys` describes all four subcommands. `test/keys-subcommand-test.lisp` exercises generate → import → list → import-overwrite-refusal → sign-from-private → verify-good → verify-tampered.
+- `2026-05-19` **#017 landed.** `print-command-help` now drills into subcommands for `:workspace`, `:keys`, `:scripts`, and `:registry` (which already had top-level drilling — extended to handle the `registry trust <list|set|refresh>` leaf pages). `cmd-help` was widened to forward an arbitrary chain (e.g. `clpm help registry trust set` reaches the leaf page). Each subcommand page prints only its own usage; the umbrella usage is no longer leaked. `test/help-output-test.lisp` was extended with explicit checks for `workspace add`, `workspace remove`, `keys generate`, `scripts run`, and `registry trust set` — including a negative assertion that the umbrella usage doesn't appear on the focused pages.
 
 ## Lessons / decisions
 
@@ -305,7 +306,7 @@ The most useful overrides are probably `:lisp` (default implementation for proje
 
 ---
 
-### #017 — `[ ]` `P3` `cli` `help` Per-subcommand help beyond `registry`
+### #017 — `[x]` `P3` `cli` `help` Per-subcommand help beyond `registry`
 
 `print-command-help` (`src/commands.lisp:3401-3647`) only branches on `subcommand` for `:registry` (line 3550). Other commands with subcommands — `workspace`, `keys`, `scripts` — print only the umbrella usage when you run `clpm help workspace add`, etc.
 

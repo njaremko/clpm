@@ -97,6 +97,50 @@
   (assert-contains stdout "Usage: clpm new"))
 (format t "  `<cmd> --help` PASSED~%")
 
+(format t "Testing per-subcommand help...~%")
+
+;; workspace add: dedicated page with the add usage line.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "workspace" "add"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm workspace add")
+  (assert-true (not (search "workspace init" stdout))
+               "workspace add help leaked the umbrella usage:~%~A" stdout))
+
+;; workspace remove: dedicated page.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "workspace" "remove"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm workspace remove"))
+
+;; keys generate: focused on the generate subcommand.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "keys" "generate"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm keys generate")
+  (assert-true (not (search "clpm keys verify" stdout))
+               "keys generate help leaked the umbrella usage:~%~A" stdout))
+
+;; scripts run: focused on the run subcommand.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "scripts" "run"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm scripts run"))
+
+;; registry trust set: leaf page (drills two levels).
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "registry" "trust" "set"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm registry trust set")
+  (assert-contains stdout "none"))
+
+(format t "  Per-subcommand help PASSED~%")
+
 (format t "Testing unknown help target...~%")
 (multiple-value-bind (code stdout stderr)
     (run-cli-captured '("help" "does-not-exist"))
