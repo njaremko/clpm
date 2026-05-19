@@ -145,7 +145,91 @@ possibly-truncated text."
    (eval-count :initform 0 :accessor server-eval-count)
    (redefinitions :initform (make-hash-table :test 'equal)
                   :reader server-redefinitions)
-   (shutdown-requested? :initform nil :accessor server-shutdown-requested?)))
+   (shutdown-requested? :initform nil :accessor server-shutdown-requested?)
+   (event-log :initform nil :accessor server-event-log)))
+
+(defparameter +max-log-bytes+ (* 10 1024 1024)
+  "Rotate `.clpm/repl-bridge.log' once it grows past this many bytes.")
+
+(defstruct event-log
+  (path "" :type string)
+  (stream nil)
+  (bytes-written 0 :type unsigned-byte)
+  (mutex (sb-thread:make-mutex :name "clpm.repl-bridge.log")))
+
+(defun %rfc3339-now ()
+  "Return the current time as an RFC-3339 / ISO-8601 string in UTC, e.g.
+`2026-05-19T18:23:45Z'. Second precision is good enough for an event log."
+  (multiple-value-bind (sec min hr day mon yr)
+      (decode-universal-time (get-universal-time) 0)
+    (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ"
+            yr mon day hr min sec)))
+
+(defun %open-event-log (path)
+  "Open PATH for append, returning an `event-log' struct or NIL on failure.
+Pre-loads the current size so rotation tracking starts in the right place."
+  (handler-case
+      (let* ((stream (open path :direction :output
+                                :if-exists :append
+                                :if-does-not-exist :create
+                                :external-format :utf-8))
+             (existing (ignore-errors (file-length stream))))
+        (make-event-log :path path
+                        :stream stream
+                        :bytes-written (or existing 0)))
+    (error () nil)))
+
+(defun %close-event-log (log)
+  (when (and log (event-log-stream log))
+    (ignore-errors (close (event-log-stream log)))
+    (setf (event-log-stream log) nil)))
+
+(defun %rotate-event-log (log)
+  "Close the current stream, rename PATH -> PATH.1, reopen at PATH. Called
+with LOG-MUTEX held."
+  (let ((path (event-log-path log)))
+    (ignore-errors (close (event-log-stream log)))
+    (let ((rotated (concatenate 'string path ".1")))
+      (ignore-errors (delete-file rotated))
+      (ignore-errors (rename-file path rotated)))
+    (let ((s (handler-case
+                 (open path :direction :output
+                            :if-exists :supersede
+                            :if-does-not-exist :create
+                            :external-format :utf-8)
+               (error () nil))))
+      (setf (event-log-stream log) s
+            (event-log-bytes-written log) 0))))
+
+(defun %log-event (log event &rest plist)
+  "Append one JSON-line event to LOG (an event-log or NIL). PLIST is a
+property list of additional fields (symbol keys are downcased; string keys
+pass through). Safe to call concurrently from any thread; safe when LOG
+is NIL."
+  (when (and log (event-log-stream log))
+    (let* ((extra (loop for (k v) on plist by #'cddr
+                        collect (cons (cond
+                                        ((stringp k) k)
+                                        ((symbolp k) (string-downcase (symbol-name k)))
+                                        (t (princ-to-string k)))
+                                      v)))
+           (entry (list :object
+                        (append (list (cons "ts" (%rfc3339-now))
+                                      (cons "event" event))
+                                extra)))
+           (line (with-output-to-string (b)
+                   (clpm.io.json:write-json entry b)
+                   (write-char #\Newline b))))
+      (sb-thread:with-mutex ((event-log-mutex log))
+        (when (event-log-stream log)
+          (handler-case
+              (progn
+                (write-string line (event-log-stream log))
+                (force-output (event-log-stream log)))
+            (error () nil))
+          (incf (event-log-bytes-written log) (length line))
+          (when (> (event-log-bytes-written log) +max-log-bytes+)
+            (%rotate-event-log log)))))))
 
 (defvar *server* nil
   "Current server instance, bound during the daemon's lifetime so handlers can
@@ -413,11 +497,13 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
         ((string= method "eval")
          (%dispatch-eval server params id))
         ((string= method "interrupt")
+         (%log-event (server-event-log server) "interrupt")
          (%interrupt-worker server)
          (%success-response id (%json-object)))
         ((string= method "reset")
          (let ((w (server-worker server)))
            (when (and w (sb-thread:thread-alive-p (worker-thread w)))
+             (%log-event (server-event-log server) "worker-terminated")
              (sb-thread:terminate-thread (worker-thread w)))
            (setf (server-worker server) nil)
            (clrhash (server-redefinitions server)))
@@ -432,6 +518,7 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
                                (server-redefinitions server)
                                collect (list :object v))))))
         ((string= method "shutdown")
+         (%log-event (server-event-log server) "shutdown")
          (setf (server-shutdown-requested? server) t)
          ;; Wake the accept loop: close the listening socket so the blocking
          ;; `socket-accept' returns. The accept-loop handler-case turns the
@@ -532,10 +619,14 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
 ;;; Server: accept loop
 ;;; --------------------------------------------------------------------------
 
-(defun start-server (&key socket-path)
+(defun start-server (&key socket-path log-path)
   "Start a daemon listening on SOCKET-PATH (a string filesystem path). Blocks
 until a `shutdown' request arrives. Cleans up the socket and ensures the
 worker thread is stopped before returning.
+
+When LOG-PATH is supplied, append one JSON line per protocol event
+(accept, request, response, interrupt, worker-died, shutdown) and rotate
+once the file exceeds 10 MB.
 
 Sets the toplevel value of `*server*' (not a dynamic binding) so the worker
 thread sees the same instance; only one daemon may run per process."
@@ -543,6 +634,8 @@ thread sees the same instance; only one daemon may run per process."
   (ignore-errors (delete-file socket-path))
   (let* ((server (make-instance 'server :socket-path socket-path))
          (sock (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+    (when (and log-path (stringp log-path))
+      (setf (server-event-log server) (%open-event-log log-path)))
     (setf *server* server)
     (unwind-protect
          (progn
@@ -550,6 +643,9 @@ thread sees the same instance; only one daemon may run per process."
            (sb-posix:chmod socket-path #o600)
            (sb-bsd-sockets:socket-listen sock 8)
            (setf (server-socket server) sock)
+           (%log-event (server-event-log server) "start"
+                       "pid" (sb-posix:getpid)
+                       "socket" socket-path)
            ;; Spawn a thread per connection so eval (which blocks on the worker)
            ;; doesn't wedge the accept loop. The worker mailbox serializes
            ;; eval requests; other methods (interrupt, ping, status, ...) run
@@ -561,6 +657,7 @@ thread sees the same instance; only one daemon may run per process."
            (loop until (server-shutdown-requested? server) do
              (handler-case
                  (let ((conn (sb-bsd-sockets:socket-accept sock)))
+                   (%log-event (server-event-log server) "accept")
                    (sb-thread:make-thread
                     (let ((c conn))
                       (lambda ()
@@ -568,6 +665,9 @@ thread sees the same instance; only one daemon may run per process."
                              (handler-case
                                  (%handle-connection server c)
                                (error (e)
+                                 (%log-event (server-event-log server)
+                                             "handler-error"
+                                             "error" (princ-to-string e))
                                  (format *error-output*
                                          "repl-bridge handler error: ~A~%" e)))
                           (ignore-errors (sb-bsd-sockets:socket-close c)))))
@@ -581,6 +681,8 @@ thread sees the same instance; only one daemon may run per process."
           (handler-case
               (sb-thread:join-thread (worker-thread w))
             (error () nil))))
+      (%log-event (server-event-log server) "stop")
+      (%close-event-log (server-event-log server))
       (ignore-errors (sb-bsd-sockets:socket-close sock))
       (ignore-errors (delete-file socket-path))
       (setf *server* nil))))
@@ -599,6 +701,9 @@ thread sees the same instance; only one daemon may run per process."
              (let* ((request (handler-case
                                  (clpm.io.json:read-json-from-string line)
                                (clpm.errors:clpm-parse-error (c)
+                                 (%log-event (server-event-log server)
+                                             "request-parse-error"
+                                             "error" (princ-to-string c))
                                  (%write-line-json
                                   stream
                                   (%error-response nil "protocol-error"
@@ -609,13 +714,29 @@ thread sees the same instance; only one daemon may run per process."
                     (params (%json-getf request "params")))
                (cond
                  ((not (stringp method))
+                  (%log-event (server-event-log server) "request-invalid"
+                              "id" id)
                   (%write-line-json stream
                                     (%error-response id "protocol-error"
                                                      "missing `method'")))
                  (t
-                  ;; Spawn a watcher for client disconnect: if the client
-                  ;; closes mid-eval, interrupt the worker.
-                  (let ((response (%dispatch-method server method params id)))
+                  (%log-event (server-event-log server) "request"
+                              "id" id "method" method)
+                  (let* ((start (get-internal-real-time))
+                         (response (%dispatch-method server method params id))
+                         (elapsed (round (* 1000.0
+                                            (/ (- (get-internal-real-time) start)
+                                               internal-time-units-per-second))))
+                         (err (and (consp response)
+                                   (eq (car response) :object)
+                                   (cdr (assoc "error" (cadr response)
+                                               :test #'string=)))))
+                    (%log-event (server-event-log server) "response"
+                                "id" id "method" method
+                                "elapsed_ms" elapsed
+                                "error" (and err
+                                              (cdr (assoc "code" (cadr err)
+                                                          :test #'string=))))
                     (handler-case
                         (%write-line-json stream response)
                       (error () nil)))))))))

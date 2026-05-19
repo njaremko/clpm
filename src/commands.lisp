@@ -1720,7 +1720,8 @@ daemon's image has the lockfile-resolved systems on the ASDF source-registry."
          (unwind-protect
               (handler-case
                   (progn
-                    (clpm.repl-bridge:start-server :socket-path sock)
+                    (clpm.repl-bridge:start-server :socket-path sock
+                                                   :log-path log)
                     0)
                 (error (c)
                   (format *error-output* "daemon crashed: ~A~%" c)
