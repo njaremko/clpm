@@ -80,7 +80,42 @@
              (assert-true (not (uiop:directory-exists-p dist-dir))
                           "Expected dist to be removed with --dist")
              (assert-true (uiop:file-exists-p keep-file)
-                          "Expected keep file to remain after --dist")))
+                          "Expected keep file to remain after --dist"))
+
+           ;; --store: untrack the project from projects.sxp; other projects
+           ;; in the index stay.
+           (let* ((project-a (merge-pathnames "app/" workspace))
+                  (project-b (merge-pathnames "other/" workspace)))
+             (ensure-directories-exist project-b)
+             (with-open-file (s (merge-pathnames "clpm.project" project-b)
+                                :direction :output :if-exists :supersede
+                                :external-format :utf-8)
+               (let ((*print-case* :downcase))
+                 (prin1 '(:project :name "other" :version "0.1.0"
+                          :systems ("other") :registries ())
+                        s)))
+             (clpm.store:upsert-project-index-root project-a)
+             (clpm.store:upsert-project-index-root project-b)
+             ;; Paths in projects.sxp are truenamed, so compare in that domain.
+             (let* ((a-true (namestring
+                             (uiop:ensure-directory-pathname (truename project-a))))
+                    (b-true (namestring
+                             (uiop:ensure-directory-pathname (truename project-b)))))
+               (assert-true (member a-true
+                                    (clpm.store:read-project-index-roots)
+                                    :test #'string=)
+                            "expected A in index before --store (a=~S)" a-true)
+               (assert-true (member b-true
+                                    (clpm.store:read-project-index-roots)
+                                    :test #'string=)
+                            "expected B in index before --store")
+               (uiop:with-current-directory (project-a)
+                 (assert-eql 0 (clpm:run-cli '("clean" "--store"))))
+               (let ((roots (clpm.store:read-project-index-roots)))
+                 (assert-true (not (member a-true roots :test #'string=))
+                              "expected A to be untracked, roots=~S" roots)
+                 (assert-true (member b-true roots :test #'string=)
+                              "expected B to still be in index, roots=~S" roots)))))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME")))))

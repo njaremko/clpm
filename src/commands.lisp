@@ -2320,17 +2320,26 @@ to the output path; no wrapper is needed since CCL doesn't grab CLI flags."
 ;;; clean command
 
 (defun cmd-clean (&rest args)
-  "Clean project-local outputs."
+  "Clean project-local outputs.
+
+Default: remove the project's .clpm/ activation cache.
+  --dist   also remove the project's dist/ directory.
+  --store  untrack this project from projects.sxp and then GC the
+           content-addressed store. Entries still reachable from other
+           registered projects are kept (GC roots do their job)."
   (let ((clean-dist nil)
+        (clean-store nil)
         (rest args))
     (loop while rest do
       (let ((arg (pop rest)))
         (cond
           ((string= arg "--dist")
            (setf clean-dist t))
+          ((string= arg "--store")
+           (setf clean-store t))
           (t
            (log-error "Unknown option: ~A" arg)
-           (log-error "Usage: clpm clean [--dist]")
+           (log-error "Usage: clpm clean [--dist] [--store]")
            (return-from cmd-clean 1)))))
     (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
         (find-effective-project-root)
@@ -2346,8 +2355,19 @@ to the output path; no wrapper is needed since CCL doesn't grab CLI flags."
           (uiop:delete-directory-tree clpm-dir :validate t))
         (when (and clean-dist (uiop:directory-exists-p dist-dir))
           (log-info "Removing ~A" (namestring dist-dir))
-          (uiop:delete-directory-tree dist-dir :validate t))
-        0))))
+          (uiop:delete-directory-tree dist-dir :validate t)))
+      (when clean-store
+        ;; Untrack this project as a GC root, then GC. Anything still reachable
+        ;; from another registered project is preserved.
+        (handler-case
+            (clpm.store:remove-project-index-root project-root)
+          (error (c)
+            (log-error "Failed to untrack project: ~A" c)
+            (return-from cmd-clean 1)))
+        (log-info "Untracked project from GC roots: ~A" (namestring project-root))
+        (let ((deleted (clpm.store:gc-store)))
+          (log-info "Removed ~D store entr~:@P" (length (or deleted '())))))
+      0)))
 
 ;;; gc command
 
@@ -4102,9 +4122,12 @@ sub-subcommand=\"set\")."
        (p "Builds a distributable executable in dist/ based on clpm.project :package.")
        0)
       (:clean
-       (p "Usage: clpm clean [--dist]")
+       (p "Usage: clpm clean [--dist] [--store]")
        (p "")
-       (p "Removes project-local outputs. Use --dist to remove dist/ as well.")
+       (p "Removes project-local outputs.")
+       (p "  --dist   also remove dist/")
+       (p "  --store  untrack this project from projects.sxp and GC the store;")
+       (p "           entries still reachable from other registered projects stay")
        0)
       (:gc
        (p "Usage: clpm gc [--dry-run]")
