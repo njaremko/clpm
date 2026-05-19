@@ -563,8 +563,30 @@ its connection or sends an explicit `interrupt' request."))
   ctx
   ;; Mailbox the connection thread pushes `query-response' values into.
   query-mailbox
+  ;; Mailbox the connection thread pushes `debug-*' actions into when
+  ;; the worker has entered an interactive debug session.
+  debug-mailbox
+  ;; The currently-active debug-session (if any); set by the handler-bind
+  ;; that enters the debugger, cleared when the session unwinds.
+  debug-session
   result-mailbox
   thread)
+
+(defstruct debug-session
+  "Live, non-unwound debugging state. CONDITION and RESTARTS are captured
+inside the handler-bind so invoke-restart still has a valid target.
+FRAMES is a snapshot of the call stack at entry; index 0 is the most
+recent call (closest to the error)."
+  condition
+  restarts
+  ;; A vector of frame objects -- sb-di:frame on SBCL, or NIL on impls
+  ;; that don't expose them.
+  frames
+  ;; Pre-rendered JSON describing the condition (same shape %condition-json
+  ;; produces). Cached so each debug-eval-in-frame event doesn't recompute.
+  json-condition
+  ;; The eval-job this session belongs to; the action mailbox lives there.
+  job)
 
 (defstruct eval-result
   code                  ; nil on success; "eval-error" / "reader-error" / "interrupted"
@@ -902,6 +924,54 @@ likewise for `+` and `/`. Mutates `cl:*`, `cl:**`, `cl:***`, `cl:+`,
             (*print-pretty* (getf ,opt :print-pretty *print-pretty*)))
        ,@body)))
 
+(defstruct handler-spec
+  "One entry from `eval --handlers'. TYPE is a CL type specifier;
+RESTART is a symbol naming the restart to invoke; ARGS is a list of
+already-evaluated argument values."
+  type restart args)
+
+(defun %parse-handler-specs (raw package)
+  "Translate RAW (a list of JSON objects {type, restart, args}) into a
+list of handler-spec structs. ARGS forms are read+evaluated at parse
+time so the handler doesn't have to do work when a condition arrives."
+  (when raw
+    (let ((*package* (or package *package*)))
+      (loop for entry in raw
+            for type-text = (%json-getf entry "type")
+            for restart-text = (%json-getf entry "restart")
+            for args-array = (%json-getf entry "args")
+            for arg-forms = (and (consp args-array) (eq (car args-array) :array)
+                                 (cadr args-array))
+            for parsed-type = (handler-case
+                                  (and (stringp type-text)
+                                       (read-from-string type-text))
+                                (error () nil))
+            for parsed-restart = (handler-case
+                                     (and (stringp restart-text)
+                                          (read-from-string restart-text))
+                                   (error () nil))
+            for parsed-args = (handler-case
+                                  (loop for s in arg-forms
+                                        collect (eval (read-from-string
+                                                       (princ-to-string s))))
+                                (error () nil))
+            when (and parsed-type parsed-restart)
+            collect (make-handler-spec :type parsed-type
+                                       :restart parsed-restart
+                                       :args parsed-args)))))
+
+(defun %try-declarative-handler (condition specs)
+  "Walk SPECS; for the first one whose type matches CONDITION, invoke
+its restart with its args. Returns T if a handler was invoked (which
+transfers control and doesn't actually return), else NIL."
+  (dolist (spec specs nil)
+    (when (typep condition (handler-spec-type spec))
+      (let ((r (find-restart (handler-spec-restart spec) condition)))
+        (when r
+          (apply #'invoke-restart r (handler-spec-args spec))
+          ;; invoke-restart unwinds; we never reach here.
+          (return t))))))
+
 (defun %capture-error-snapshot (condition)
   "Snapshot CONDITION as JSON while the stack is still in place. If
 serialization itself fails, return a minimal fallback object so the
@@ -915,6 +985,165 @@ caller still gets *something* to attach to the eval result."
                   (cons "message"
                         (handler-case (princ-to-string condition)
                           (error () "<unprintable>"))))))))
+
+#+sbcl
+(defun %capture-frames (&key (max +max-backtrace-frames+))
+  "Walk SBCL's stack and return a list of live frame objects (length <=
+MAX). The frames stay valid only inside the handler-bind that creates
+them; once the stack unwinds they become invalid."
+  (let ((frames '())
+        (i 0))
+    (handler-case
+        (sb-debug:map-backtrace
+         (lambda (f)
+           (when (< i max)
+             (push f frames)
+             (incf i))))
+      (error () nil))
+    (nreverse frames)))
+
+#-sbcl
+(defun %capture-frames (&key max)
+  (declare (ignore max))
+  '())
+
+(defun %restart-by-name (session name)
+  "Look up a restart in SESSION by its symbol-name (case-insensitive)."
+  (find name (debug-session-restarts session)
+        :test (lambda (s r)
+                (let ((rn (restart-name r)))
+                  (and rn (string-equal s (symbol-name rn)))))))
+
+(defun %read-debug-form (form-text package)
+  "Read FORM-TEXT for a debugger sub-eval. PACKAGE is used so the parsed
+symbols resolve as the user expects."
+  (let ((*package* (or package *package*)))
+    (%read-form form-text)))
+
+#+sbcl
+(defun %eval-in-frame (session frame-index form-text)
+  "Evaluate FORM-TEXT in the lexenv of the frame at FRAME-INDEX. Returns
+an alist of result fields suitable for emit-event."
+  (let* ((frames (debug-session-frames session))
+         (frame (and frames (< frame-index (length frames))
+                     (nth frame-index frames))))
+    (cond
+      ((null frame)
+       (list (cons "error_output"
+                   (format nil "no frame ~A (have ~A)"
+                           frame-index (length frames)))))
+      (t
+       (let* ((bindings (handler-case
+                            (let ((debug-fun (sb-di:frame-debug-fun frame))
+                                  (vars '()))
+                              (when debug-fun
+                                (sb-di:do-debug-fun-vars (v debug-fun)
+                                  (let ((name (sb-di:debug-var-symbol v)))
+                                    (when name
+                                      (push (list name
+                                                  (list 'quote
+                                                        (handler-case
+                                                            (sb-di:debug-var-value v frame)
+                                                          (error () nil))))
+                                            vars)))))
+                              (nreverse vars))
+                          (error () nil)))
+              (pkg (or (and *server* (server-current-package *server*))
+                       (find-package "COMMON-LISP-USER"))))
+         (handler-case
+             (let* ((parsed-form (%read-debug-form form-text pkg))
+                    (wrapped (if bindings
+                                 `(let ,bindings ,parsed-form)
+                                 parsed-form))
+                    (out (make-string-output-stream))
+                    (err (make-string-output-stream))
+                    (values (let ((*standard-output* out)
+                                  (*error-output* err)
+                                  (*package* pkg))
+                              (multiple-value-list (eval wrapped)))))
+               (list (cons "values" (%json-array
+                                     (mapcar #'%safe-prin1 values)))
+                     (cons "value" (%safe-prin1 (first values)))
+                     (cons "output" (get-output-stream-string out))
+                     (cons "error_output" (get-output-stream-string err))))
+           (error (c)
+             (list (cons "value" nil)
+                   (cons "error_output"
+                         (princ-to-string c))))))))))
+
+#-sbcl
+(defun %eval-in-frame (session frame-index form-text)
+  (declare (ignore session frame-index form-text))
+  (list (cons "error_output" "eval-in-frame is SBCL-only")))
+
+(defun %enter-debugger (condition job)
+  "Build a debug session for CONDITION + the current restart chain and
+loop processing debug-* actions until one of them either invokes a
+restart (unwinds) or returns NIL (we let the error propagate)."
+  (let* ((ctx (eval-job-ctx job))
+         (frames (%capture-frames))
+         (restarts (compute-restarts condition))
+         (json-condition (handler-case
+                             (%condition-json condition :include-backtrace t)
+                           (error () (%capture-error-snapshot condition))))
+         (session (make-debug-session
+                   :condition condition
+                   :restarts restarts
+                   :frames frames
+                   :json-condition json-condition
+                   :job job)))
+    (setf (eval-job-debug-session job) session)
+    (when ctx
+      (%emit-event ctx "debugger-entered"
+                   "condition" json-condition))
+    (loop
+      (let ((action (clpm.repl-bridge.compat:receive-message
+                     (eval-job-debug-mailbox job))))
+        (case (first action)
+          (:invoke-restart
+           (destructuring-bind (name args-forms) (rest action)
+             (let ((restart (%restart-by-name session name)))
+               (cond
+                 ((null restart)
+                  (when ctx
+                    (%emit-event ctx "debug-error"
+                                 "message"
+                                 (format nil "no restart named ~A" name))))
+                 (t
+                  (let ((args (handler-case
+                                  (loop for f in args-forms
+                                        collect (eval (%read-debug-form
+                                                       f
+                                                       (and *server*
+                                                            (server-current-package *server*)))))
+                                (error (c)
+                                  (when ctx
+                                    (%emit-event ctx "debug-error"
+                                                 "message"
+                                                 (format nil "arg eval failed: ~A" c)))
+                                  (return-from %enter-debugger nil)))))
+                    (apply #'invoke-restart restart args)
+                    ;; invoke-restart unwinds; we never get here.
+                    (return-from %enter-debugger nil)))))))
+          (:eval-in-frame
+           (destructuring-bind (index form) (rest action)
+             (let ((result (%eval-in-frame session index form)))
+               (when ctx
+                 (apply #'%emit-event ctx "frame-eval-result"
+                        (loop for (k . v) in result
+                              append (list k v)))))))
+          (:abort
+           ;; Let the original condition unwind through the outer
+           ;; handler-case so finish(:err-condition) takes over.
+           (return-from %enter-debugger nil))
+          (:continue
+           (let ((r (find-restart 'continue condition)))
+             (when r (invoke-restart r))
+             ;; If there's no CONTINUE restart, fall through and keep
+             ;; waiting for further actions.
+             (when ctx
+               (%emit-event ctx "debug-error"
+                            "message" "no CONTINUE restart available")))))))))
 
 (defun %eval-one (form-text &key package-override options job)
   "Evaluate FORM-TEXT inside the worker. Returns an eval-result struct.
@@ -1043,19 +1272,56 @@ sessions."
                 (*standard-input* in-stream)
                 (*package* package))
             (setf redefined (%record-redefinition form package))
-            (let ((record-signals? (getf options :record-signals)))
+            (let* ((record-signals? (getf options :record-signals))
+                   (debug? (and job (getf options :debug)))
+                   (handler-specs (%parse-handler-specs
+                                   (getf options :handlers)
+                                   package))
+                   (break-on-type (and (getf options :break-on)
+                                       (handler-case
+                                           (read-from-string
+                                            (getf options :break-on))
+                                         (error () nil)))))
               (flet ((on-condition (c)
                        (cond
                          ((typep c 'user-interrupt) nil)
+                         ;; --handlers: non-interactive recovery. The
+                         ;; first matching spec invokes its restart and
+                         ;; transfers control; non-matching specs fall
+                         ;; through.
+                         ((%try-declarative-handler c handler-specs))
                          ((typep c 'error)
                           (unless error-snapshot
                             (setf error-snapshot
-                                  (%capture-error-snapshot c))))
+                                  (%capture-error-snapshot c)))
+                          ;; --debug: hand control to the interactive
+                          ;; debugger loop. It either invokes a restart
+                          ;; (unwinds out of this lambda) or returns NIL
+                          ;; (the condition propagates).
+                          (when debug?
+                            (%enter-debugger c job)))
                          (record-signals?
                           (push (%condition-json c) signaled)))))
                 (handler-bind ((condition #'on-condition))
-                  (setf returned-values
-                        (multiple-value-list (eval form))))))
+                  (let ((*break-on-signals*
+                          (or break-on-type *break-on-signals*))
+                        ;; --debug also intercepts `(break ...)`, which
+                        ;; calls invoke-debugger directly without going
+                        ;; through `signal'. ANSI says break nulls
+                        ;; *debugger-hook*, so we have to hook the SBCL-
+                        ;; specific *invoke-debugger-hook* (which break
+                        ;; leaves untouched). Setting it to our hook
+                        ;; replaces SBCL's --non-interactive quit hook
+                        ;; for the duration of the eval.
+                        #+sbcl
+                        (sb-ext:*invoke-debugger-hook*
+                          (if debug?
+                              (lambda (c hook)
+                                (declare (ignore hook))
+                                (%enter-debugger c job))
+                              sb-ext:*invoke-debugger-hook*)))
+                    (setf returned-values
+                          (multiple-value-list (eval form)))))))
             (setf package *package*)
             ;; History is updated *only* when no override was specified --
             ;; the override is per-call scoped.
@@ -1439,12 +1705,79 @@ terminal frame -- the originating eval's terminal frame is the response."
     (%error-response id "protocol-error"
                      "no in-flight query waiting on this id"))))
 
+;;; debug-* methods are also continuations. They are routed inline by
+;;; %route-debug-action; we register them here so `methods' and `help'
+;;; document the protocol.
+
+(defun %debug-orphan-error (id)
+  (%error-response id "protocol-error"
+                   "no in-flight debug session on this id"))
+
+(%register-method
+ (make-method-spec
+  :name "debug-invoke-restart"
+  :summary "Pick a restart in the active debug session."
+  :doc "Continuation: sent on the same id as an `eval' that is currently
+paused in the debugger. Required: `name' (case-insensitive). Optional:
+`args' (an array of Lisp source forms, evaluated in the worker's package
+before being passed to the restart). Has no terminal frame -- the eval's
+result/error frame is the response after the restart unwinds."
+  :params (list (list :name "name" :type "string" :required t
+                      :description "Restart name, e.g. ABORT, CONTINUE, USE-VALUE.")
+                (list :name "args" :type "array" :required nil
+                      :description "Forms to evaluate as restart arguments."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server params ctx))
+    (%debug-orphan-error id))))
+
+(%register-method
+ (make-method-spec
+  :name "debug-eval-in-frame"
+  :summary "Evaluate a form in the lexenv of a stack frame."
+  :doc "Continuation. Required: `frame' (integer index into the captured
+backtrace, 0 = innermost), `form' (Lisp source). Emits an
+`event:frame-eval-result' with `values'/`output'/`error_output'. The
+debugger session remains active afterwards."
+  :params (list (list :name "frame" :type "integer" :required t
+                      :description "Frame index; 0 is the innermost.")
+                (list :name "form" :type "string" :required t
+                      :description "Form to evaluate."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server params ctx))
+    (%debug-orphan-error id))))
+
+(%register-method
+ (make-method-spec
+  :name "debug-continue"
+  :summary "Invoke the CONTINUE restart in the active debug session."
+  :doc "Sugar over debug-invoke-restart for the CONTINUE restart
+established by `cerror' / `break'."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server params ctx))
+    (%debug-orphan-error id))))
+
+(%register-method
+ (make-method-spec
+  :name "debug-abort"
+  :summary "Abort the active debug session and unwind the eval."
+  :doc "Lets the original condition propagate; the eval's terminal frame
+becomes the v1-shape `eval-error' response."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server params ctx))
+    (%debug-orphan-error id))))
+
 (defun %parse-eval-options (params)
   "Translate v2 eval params (a `(:object ((k . v)…))') into the worker's
 plist of `:stream', `:debug', `:query-interactive', `:record-signals',
-and `:print-*' options. Unknown fields are ignored. Returns NIL when
-PARAMS is plain v1 (no v2 toggles), which keeps the worker fast-path
-identical to v1."
+`:break-on', `:handlers', and `:print-*' options. Unknown fields are
+ignored. Returns NIL when PARAMS is plain v1 (no v2 toggles), which
+keeps the worker fast-path identical to v1."
   (let ((options '()))
     (flet ((maybe-bool (key plist-key)
              (let ((v (%json-getf params key 'unset)))
@@ -1453,11 +1786,21 @@ identical to v1."
            (maybe-int (key plist-key)
              (let ((v (%json-getf params key)))
                (when (integerp v)
+                 (setf options (list* plist-key v options)))))
+           (maybe-string (key plist-key)
+             (let ((v (%json-getf params key)))
+               (when (and (stringp v) (plusp (length v)))
                  (setf options (list* plist-key v options))))))
       (maybe-bool "stream" :stream)
       (maybe-bool "debug" :debug)
       (maybe-bool "query_interactive" :query-interactive)
       (maybe-bool "record_signals" :record-signals)
+      (maybe-string "break_on" :break-on)
+      ;; "handlers" is an array of {type, restart, args} objects. We pass
+      ;; the raw array form through; the eval path translates it.
+      (let ((h (%json-getf params "handlers")))
+        (when (and (consp h) (eq (car h) :array))
+          (setf options (list* :handlers (cadr h) options))))
       (maybe-int "print_length" :print-length)
       (maybe-int "print_level"  :print-level)
       (maybe-bool "print_circle" :print-circle)
@@ -1508,12 +1851,15 @@ as a prin1 string, or NIL for `(values)')."
               (reply-box (clpm.repl-bridge.compat:make-mailbox))
               (query-box (and (getf options :query-interactive)
                               (clpm.repl-bridge.compat:make-mailbox)))
+              (debug-box (and (getf options :debug)
+                              (clpm.repl-bridge.compat:make-mailbox)))
               (job (make-eval-job
                     :form form
                     :package-override package-override
                     :options options
                     :ctx ctx
                     :query-mailbox query-box
+                    :debug-mailbox debug-box
                     :result-mailbox reply-box)))
          (when ctx
            (setf (request-context-options ctx) options))
@@ -1798,6 +2144,46 @@ the connection thread stays free to read those continuations."
                           (%error-response id code message))
       (error () nil))))
 
+(defun %route-debug-action (server cstate id method params)
+  "Continuation: a `debug-*' message arrives on the same id as an
+in-flight eval. Convert it to an action tuple and post to the eval-job's
+debug-mailbox. Returns no terminal frame -- the eval's original terminal
+frame is the response."
+  (let ((job (%lookup-in-flight cstate id)))
+    (cond
+      ((or (null job) (null (eval-job-debug-mailbox job)))
+       (%log-event (server-event-log server) "debug-action-unmatched"
+                   "id" id "method" method)
+       (%write-error-inline cstate id "protocol-error"
+                            "no in-flight debug session on this id"))
+      (t
+       (let ((action
+               (cond
+                 ((string= method "debug-invoke-restart")
+                  (let* ((name (%json-getf params "name"))
+                         (args (array-items-of-param
+                                (%json-getf params "args"))))
+                    (list :invoke-restart
+                          (and (stringp name) (string-upcase name))
+                          (or args '()))))
+                 ((string= method "debug-eval-in-frame")
+                  (let ((index (%json-getf params "frame" 0))
+                        (form (%json-getf params "form")))
+                    (list :eval-in-frame (or index 0) form)))
+                 ((string= method "debug-continue")
+                  (list :continue))
+                 ((string= method "debug-abort")
+                  (list :abort)))))
+         (clpm.repl-bridge.compat:send-message
+          (eval-job-debug-mailbox job) action)
+         (%log-event (server-event-log server) "debug-action"
+                     "id" id "action" method))))))
+
+(defun array-items-of-param (a)
+  "Extract elements from a JSON array param, or NIL if not an array."
+  (when (and (consp a) (eq (car a) :array))
+    (cadr a)))
+
 (defun %route-query-response (server cstate id params)
   "Continuation message: deliver the user's reply to the eval-job that is
 blocked on its query-mailbox."
@@ -1889,6 +2275,12 @@ with v2 toggles requiring continuations)."
           ;; Continuation: the user's reply to an `event:query'.
           ((string= method "query-response")
            (%route-query-response server cstate id params))
+          ;; Continuations: debug-* actions driving an in-flight debugger.
+          ((or (string= method "debug-invoke-restart")
+               (string= method "debug-eval-in-frame")
+               (string= method "debug-continue")
+               (string= method "debug-abort"))
+           (%route-debug-action server cstate id method params))
           ;; eval with v2 continuation toggles -> spawn a dispatcher thread.
           ((and (string= method "eval")
                 (%eval-uses-continuation? params))
