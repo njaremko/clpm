@@ -47,6 +47,11 @@
   ;;   :all        - ignore lockfile entirely (full update)
   ;;   (s1 s2 ...) - ignore lockfile preference only for the named systems
   (unlock-set nil)
+  ;; WITH-OPTIONAL controls which :optional deps are pulled into the root set:
+  ;;   nil         - skip every optional dep
+  ;;   :all        - include every optional dep declared in the manifest
+  ;;   (s1 s2 ...) - include only the named systems
+  (with-optional nil)
   (decisions nil :type list) ; alist of (system-id . release-ref)
   (constraints nil :type list) ; alist of (system-id . accumulated-constraint)
   (pending nil :type list)   ; list of system-ids to process
@@ -55,7 +60,7 @@
 
 ;;; Main solver entry point
 
-(defun solve (project registries &key lockfile unlock-set)
+(defun solve (project registries &key lockfile unlock-set with-optional)
   "Resolve dependencies for PROJECT using REGISTRIES.
 
 If LOCKFILE is provided, prefer those selections unless UNLOCK-SET says
@@ -63,12 +68,17 @@ otherwise. UNLOCK-SET is :ALL (re-resolve every system), NIL (prefer the
 lockfile for every system), or a list of system-id strings to unlock; systems
 not in the list are held at their lockfile selections.
 
+WITH-OPTIONAL selects which `:optional t` dependencies declared by the project
+manifest are pulled into the root set: NIL skips all optionals, :ALL includes
+every optional, or pass a list of system-id strings to include only those.
+
 Returns a resolution struct or signals clpm-resolve-error."
   (let ((index (clpm.registry:build-registry-index registries))
         (state (make-solver-state)))
     (setf (solver-state-index state) index
           (solver-state-lockfile state) lockfile
           (solver-state-unlock-set state) unlock-set
+          (solver-state-with-optional state) with-optional
           (solver-state-reasons state) (make-hash-table :test 'equal)
           (solver-state-extra-release-metadata state)
           (make-hash-table :test 'equal))
@@ -97,14 +107,29 @@ For pinned/local sources, registry is NIL."
 
 ;;; Root constraints
 
+(defun %optional-included-p (state dep)
+  "Decide whether a (possibly :optional) root-level DEP should join the root set."
+  (if (clpm.project:dependency-optional-p dep)
+      (let ((set (solver-state-with-optional state)))
+        (cond
+          ((eq set :all) t)
+          ((listp set)
+           (member (clpm.project:dependency-system dep) set :test #'string=))
+          (t nil)))
+      t))
+
 (defun add-root-constraints (state project)
-  "Add initial constraints from project manifest."
+  "Add initial constraints from project manifest. Optional deps are dropped
+unless explicitly opted in via the solver-state's with-optional set."
   (dolist (dep (clpm.project:project-depends project))
-    (add-dependency-constraint state dep :root))
+    (when (%optional-included-p state dep)
+      (add-dependency-constraint state dep :root)))
   (dolist (dep (clpm.project:project-dev-depends project))
-    (add-dependency-constraint state dep :dev))
+    (when (%optional-included-p state dep)
+      (add-dependency-constraint state dep :dev)))
   (dolist (dep (clpm.project:project-test-depends project))
-    (add-dependency-constraint state dep :test)))
+    (when (%optional-included-p state dep)
+      (add-dependency-constraint state dep :test))))
 
 (defun record-constraint-reason (state system-id from-label constraint)
   (let* ((reasons (solver-state-reasons state))
@@ -573,13 +598,19 @@ Prefers lockfile selection, then highest version."
 
 ;;; Generate lockfile from resolution
 
-(defun resolution-to-lockfile (resolution project registries)
-  "Convert RESOLUTION to a lockfile struct."
+(defun resolution-to-lockfile (resolution project registries
+                               &key opted-in-optionals)
+  "Convert RESOLUTION to a lockfile struct.
+
+OPTED-IN-OPTIONALS, when supplied, becomes the lockfile's persisted set of
+opted-in optional system ids; later resolves can read it back to keep the
+same optional deps without re-passing CLI flags."
   (let ((lock (clpm.project:make-lockfile
                :format 1
                :generated-at (clpm.project:rfc3339-timestamp)
                :project-name (clpm.project:project-name project)
-               :clpm-version "0.1.0")))
+               :clpm-version "0.1.0"
+               :opted-in-optionals (copy-list opted-in-optionals))))
     ;; Add registries
     (dolist (reg registries)
       (let ((kind (clpm.registry:registry-kind reg)))

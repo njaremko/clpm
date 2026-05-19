@@ -144,6 +144,18 @@ Returns (values command command-args options)."
            (push :offline options))
           ((string= arg "--insecure")
            (push :insecure options))
+          ((string= arg "--with-optional")
+           (incf i)
+           (when (>= i (length args))
+             (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                       "Missing value for ~A" arg))
+           (let ((raw (nth i args)))
+             (unless (and (stringp raw) (plusp (length raw)))
+               (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                         "Invalid value for --with-optional: ~S" raw))
+             (push (cons :with-optional raw) options)))
+          ((string= arg "--with-all-optional")
+           (push (cons :with-optional :all) options))
           ((or (string= arg "-h") (string= arg "--help"))
            (if command
                (return-from parse-args
@@ -198,7 +210,15 @@ This function must not call `sb-ext:exit` so it can be used from tests."
                 (loop for opt in options
                       when (and (consp opt) (eq (car opt) :package))
                         do (return (cdr opt))
-                      finally (return nil))))
+                      finally (return nil)))
+              (clpm.commands:*with-optional*
+                (let ((vals (loop for opt in options
+                                  when (and (consp opt) (eq (car opt) :with-optional))
+                                    collect (cdr opt))))
+                  (cond
+                    ((null vals) nil)
+                    ((member :all vals :test #'eq) :all)
+                    (t (remove-duplicates vals :test #'string=))))))
           ;; Dispatch command
           (case command
             (:help

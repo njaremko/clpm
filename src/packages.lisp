@@ -171,6 +171,7 @@
            #:lockfile-project
            #:lockfile-registries
            #:lockfile-resolved
+           #:lockfile-opted-in-optionals
            #:locked-system
            #:locked-system-id
            #:locked-system-release
@@ -347,6 +348,7 @@
            #:*jobs*
            #:*lisp*
            #:*target-package*
+           #:*with-optional*
            #:cmd-init
            #:cmd-new
            #:cmd-add

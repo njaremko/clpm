@@ -10,6 +10,11 @@
 (defvar *jobs* 1 "Number of parallel jobs")
 (defvar *lisp* nil "Selected Lisp implementation kind (:sbcl/:ccl/:ecl), from --lisp.")
 (defvar *target-package* nil "Workspace member to target (from -p/--package).")
+(defvar *with-optional* nil
+  "Optional-dep opt-in set from --with-optional flags. NIL = no flags passed
+this invocation; :all = include every :optional dep; (s1 s2 ...) = include
+only these systems. Merged with any persisted opt-in already in the lockfile
+when computing the effective set.")
 
 ;;; Helper functions
 
@@ -988,6 +993,14 @@ Roots include :depends, :dev-depends, and :test-depends."
           (pushnew sys roots :test #'string=))))
     (sort roots #'string<)))
 
+(defun %project-optional-system-ids (project)
+  "Return the set of system-ids declared as :optional in PROJECT."
+  (loop for dep in (append (clpm.project:project-depends project)
+                           (clpm.project:project-dev-depends project)
+                           (clpm.project:project-test-depends project))
+        when (clpm.project:dependency-optional-p dep)
+          collect (clpm.project:dependency-system dep)))
+
 (defun %lockfile-graph (lockfile)
   "Build a hash table mapping system-id -> sorted dependency system-id list."
   (let ((graph (make-hash-table :test 'equal)))
@@ -1002,29 +1015,43 @@ Roots include :depends, :dev-depends, and :test-depends."
   (let ((indent (make-string (* 2 depth) :initial-element #\Space)))
     (format t "~A~A~A~%" indent system-id suffix)))
 
-(defun %print-dependency-tree (roots graph &key depth-limit)
+(defun %print-dependency-tree (roots graph &key depth-limit optional-systems)
   "Print a deterministic dependency tree rooted at ROOTS.
 
-GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids."
-  (let ((expanded (make-hash-table :test 'equal)))
-    (labels ((walk (system-id depth path)
+GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
+OPTIONAL-SYSTEMS is a list of system-ids declared `:optional t` in the project
+manifest; root-level entries in that set are tagged \"(optional)\"."
+  (let ((expanded (make-hash-table :test 'equal))
+        (optional-tbl (and optional-systems
+                           (let ((h (make-hash-table :test 'equal)))
+                             (dolist (s optional-systems) (setf (gethash s h) t))
+                             h))))
+    (labels ((root-optional-p (sys)
+               (and optional-tbl (gethash sys optional-tbl)))
+             (walk (system-id depth path)
                (when (member system-id path :test #'string=)
                  (%print-tree-line depth system-id " (cycle)")
                  (return-from walk nil))
-               (multiple-value-bind (deps presentp) (gethash system-id graph)
-                 (unless presentp
-                   (%print-tree-line depth system-id " (missing from lockfile)")
-                   (return-from walk nil))
-                 (when (gethash system-id expanded)
-                   (%print-tree-line depth system-id " (*)")
-                   (return-from walk nil))
-                 (%print-tree-line depth system-id)
-                 (when (and (integerp depth-limit)
-                            (>= depth depth-limit))
-                   (return-from walk nil))
-                 (setf (gethash system-id expanded) t)
-                 (dolist (dep deps)
-                   (walk dep (1+ depth) (cons system-id path))))))
+               (let ((opt-suffix (if (and (zerop depth) (root-optional-p system-id))
+                                     " (optional)"
+                                     "")))
+                 (multiple-value-bind (deps presentp) (gethash system-id graph)
+                   (unless presentp
+                     (%print-tree-line depth system-id
+                                       (concatenate 'string " (missing from lockfile)"
+                                                    opt-suffix))
+                     (return-from walk nil))
+                   (when (gethash system-id expanded)
+                     (%print-tree-line depth system-id
+                                       (concatenate 'string " (*)" opt-suffix))
+                     (return-from walk nil))
+                   (%print-tree-line depth system-id opt-suffix)
+                   (when (and (integerp depth-limit)
+                              (>= depth depth-limit))
+                     (return-from walk nil))
+                   (setf (gethash system-id expanded) t)
+                   (dolist (dep deps)
+                     (walk dep (1+ depth) (cons system-id path)))))))
       (dolist (root roots)
         (walk root 0 '())))))
 
@@ -1079,7 +1106,8 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
               (log-info "No dependencies")
               (return-from cmd-tree 0))
             (%print-dependency-tree roots (%lockfile-graph lockfile)
-                                    :depth-limit depth-limit)
+                                    :depth-limit depth-limit
+                                    :optional-systems (%project-optional-system-ids project))
             0))))))
 
 (defun %distinct-shortest-paths (roots graph target &key (limit 10))
@@ -1189,7 +1217,8 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
             (return-from cmd-why 1))
           (let* ((project (clpm.project:read-project-file manifest-path))
                  (lockfile (clpm.project:read-lock-file lock-path))
-                 (roots (%project-root-system-ids project)))
+                 (roots (%project-root-system-ids project))
+                 (optional-systems (%project-optional-system-ids project)))
             (when (null roots)
               (log-error "No dependencies to explain")
               (return-from cmd-why 1))
@@ -1200,10 +1229,45 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
                 (return-from cmd-why 1))
               (format t "Why: ~A~%" target)
               (dolist (path paths)
-                (format t "  ~{~A~^ -> ~}~%" path))
+                (let* ((root (first path))
+                       (optional-p (member root optional-systems :test #'string=)))
+                  (format t "  ~{~A~^ -> ~}~A~%" path
+                          (if optional-p " (optional)" ""))))
               0)))))))
 
 ;;; resolve command
+
+(defun %merge-optional-sets (persisted cli)
+  "Combine the lockfile-persisted opt-in list with this invocation's CLI value.
+
+  PERSISTED is a list of system-id strings (or NIL).
+  CLI is NIL, :ALL, or a list of system-id strings.
+
+Returns a value usable directly as the solver's :with-optional argument."
+  (cond
+    ((eq cli :all) :all)
+    ((and (null cli) (null persisted)) nil)
+    (t (remove-duplicates (append (or persisted '()) (or cli '()))
+                          :test #'string=))))
+
+(defun %effective-opted-in-systems (project with-optional)
+  "Resolve WITH-OPTIONAL into the concrete list of system-ids to persist.
+
+  :ALL expands to every declared optional dep; a list is intersected with
+declared optional deps so unknown systems do not silently leak into the
+lockfile; NIL persists no opt-ins."
+  (let ((declared-optionals
+          (loop for dep in (append (clpm.project:project-depends project)
+                                   (clpm.project:project-dev-depends project)
+                                   (clpm.project:project-test-depends project))
+                when (clpm.project:dependency-optional-p dep)
+                  collect (clpm.project:dependency-system dep))))
+    (cond
+      ((eq with-optional :all) (sort (copy-list declared-optionals) #'string<))
+      ((listp with-optional)
+       (sort (intersection with-optional declared-optionals :test #'string=)
+             #'string<))
+      (t '()))))
 
 (defun cmd-resolve ()
   "Resolve dependencies and create/update lockfile."
@@ -1222,9 +1286,12 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
                (declare (ignore _build-options))
                (%canonical-sexp-sha256 (%registry-input-sexp refs))))
            (lockfile (when lock-path
-                       (ignore-errors (clpm.project:read-lock-file lock-path)))))
+                       (ignore-errors (clpm.project:read-lock-file lock-path))))
+           (persisted (and lockfile (clpm.project:lockfile-opted-in-optionals lockfile)))
+           (with-optional (%merge-optional-sets persisted *with-optional*)))
 
       (when (and lockfile
+                 (null *with-optional*)
                  (stringp (clpm.project:lockfile-project-sha256 lockfile))
                  (stringp (clpm.project:lockfile-registries-sha256 lockfile))
                  (string= (clpm.project:lockfile-project-sha256 lockfile) project-hash)
@@ -1236,9 +1303,13 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
       (let ((registries (load-project-registries project)))
         (handler-case
             (let* ((resolution (clpm.solver:solve project registries
-                                                 :lockfile lockfile))
+                                                 :lockfile lockfile
+                                                 :with-optional with-optional))
+                   (effective-opt-in
+                     (%effective-opted-in-systems project with-optional))
                    (new-lockfile (clpm.solver:resolution-to-lockfile
-                                  resolution project registries)))
+                                  resolution project registries
+                                  :opted-in-optionals effective-opt-in)))
               (setf (clpm.project:lockfile-project-sha256 new-lockfile) project-hash
                     (clpm.project:lockfile-registries-sha256 new-lockfile) registries-hash)
               (let ((lock-out (merge-pathnames "clpm.lock" project-root)))
@@ -1441,19 +1512,26 @@ deps don't churn)."
           (error (c)
             (log-error "Failed to update registry ~A: ~A"
                        (clpm.registry:registry-name reg) c))))
-      (handler-case
-          (let* ((resolution (clpm.solver:solve
-                              project registries
-                              :lockfile (when selective existing-lock)
-                              :unlock-set (if selective systems :all)))
-                 (new-lockfile (clpm.solver:resolution-to-lockfile
-                                resolution project registries))
-                 (lock-out (merge-pathnames "clpm.lock" project-root)))
-            (clpm.project:write-lock-file new-lockfile lock-out)
-            (log-info "Updated clpm.lock"))
-        (clpm.errors:clpm-resolve-error (c)
-          (log-error "~A" c)
-          (return-from cmd-update 2))))
+      (let* ((persisted (and existing-lock
+                              (clpm.project:lockfile-opted-in-optionals existing-lock)))
+             (with-optional (%merge-optional-sets persisted *with-optional*)))
+        (handler-case
+            (let* ((resolution (clpm.solver:solve
+                                project registries
+                                :lockfile (when selective existing-lock)
+                                :unlock-set (if selective systems :all)
+                                :with-optional with-optional))
+                   (effective-opt-in
+                     (%effective-opted-in-systems project with-optional))
+                   (new-lockfile (clpm.solver:resolution-to-lockfile
+                                  resolution project registries
+                                  :opted-in-optionals effective-opt-in))
+                   (lock-out (merge-pathnames "clpm.lock" project-root)))
+              (clpm.project:write-lock-file new-lockfile lock-out)
+              (log-info "Updated clpm.lock"))
+          (clpm.errors:clpm-resolve-error (c)
+            (log-error "~A" c)
+            (return-from cmd-update 2)))))
     0))
 
 ;;; repl command

@@ -56,7 +56,10 @@
   (project-sha256 nil :type (or null string))
   (registries-sha256 nil :type (or null string))
   (registries nil :type list)
-  (resolved nil :type list))
+  (resolved nil :type list)
+  ;; System-id strings the user opted into via --with-optional. Persisted so a
+  ;; later `clpm install` (without flags) keeps them in the resolved set.
+  (opted-in-optionals nil :type list))
 
 (defstruct locked-registry
   "A locked registry reference."
@@ -282,7 +285,9 @@
                (mapcar #'parse-locked-registry val)))
         (:resolved
          (setf (lockfile-resolved lock)
-               (mapcar #'parse-locked-system val)))))
+               (mapcar #'parse-locked-system val)))
+        (:opted-in-optionals
+         (setf (lockfile-opted-in-optionals lock) val))))
     lock))
 
 ;;; Serialization
@@ -350,7 +355,10 @@
                                #'string< :key #'locked-registry-name))
     :resolved ,(mapcar #'serialize-locked-system
                        (sort (copy-list (lockfile-resolved lock))
-                             #'string< :key #'locked-system-id))))
+                             #'string< :key #'locked-system-id))
+    ,@(when (lockfile-opted-in-optionals lock)
+        (list :opted-in-optionals
+              (sort (copy-list (lockfile-opted-in-optionals lock)) #'string<)))))
 
 ;;; File I/O
 
