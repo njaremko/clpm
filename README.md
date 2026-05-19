@@ -117,6 +117,55 @@ The `clpm.project` file is a data-only S-expression:
 - `(:git :url "..." :ref "...")` - Git source override
 - `(:path "../local-lib")` - Local path override
 
+### Quicklisp caveats
+
+Quicklisp does not publish a version constraint model, so CLPM has to
+synthesize one. The result is correct but mildly counter-intuitive:
+
+- **Versions are derived from the Quicklisp dist date.** A release in the
+  `quicklisp-2024-10-12` dist gets the synthetic version `20241012`. There
+  is no per-release version; every system in a given dist shares the same
+  version. This is the lever Quicklisp gives us — bumping the dist
+  updates every QL-sourced system at once.
+- **Transitive dependencies parsed from `systems.txt` get a `nil`
+  constraint** (i.e. "any version"). Quicklisp publishes the dependency
+  graph but not version constraints between systems. In practice this
+  means QL-sourced dependencies will resolve to whatever the registry has
+  available — there is no way for `bordeaux-threads` to express "I need
+  alexandria >= 1.4" from QL data alone.
+- **Mixing Quicklisp and Git registries is supported.** Constraints from
+  your `clpm.project` apply uniformly. If you write `alexandria@^1.4.0`
+  in your manifest, the solver will honor that even when alexandria
+  comes from Quicklisp; but a transitive `(alexandria nil)` from another
+  QL system will accept any version. Pin the version explicitly in your
+  manifest if you care.
+
+If you need a different version of a Quicklisp-sourced library than the
+dist provides, override it with a `(:git ...)` or `(:path ...)` source in
+your manifest.
+
+### How resolution works
+
+CLPM uses a deterministic depth-first backtracking solver (not PubGrub,
+despite some legacy comments). The rules a user needs to know:
+
+1. **System pick order is alphabetical** by system id.
+2. **Within a system, candidates are ordered highest-version-first**,
+   with the lockfile's previously-chosen version (if any) lifted to the
+   front so re-runs are stable.
+3. **`clpm update <sys>`** lifts the lockfile preference for the named
+   systems only; everything else is held at its current pin unless a
+   transitive constraint forces it to move. Unlocked systems are
+   selected first so any constraints they propagate land before still-
+   locked systems are bound.
+4. **Conflicts produce a reason chain** ("system X requires Y at A, but
+   Z requires Y at B") rather than a derivation graph. The chain is the
+   actual sequence of decisions that led to the conflict, so it's
+   reproducible even on re-runs.
+5. **Same inputs always produce the same lockfile.** The alphabetical
+   tie-break plus deterministic candidate ordering means there is no
+   timestamp / iteration-order / hash-randomization dependence anywhere.
+
 ## Commands
 
 | Command | Description |
@@ -147,7 +196,7 @@ The `clpm.project` file is a data-only S-expression:
 | `clpm gc` | Garbage collect store |
 | `clpm scripts <list\|run> ...` | Script/task runner |
 | `clpm audit [--json]` | Provenance report |
-| `clpm sbom --format cyclonedx-json` | SBOM export |
+| `clpm sbom --format <cyclonedx-json\|cyclonedx-xml\|spdx-json>` | SBOM export |
 | `clpm keys generate ...` | Key management (registry signing) |
 | `clpm publish ...` | Publish to a git-backed registry |
 
@@ -159,6 +208,10 @@ The `clpm.project` file is a data-only S-expression:
 - `-p, --package <member>` - Workspace member to target from workspace root
 - `--offline` - Fail if artifacts not cached
 - `--insecure` - Skip signature verification
+- `--fetch-retries N` - HTTP retry budget (default: 3, env: `CLPM_FETCH_RETRIES`)
+- `--fetch-timeout SECS` - Per-request timeout (default: 60, env: `CLPM_FETCH_TIMEOUT`)
+- `--with-optional <sys>` - Opt in to an optional dependency (repeatable)
+- `--with-all-optional` - Opt in to every optional dependency
 
 ## Registry Format
 
