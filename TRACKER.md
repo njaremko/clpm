@@ -18,6 +18,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - `2026-05-19` **#010 landed.** `merge-project-config` now returns a third value (effective `:lisp`) by reading `:defaults (:lisp ...)` from the global config. `effective-lisp-kind` extends its precedence chain to `CLI > project > global config defaults > :sbcl`. `clpm doctor` emits two new lines: "config: effective lisp = X (from ...)" and "config: effective build options = (...)" — useful for understanding why a particular Lisp/build configuration is being used. `test/config-merge-test.lisp` covers empty config, global-default propagation, project override, and per-key plist-merge of `:build` options.
 - `2026-05-19` **#011 landed.** `cmd-package` now branches on `effective-lisp-kind` and generates a kind-specific save form: SBCL uses `sb-ext:save-lisp-and-die` (writes `<output>.bin` plus an sh wrapper that injects `--end-runtime-options`), CCL uses `ccl:save-application :prepend-kernel t :purify t` (writes the image directly to `<output>`, chmod +x). CCL symbols are resolved at runtime via `uiop:find-symbol*` so SBCL can still compile the source. The subprocess is launched through `clpm.lisp:lisp-run-argv` so each lisp gets the right `-q/--noinform/--non-interactive/--batch` flags. ECL is explicitly rejected with "Packaging on ECL is not yet implemented" (out of scope; a future ticket can wire `c:build-program`). Package metadata now records `:lisp-kind` and `:lisp-version` so consumers can tell which image they're looking at.
 - `2026-05-19` **#014 landed.** `clpm info <sys> --all` (text mode) now emits per-candidate source kind/URL/hash/commit and license — matching the JSON branch. Output without `--all` is unchanged: still one line per candidate. `test/info-command-test.lisp` adds a `--all` case asserting both source URLs and the MIT license tag show up.
+- `2026-05-19` **#015 landed.** Added `clpm workspace remove <member>` (and updated usage/help for both `cmd-workspace`'s error path and `print-command-help :workspace`). Member name is normalized the same way as `add` (trailing slashes stripped); missing members error with the full current member list. Does NOT touch the on-disk member directory — symmetric with `add`. `test/workspace-subcommand-test.lisp` was extended with add → remove round-trip and missing-member error coverage.
 
 ## Lessons / decisions
 
@@ -271,7 +272,7 @@ The most useful overrides are probably `:lisp` (default implementation for proje
 
 ---
 
-### #015 — `[ ]` `P2` `cli` `workspace` Add `clpm workspace remove`
+### #015 — `[x]` `P2` `cli` `workspace` Add `clpm workspace remove`
 
 `src/commands.lisp:2231-2327` implements `init`, `add`, and `list`. There's no `remove`, so removing a workspace member requires hand-editing `clpm.workspace`.
 

@@ -90,7 +90,23 @@
                    (run-cli-captured '("workspace" "list"))
                  (declare (ignore _out))
                  (assert-true (not (zerop code)) "Expected workspace list to fail outside workspace")
-                 (assert-contains err "No clpm.workspace found")))))
+                 (assert-contains err "No clpm.workspace found"))))
+
+           ;; remove (normalize trailing slash, idempotency error message)
+           (assert-eql 0 (clpm:run-cli (list "workspace" "remove" "app/" "--dir" (namestring ws-root))))
+           (let* ((ws (clpm.workspace:read-workspace-file ws-path))
+                  (members (clpm.workspace:workspace-members ws)))
+             (assert-true (equal members '("lib-a"))
+                          "Expected only lib-a after remove, got: ~S" members))
+
+           ;; removing a missing member errors with current members listed
+           (multiple-value-bind (code _out err)
+               (run-cli-captured (list "workspace" "remove" "nope"
+                                       "--dir" (namestring ws-root)))
+             (declare (ignore _out))
+             (assert-true (not (zerop code)) "Expected non-zero rc for missing member")
+             (assert-contains err "not found")
+             (assert-contains err "lib-a")))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME")))))
