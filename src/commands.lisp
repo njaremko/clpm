@@ -3589,22 +3589,256 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
 
 ;;; sbom command
 
+(defun %sbom-xml-escape (s)
+  "Escape XML special characters in S for use as character data or an attribute value."
+  (with-output-to-string (out)
+    (loop for c across s do
+      (case c
+        (#\& (write-string "&amp;" out))
+        (#\< (write-string "&lt;" out))
+        (#\> (write-string "&gt;" out))
+        (#\" (write-string "&quot;" out))
+        (#\' (write-string "&apos;" out))
+        (t (write-char c out))))))
+
+(defun %sbom-spdx-id-sanitize (s)
+  "Sanitize S so it can appear in an SPDX identifier (alphanumeric, dot, dash)."
+  (with-output-to-string (out)
+    (loop for c across s do
+      (if (or (alphanumericp c) (char= c #\.) (char= c #\-))
+          (write-char c out)
+          (write-char #\- out)))))
+
+(defun %sbom-collect-components (lock registries)
+  "Return a deterministically sorted list of plists for SBOM emission.
+
+Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
+  (let ((ht (make-hash-table :test 'equal)))
+    (dolist (locked (clpm.project:lockfile-resolved lock))
+      (let* ((release (clpm.project:locked-system-release locked))
+             (name (and release (clpm.project:locked-release-name release)))
+             (version (and release (clpm.project:locked-release-version release)))
+             (src (and release (clpm.project:locked-release-source release)))
+             (sha256 (and release (clpm.project:locked-release-artifact-sha256 release)))
+             (sha1 (and src (clpm.project:locked-source-sha1 src)))
+             (url (and src (clpm.project:locked-source-url src)))
+             (kind (and src (clpm.project:locked-source-kind src)))
+             (commit (and src (clpm.project:locked-source-commit src))))
+        (when (and (stringp name) (plusp (length name))
+                   (stringp version) (plusp (length version)))
+          (setf (gethash (cons name version) ht)
+                (list :name name :version version
+                      :sha256 sha256 :sha1 sha1
+                      :url url :kind kind :commit commit)))))
+    (let ((sorted-keys
+            (sort (loop for k being the hash-keys of ht collect k)
+                  (lambda (a b)
+                    (cond
+                      ((string< (car a) (car b)) t)
+                      ((string> (car a) (car b)) nil)
+                      (t (string< (cdr a) (cdr b))))))))
+      (flet ((find-license (pkg ver)
+               (block found
+                 (dolist (reg registries)
+                   (let ((meta (ignore-errors
+                                (clpm.registry:get-release-metadata reg pkg ver))))
+                     (when meta
+                       (let ((license (clpm.registry:release-metadata-license meta)))
+                         (when (and (stringp license) (plusp (length license)))
+                           (return-from found license))))))
+                 nil)))
+        (mapcar (lambda (k)
+                  (let ((info (gethash k ht)))
+                    (append info
+                            (list :license (find-license (car k) (cdr k))))))
+                sorted-keys)))))
+
+(defun %sbom-emit-cyclonedx-json (components stream)
+  "Write COMPONENTS as a CycloneDX 1.5 JSON BOM to STREAM."
+  (labels ((safe-license (license)
+             (list :object
+                   (list (cons "license"
+                               (list :object
+                                     (list (cons "id" license)))))))
+           (component->json (info)
+             (let* ((pkg (getf info :name))
+                    (ver (getf info :version))
+                    (sha256 (getf info :sha256))
+                    (sha1 (getf info :sha1))
+                    (license (getf info :license))
+                    (hashes '()))
+               (when (and (stringp sha256) (plusp (length sha256)))
+                 (push (list :object
+                             (list (cons "alg" "SHA-256")
+                                   (cons "content" sha256)))
+                       hashes))
+               (when (and (stringp sha1) (plusp (length sha1)))
+                 (push (list :object
+                             (list (cons "alg" "SHA-1")
+                                   (cons "content" sha1)))
+                       hashes))
+               (setf hashes (nreverse hashes))
+               (let ((entries
+                       (list (cons "name" pkg)
+                             (cons "version" ver)
+                             (cons "purl" (format nil "pkg:cl/~A@~A" pkg ver)))))
+                 (when hashes
+                   (setf entries
+                         (append entries
+                                 (list (cons "hashes" (list :array hashes))))))
+                 (when (and (stringp license) (plusp (length license)))
+                   (setf entries
+                         (append entries
+                                 (list (cons "licenses"
+                                             (list :array
+                                                   (list (safe-license license))))))))
+                 (list :object entries)))))
+    (let* ((components-json (mapcar #'component->json components))
+           (bom
+             (list :object
+                   (list (cons "bomFormat" "CycloneDX")
+                         (cons "specVersion" "1.5")
+                         (cons "version" 1)
+                         (cons "metadata"
+                               (list :object
+                                     (list (cons "tools"
+                                                 (list :array
+                                                       (list (list :object
+                                                                   (list (cons "name" "clpm")
+                                                                         (cons "version" "0.1.0")))))))))
+                         (cons "components" (list :array components-json))))))
+      (clpm.io.json:write-json bom stream)
+      (terpri stream))))
+
+(defun %sbom-emit-cyclonedx-xml (components stream)
+  "Write COMPONENTS as a CycloneDX 1.5 XML BOM to STREAM."
+  (flet ((esc (s) (%sbom-xml-escape s)))
+    (format stream "<?xml version=\"1.0\" encoding=\"UTF-8\"?>~%")
+    (format stream "<bom xmlns=\"http://cyclonedx.org/schema/bom/1.5\" version=\"1\">~%")
+    (format stream "  <metadata>~%")
+    (format stream "    <tools>~%")
+    (format stream "      <tool>~%")
+    (format stream "        <name>clpm</name>~%")
+    (format stream "        <version>0.1.0</version>~%")
+    (format stream "      </tool>~%")
+    (format stream "    </tools>~%")
+    (format stream "  </metadata>~%")
+    (format stream "  <components>~%")
+    (dolist (info components)
+      (let ((pkg (getf info :name))
+            (ver (getf info :version))
+            (sha256 (getf info :sha256))
+            (sha1 (getf info :sha1))
+            (license (getf info :license)))
+        (format stream "    <component type=\"library\">~%")
+        (format stream "      <name>~A</name>~%" (esc pkg))
+        (format stream "      <version>~A</version>~%" (esc ver))
+        (format stream "      <purl>pkg:cl/~A@~A</purl>~%" (esc pkg) (esc ver))
+        (when (or (and (stringp sha256) (plusp (length sha256)))
+                  (and (stringp sha1) (plusp (length sha1))))
+          (format stream "      <hashes>~%")
+          (when (and (stringp sha256) (plusp (length sha256)))
+            (format stream "        <hash alg=\"SHA-256\">~A</hash>~%" (esc sha256)))
+          (when (and (stringp sha1) (plusp (length sha1)))
+            (format stream "        <hash alg=\"SHA-1\">~A</hash>~%" (esc sha1)))
+          (format stream "      </hashes>~%"))
+        (when (and (stringp license) (plusp (length license)))
+          (format stream "      <licenses>~%")
+          (format stream "        <license><id>~A</id></license>~%" (esc license))
+          (format stream "      </licenses>~%"))
+        (format stream "    </component>~%")))
+    (format stream "  </components>~%")
+    (format stream "</bom>~%")))
+
+(defun %sbom-emit-spdx-json (components stream &key project-name generated-at)
+  "Write COMPONENTS as an SPDX 2.3 JSON document to STREAM."
+  (let* ((doc-name (or (and (stringp project-name) (plusp (length project-name))
+                            project-name)
+                       "clpm-project"))
+         (created (or (and (stringp generated-at) (plusp (length generated-at))
+                           generated-at)
+                      "1970-01-01T00:00:00Z"))
+         (namespace (format nil "https://clpm.local/spdx/~A-~A"
+                            (%sbom-spdx-id-sanitize doc-name)
+                            (%sbom-spdx-id-sanitize created))))
+    (labels ((checksum->json (alg value)
+               (list :object
+                     (list (cons "algorithm" alg)
+                           (cons "checksumValue" value))))
+             (package->json (info)
+               (let* ((pkg (getf info :name))
+                      (ver (getf info :version))
+                      (sha256 (getf info :sha256))
+                      (sha1 (getf info :sha1))
+                      (url (getf info :url))
+                      (license (getf info :license))
+                      (kind (getf info :kind))
+                      (commit (getf info :commit))
+                      (spdx-id
+                        (format nil "SPDXRef-Package-~A-~A"
+                                (%sbom-spdx-id-sanitize pkg)
+                                (%sbom-spdx-id-sanitize ver)))
+                      (download
+                        (cond
+                          ((and (eq kind :git) (stringp url) (plusp (length url))
+                                (stringp commit) (plusp (length commit)))
+                           (format nil "git+~A@~A" url commit))
+                          ((and (stringp url) (plusp (length url))) url)
+                          (t "NOASSERTION")))
+                      (checksums '()))
+                 (when (and (stringp sha256) (plusp (length sha256)))
+                   (push (checksum->json "SHA256" sha256) checksums))
+                 (when (and (stringp sha1) (plusp (length sha1)))
+                   (push (checksum->json "SHA1" sha1) checksums))
+                 (setf checksums (nreverse checksums))
+                 (let ((entries
+                         (list (cons "SPDXID" spdx-id)
+                               (cons "name" pkg)
+                               (cons "versionInfo" ver)
+                               (cons "downloadLocation" download)
+                               (cons "filesAnalyzed" :false))))
+                   (when checksums
+                     (setf entries
+                           (append entries
+                                   (list (cons "checksums" (list :array checksums))))))
+                   (when (and (stringp license) (plusp (length license)))
+                     (setf entries
+                           (append entries
+                                   (list (cons "licenseConcluded" license)
+                                         (cons "licenseDeclared" license)))))
+                   (list :object entries)))))
+      (let ((doc
+              (list :object
+                    (list (cons "spdxVersion" "SPDX-2.3")
+                          (cons "dataLicense" "CC0-1.0")
+                          (cons "SPDXID" "SPDXRef-DOCUMENT")
+                          (cons "name" doc-name)
+                          (cons "documentNamespace" namespace)
+                          (cons "creationInfo"
+                                (list :object
+                                      (list (cons "created" created)
+                                            (cons "creators"
+                                                  (list :array
+                                                        (list "Tool: clpm-0.1.0"))))))
+                          (cons "packages"
+                                (list :array (mapcar #'package->json components)))))))
+        (clpm.io.json:write-json doc stream)
+        (terpri stream)))))
+
+(defvar *sbom-supported-formats*
+  '("cyclonedx-json" "cyclonedx-xml" "spdx-json"))
+
 (defun cmd-sbom (&rest args)
   "Generate a software bill of materials (SBOM) from the current lockfile."
   (let ((format nil)
         (output nil))
     (labels ((usage-error (fmt &rest fmt-args)
                (apply #'log-error fmt fmt-args)
-               (log-error "Usage: clpm sbom --format cyclonedx-json [--output <path>]")
+               (log-error "Usage: clpm sbom --format <~{~A~^|~}> [--output <path>]"
+                          *sbom-supported-formats*)
                (return-from cmd-sbom 1))
              (nonempty-string (s)
-               (and (stringp s) (plusp (length s))))
-             (safe-license->json (license)
-               ;; Minimal CycloneDX-compatible license entry.
-               (list :object
-                     (list (cons "license"
-                                 (list :object
-                                       (list (cons "id" license))))))))
+               (and (stringp s) (plusp (length s)))))
       ;; Parse args.
       (loop while args do
         (let ((arg (pop args)))
@@ -3620,8 +3854,10 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
             (t
              (usage-error "Unknown option: ~A" arg)))))
 
-      (unless (and (stringp format) (string= format "cyclonedx-json"))
-        (usage-error "Unsupported --format (supported: cyclonedx-json): ~S" format))
+      (unless (and (stringp format)
+                   (member format *sbom-supported-formats* :test #'string=))
+        (usage-error "Unsupported --format (supported: ~{~A~^, ~}): ~S"
+                     *sbom-supported-formats* format))
 
       (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
           (find-effective-project-root)
@@ -3677,103 +3913,33 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                         nil)))))))
           (setf registries (nreverse registries))
 
-          ;; Build unique components keyed by (name . version).
-          (let ((components-ht (make-hash-table :test 'equal)))
-            (dolist (locked (clpm.project:lockfile-resolved lock))
-              (let* ((release (clpm.project:locked-system-release locked))
-                     (name (and release (clpm.project:locked-release-name release)))
-                     (version (and release (clpm.project:locked-release-version release)))
-                     (src (and release (clpm.project:locked-release-source release)))
-                     (sha256 (and release (clpm.project:locked-release-artifact-sha256 release)))
-                     (sha1 (and src (clpm.project:locked-source-sha1 src))))
-                (when (and (stringp name) (plusp (length name))
-                           (stringp version) (plusp (length version)))
-                  (setf (gethash (cons name version) components-ht)
-                        (list :name name
-                              :version version
-                              :sha256 sha256
-                              :sha1 sha1)))))
-
-            (let ((components
-                    (sort (loop for k being the hash-keys of components-ht collect k)
-                          (lambda (a b)
-                            (cond
-                              ((string< (car a) (car b)) t)
-                              ((string> (car a) (car b)) nil)
-                              (t (string< (cdr a) (cdr b))))))))
-              (labels ((find-license (pkg ver)
-                         (block found
-                           (dolist (reg registries)
-                             (let ((meta (ignore-errors (clpm.registry:get-release-metadata reg pkg ver))))
-                               (when meta
-                                 (let ((license (clpm.registry:release-metadata-license meta)))
-                                   (when (and (stringp license) (plusp (length license)))
-                                     (return-from found license))))))
-                           nil))
-                       (component->json (pkg ver)
-                         (let* ((info (gethash (cons pkg ver) components-ht))
-                                (sha256 (getf info :sha256))
-                                (sha1 (getf info :sha1))
-                                (license (find-license pkg ver))
-                                (hashes '()))
-                           (when (and (stringp sha256) (plusp (length sha256)))
-                             (push (list :object
-                                         (list (cons "alg" "SHA-256")
-                                               (cons "content" sha256)))
-                                   hashes))
-                           (when (and (stringp sha1) (plusp (length sha1)))
-                             (push (list :object
-                                         (list (cons "alg" "SHA-1")
-                                               (cons "content" sha1)))
-                                   hashes))
-                           (setf hashes (nreverse hashes))
-                           (let ((entries
-                                   (list (cons "name" pkg)
-                                         (cons "version" ver)
-                                         (cons "purl" (format nil "pkg:cl/~A@~A" pkg ver)))))
-                             (when hashes
-                               (setf entries (append entries
-                                                     (list (cons "hashes" (list :array hashes))))))
-                             (when (and (stringp license) (plusp (length license)))
-                               (setf entries
-                                     (append entries
-                                             (list (cons "licenses"
-                                                         (list :array (list (safe-license->json license))))))))
-                             (list :object entries)))))
-
-                (let* ((components-json (mapcar (lambda (k)
-                                                  (component->json (car k) (cdr k)))
-                                                components))
-                       (bom
-                         (list :object
-                               (list (cons "bomFormat" "CycloneDX")
-                                     (cons "specVersion" "1.5")
-                                     (cons "version" 1)
-                                     (cons "metadata"
-                                           (list :object
-                                                 (list (cons "tools"
-                                                             (list :array
-                                                                   (list (list :object
-                                                                               (list (cons "name" "clpm")
-                                                                                     (cons "version" "0.1.0")))))))))
-                                     (cons "components" (list :array components-json))))))
-                  (labels ((write-to-stream (stream)
-                             (clpm.io.json:write-json bom stream)
-                             (terpri stream)))
-                    (cond
-                      ((and output (nonempty-string output))
-                       (let ((out-path (uiop:ensure-pathname (clpm.platform:expand-path output)
-                                                            :defaults (uiop:getcwd)
-                                                            :want-existing nil)))
-                         (ensure-directories-exist out-path)
-                         (with-open-file (s out-path :direction :output
-                                                   :if-exists :supersede
-                                                   :external-format :utf-8)
-                           (write-to-stream s))
-                         0))
-                      (t
-                       (write-to-stream *standard-output*)
-                       0))))))))))))
+          (let* ((components (%sbom-collect-components lock registries))
+                 (project-name (clpm.project:lockfile-project-name lock))
+                 (generated-at (clpm.project:lockfile-generated-at lock)))
+            (labels ((write-to-stream (stream)
+                       (cond
+                         ((string= format "cyclonedx-json")
+                          (%sbom-emit-cyclonedx-json components stream))
+                         ((string= format "cyclonedx-xml")
+                          (%sbom-emit-cyclonedx-xml components stream))
+                         ((string= format "spdx-json")
+                          (%sbom-emit-spdx-json components stream
+                                                :project-name project-name
+                                                :generated-at generated-at)))))
+              (cond
+                ((and output (nonempty-string output))
+                 (let ((out-path (uiop:ensure-pathname (clpm.platform:expand-path output)
+                                                      :defaults (uiop:getcwd)
+                                                      :want-existing nil)))
+                   (ensure-directories-exist out-path)
+                   (with-open-file (s out-path :direction :output
+                                               :if-exists :supersede
+                                               :external-format :utf-8)
+                     (write-to-stream s))
+                   0))
+                (t
+                 (write-to-stream *standard-output*)
+                 0)))))))))
 
 ;;; help command
 
@@ -3911,9 +4077,14 @@ sub-subcommand=\"set\")."
        (p "Show a provenance and trust report for the current lockfile.")
        0)
       (:sbom
-       (p "Usage: clpm sbom --format <cyclonedx-json> [--out <path>]")
+       (p "Usage: clpm sbom --format <cyclonedx-json|cyclonedx-xml|spdx-json> [--out <path>]")
        (p "")
        (p "Generate a software bill of materials (SBOM) from the lockfile.")
+       (p "")
+       (p "Supported formats:")
+       (p "  cyclonedx-json   CycloneDX 1.5 JSON (default-friendly, widely tooled)")
+       (p "  cyclonedx-xml    CycloneDX 1.5 XML  (same content, XML serialization)")
+       (p "  spdx-json        SPDX 2.3 JSON      (alternate schema used by many auditors)")
        0)
       (:keys
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))

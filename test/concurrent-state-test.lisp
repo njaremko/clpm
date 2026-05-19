@@ -5,6 +5,7 @@
 ;;;; locking, both lose entries under contention.
 
 (require :asdf)
+(require :sb-posix)
 (push (truename "./") asdf:*central-registry*)
 (handler-case
     (asdf:load-system :clpm :verbose nil)
@@ -17,6 +18,22 @@
 (defun fail (fmt &rest args)
   (apply #'format *error-output* (concatenate 'string "FAIL: " fmt "~%") args)
   (sb-ext:exit :code 1))
+
+;; Isolate global state. The parent picks a fresh CLPM_HOME and exports it so
+;; child workers (spawned via sb-ext:run-program inheriting posix-environ) all
+;; agree on a per-run-private projects.sxp / config.sxp. Without this the test
+;; reads the real ~/.local/share/clpm/projects.sxp and any prior CLPM usage on
+;; the machine trips the absolute-count assertions.
+(let ((argv (uiop:command-line-arguments)))
+  (unless (and argv (string= (first argv) "--worker"))
+    ;; Reseed RANDOM so the tmpdir varies between invocations (without this,
+    ;; SBCL's default state would pick the same path every run and pollute it).
+    (setf *random-state* (make-random-state t))
+    (let ((tmp (format nil "/tmp/clpm-conc-home-~A-~A/"
+                       (sb-posix:getpid)
+                       (random (expt 2 32)))))
+      (ensure-directories-exist tmp)
+      (sb-posix:setenv "CLPM_HOME" tmp 1))))
 
 ;;; ---- Worker mode: invoked by child SBCL processes ---------------------------
 
