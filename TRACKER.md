@@ -12,6 +12,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - `2026-05-19` **#012 landed.** `sha256-tree` now hashes a git-style mode token (`100644` / `100755` / `120000`) per file via `sb-posix:lstat`, so an `chmod +x` flips the digest. Symlinks now hash the link target string instead of the dereferenced contents, with `walk-files` switched to SBCL's `:resolve-symlinks nil` to preserve them through the walker. Bumped `compute-build-id` prefix `clpm-build-v1` → `clpm-build-v2` so stale cached builds don't collide with the new hash format. On non-Unix-SBCL platforms the executable bit is approximated by extension (`.bat/.cmd/.exe/.ps1/.sh`). `test/tree-mode-test.lisp` covers determinism, executable-bit flip, and symlink retargeting. Full suite 58/58 green.
 - `2026-05-19` **#006 landed.** `cmd-update` now honors its `[system ...]` arguments. `solve` accepts `:unlock-set` (`:all`, `nil`, or list-of-id strings); `ordered-candidate-refs` skips the lockfile preference for unlocked systems, and `next-pending-system` orders unlocked systems first so their freshly-chosen versions can force constraints onto still-pending dependents. `clpm update` (no args) re-resolves everything; `clpm update <sys>...` holds untargeted systems at their current versions unless a constraint forces them to move. Unknown systems exit with a non-zero rc and a clear error. `test/update-selective-test.lisp` covers targeted update, held-untargeted, full update, unknown-system error, and forced-bump. Full suite 59/59 green.
 - `2026-05-19` **#001 + #002 + #003 landed (Option A — own the design).** Renamed `src/solver/pubgrub.lisp` → `src/solver/backtrack.lisp` and updated `clpm.asd` + README to advertise "backtracking with reason-chain conflict explanations" rather than "PubGrub". File header has an explicit disclaimer documenting what the algorithm actually is (depth-first backtracking, no unit propagation, no derivation graph, no backjumping). Removed three dead `solver-state` slots — `incompatibilities`, `decision-stack`, `decision-level` — along with their snapshot/restore plumbing and the `incf`/`push` in `decide`. No behavior change (59/59 still green); the implementation is just honest about itself now. A real PubGrub implementation remains a future option but the current solver works and is documented.
+- `2026-05-19` **#004 + #005 landed.** `constraint-union` had zero callers in `src/` or `test/` and the implementation note "Simplified: just append ranges (could be merged for optimization)" tellingly admitted it didn't actually compute a union. Per the no-dead-code policy in `~/.claude/CLAUDE.md`, deleted both the function and its `:export` from `clpm.solver.constraint`. If a future caller needs union semantics, it can be reintroduced correctly (sorted, overlap-merged) at that point — there's no need to keep a broken implementation around for a hypothetical user.
 
 ## Lessons / decisions
 
@@ -73,7 +74,7 @@ Either:
 
 ---
 
-### #004 — `[ ]` `P2` `solver` `correctness` Merge overlapping ranges in `constraint-union`
+### #004 — `[x]` `P2` `solver` `correctness` Merge overlapping ranges in `constraint-union`
 
 `src/solver/constraint.lisp:156-172` concatenates ranges without merging. The comment "Simplified: just append ranges (could be merged for optimization)" is honest about the limitation. The function is currently unused (see #005), but if it becomes used, an unmerged union of `>=1.2 <1.5` and `>=1.4 <2.0` will report two ranges where one suffices, and worse, callers that iterate ranges will see double-coverage.
 
@@ -84,7 +85,7 @@ Either:
 
 ---
 
-### #005 — `[ ]` `P3` `solver` `dead-code` Decide the fate of `constraint-union`
+### #005 — `[x]` `P3` `solver` `dead-code` Decide the fate of `constraint-union`
 
 `clpm.solver.constraint:constraint-union` is exported (`src/packages.lisp:300`) and defined (`src/solver/constraint.lisp:156`) but called from nowhere in `src/` or `test/`. Either remove it (and the export) or land a caller — for example, when a system is declared by two registries with disjoint version ranges, the candidate set could be expressed as a union and reasoned about uniformly.
 

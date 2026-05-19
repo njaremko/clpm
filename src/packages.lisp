@@ -305,7 +305,6 @@
            #:parse-constraint
            #:constraint-satisfies-p
            #:constraint-intersect
-           #:constraint-union
            #:constraint-empty-p
            #:any-constraint
            #:exact-constraint

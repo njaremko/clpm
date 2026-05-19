@@ -153,24 +153,6 @@
       (make-constraint :ranges (nreverse result-ranges)
                        :pinned-source pinned))))
 
-(defun constraint-union (a b)
-  "Compute union of constraints A and B."
-  ;; Simplified: just append ranges (could be merged for optimization)
-  (make-constraint
-   :ranges (append (constraint-ranges a)
-                   (constraint-ranges b))
-   :pinned-source (cond
-                    ((and (constraint-pinned-source a)
-                          (constraint-pinned-source b)
-                          (equal (constraint-pinned-source a)
-                                 (constraint-pinned-source b)))
-                     (constraint-pinned-source a))
-                    ((constraint-pinned-source a)
-                     (constraint-pinned-source a))
-                    ((constraint-pinned-source b)
-                     (constraint-pinned-source b))
-                    (t nil))))
-
 ;;; Constraint parsing
 
 (defun parse-constraint (form)
