@@ -175,7 +175,7 @@ Build ID = sha256(
                       (case kind
                         (:sbcl (clpm.platform:sbcl-version))
                         (t (clpm.lisp:lisp-version kind)))))
-         (input (format nil "clpm-build-v1~C~A~C~A~C~A~C~A~C~A~C~A~C~A"
+         (input (format nil "clpm-build-v2~C~A~C~A~C~A~C~A~C~A~C~A~C~A"
                         #\Null
                         tree-sha256 #\Null
                         kind-str #\Null

@@ -1,5 +1,9 @@
 ;;;; crypto/sha256.lisp - Pure Common Lisp SHA256 implementation
 
+#+(and sbcl unix)
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (require :sb-posix))
+
 (in-package #:clpm.crypto.sha256)
 
 ;;; SHA-256 Constants
@@ -232,29 +236,66 @@ Returns a 32-byte array."
   (with-open-file (stream path :element-type '(unsigned-byte 8))
     (sha256-stream stream)))
 
+(defun %string-to-octets (s)
+  (map '(vector (unsigned-byte 8)) #'char-code s))
+
+(defun %read-file-octets (path)
+  (with-open-file (s path :element-type '(unsigned-byte 8))
+    (let ((data (make-array (file-length s) :element-type '(unsigned-byte 8))))
+      (read-sequence data s)
+      data)))
+
+(defun %file-tree-entry (path)
+  "Return (values mode-string content-octets) for PATH.
+
+MODE-STRING uses git's compact encoding so the executable bit and symlink
+status are part of the digest:
+  100644 = regular non-executable file
+  100755 = regular executable file (any of u/g/o +x set)
+  120000 = symbolic link (content is the link target, not the dereferenced data)
+
+On non-POSIX platforms the executable bit is approximated by extension
+(.bat/.cmd/.exe/.ps1/.sh -> 100755, everything else -> 100644)."
+  #+(and sbcl unix)
+  (let* ((ns (namestring path))
+         (st (sb-posix:lstat ns))
+         (mode (sb-posix:stat-mode st))
+         (type (logand mode sb-posix:s-ifmt)))
+    (cond
+      ((= type sb-posix:s-iflnk)
+       (values "120000" (%string-to-octets (sb-posix:readlink ns))))
+      ((or (logtest mode sb-posix:s-ixusr)
+           (logtest mode sb-posix:s-ixgrp)
+           (logtest mode sb-posix:s-ixoth))
+       (values "100755" (%read-file-octets path)))
+      (t
+       (values "100644" (%read-file-octets path)))))
+  #-(and sbcl unix)
+  (let* ((type (and (pathname-type path) (string-downcase (pathname-type path))))
+         (execp (and type (member type '("bat" "cmd" "exe" "ps1" "sh")
+                                  :test #'string=))))
+    (values (if execp "100755" "100644") (%read-file-octets path))))
+
 (defun sha256-tree (directory &key (exclude '(".git" ".hg" ".svn" ".clpm")))
   "Compute deterministic SHA-256 hash of a directory tree.
-Files are hashed in lexicographic order by path with metadata."
+Files are hashed in lexicographic order by path with metadata.
+
+Per-file format inside the hash is:
+  <rel-path> NUL <mode> NUL <size> NUL <content>
+where MODE is a git-style 6-digit octal token (see %FILE-TREE-ENTRY)."
   (let ((ctx (make-sha256-ctx))
         (files (clpm.io.fs:walk-files directory :exclude exclude)))
-    ;; Hash each file with metadata
     (dolist (file-entry files)
-      (let* ((rel-path (car file-entry))
-             (full-path (cdr file-entry))
-             (contents (with-open-file (s full-path :element-type '(unsigned-byte 8))
-                         (let ((data (make-array (file-length s)
-                                                 :element-type '(unsigned-byte 8))))
-                           (read-sequence data s)
-                           data))))
-        ;; Format: path \0 mode \0 size \0 contents
-        (sha256-update ctx (map '(vector (unsigned-byte 8)) #'char-code rel-path))
-        (sha256-update ctx #(0))  ; null separator
-        (sha256-update ctx (map '(vector (unsigned-byte 8)) #'char-code "644"))  ; mode
-        (sha256-update ctx #(0))  ; null separator
-        (sha256-update ctx (map '(vector (unsigned-byte 8)) #'char-code
-                                (princ-to-string (length contents))))
-        (sha256-update ctx #(0))  ; null separator
-        (sha256-update ctx contents)))
+      (let ((rel-path (car file-entry))
+            (full-path (cdr file-entry)))
+        (multiple-value-bind (mode contents) (%file-tree-entry full-path)
+          (sha256-update ctx (%string-to-octets rel-path))
+          (sha256-update ctx #(0))
+          (sha256-update ctx (%string-to-octets mode))
+          (sha256-update ctx #(0))
+          (sha256-update ctx (%string-to-octets (princ-to-string (length contents))))
+          (sha256-update ctx #(0))
+          (sha256-update ctx contents))))
     (sha256-final ctx)))
 
 ;;; Hex conversion

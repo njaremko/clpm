@@ -6,13 +6,18 @@
   "Return a list of pathnames for entries in DIR.
 
 This attempts to include extensionless files and dotfiles across platforms by
-combining a few DIRECTORY patterns and deduplicating results."
+combining a few DIRECTORY patterns and deduplicating results.
+
+Symlinks are preserved on SBCL via `:resolve-symlinks nil` so that tree hashing
+can encode the link target rather than the dereferenced contents."
   (let* ((dir (uiop:ensure-directory-pathname dir))
          (patterns (list "*.*" "*" ".*"))
          (seen (make-hash-table :test 'equal))
          (entries '()))
     (dolist (pat patterns)
-      (dolist (p (ignore-errors (directory (merge-pathnames pat dir))))
+      (dolist (p (ignore-errors
+                  #+sbcl (directory (merge-pathnames pat dir) :resolve-symlinks nil)
+                  #-sbcl (directory (merge-pathnames pat dir))))
         (let ((key (namestring p)))
           (unless (gethash key seen)
             (setf (gethash key seen) t)

@@ -9,12 +9,14 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - `2026-05-19` Started implementation pass. Baseline: 55 tests passing.
 - `2026-05-19` **#013 landed.** Adds `clpm.platform:with-file-lock` combining a per-path SB-THREAD mutex (intra-process) with `lockf` on a sibling `.lock` file (inter-process). Consolidated duplicated `projects.sxp` helpers from `build/driver.lisp` into `store.lisp` and exported `upsert-project-index-root`/`remove-project-index-root`/`read-project-index-roots`. Added `config.lisp:update-config` for atomic read-modify-write. `test/concurrent-state-test.lisp` covers both layers (8 child SBCL procs + 6 threads).
 - `2026-05-19` **#007 landed.** `native-requires` now flows: registry metadata → solver (`build-resolution` / `resolution-to-lockfile`) → `locked-release` struct field → lockfile serialization → `check-native-deps`. Rewrote orchestrator's `check-native-deps` to actually read `locked-release-native-requires` instead of the previous `(native-deps nil)` placeholder, with parsing for `(:kind "name")` and `(:kind . "name")` forms, dedup via hash table, and `clpm-missing-native-dep-error` raised on both unresolved deps and malformed entries. `test/native-deps-test.lisp` covers round-trip, empty, missing, and malformed cases. Full suite 57/57 green.
+- `2026-05-19` **#012 landed.** `sha256-tree` now hashes a git-style mode token (`100644` / `100755` / `120000`) per file via `sb-posix:lstat`, so an `chmod +x` flips the digest. Symlinks now hash the link target string instead of the dereferenced contents, with `walk-files` switched to SBCL's `:resolve-symlinks nil` to preserve them through the walker. Bumped `compute-build-id` prefix `clpm-build-v1` → `clpm-build-v2` so stale cached builds don't collide with the new hash format. On non-Unix-SBCL platforms the executable bit is approximated by extension (`.bat/.cmd/.exe/.ps1/.sh`). `test/tree-mode-test.lisp` covers determinism, executable-bit flip, and symlink retargeting. Full suite 58/58 green.
 
 ## Lessons / decisions
 
 - **POSIX advisory locks are per-process, not per-fd.** `lockf` (and `flock(2)` on most systems) tracked by `(pid, inode)`, so two threads inside one process see the lock as already held and don't serialize. Conclusion: lock helpers in this codebase combine a per-path Lisp mutex with the OS-level file lock. The first thread in a process acquires the kernel lock; subsequent threads queue on the mutex and find the kernel lock still held by their own process when they get their turn (no-op).
 - **SBCL `sb-posix` does not export `flock` on Darwin.** Use `lockf` (POSIX-standard, exclusive-only). Always-exclusive locks are fine since CLPM's critical sections are short.
 - **`SB-EXT` exports `wait-for`.** Test helpers should avoid the name or be defined in their own package, otherwise `defun wait-for ...` in CL-USER hits a package-lock error.
+- **SBCL's `directory` follows symlinks by default and even deduplicates by truename.** A file and a symlink pointing at it collapse to a single entry. Pass `:resolve-symlinks nil` to surface symlinks distinctly — this is required if a tree hash is to encode link targets rather than dereferenced contents.
 
 ---
 
@@ -205,7 +207,7 @@ The most useful overrides are probably `:lisp` (default implementation for proje
 
 ## Integrity
 
-### #012 — `[ ]` `P1` `integrity` `tree-hash` Capture file modes in `sha256-tree`
+### #012 — `[x]` `P1` `integrity` `tree-hash` Capture file modes in `sha256-tree`
 
 `src/crypto/sha256.lisp:235-258` hashes each file as `path \0 "644" \0 size \0 contents`. The mode string is hardcoded, so an executable bit flip on a script doesn't invalidate the cached tree. Any project that ships shell tools or pre/post-build hooks risks reusing a stale build.
 
