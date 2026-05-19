@@ -583,25 +583,199 @@ its connection or sends an explicit `interrupt' request."))
   )
 
 (defun %list-restarts ()
+  "Bare list of restart names (string form). Kept for v1 compatibility."
   (mapcar (lambda (r) (string (restart-name r))) (compute-restarts)))
 
+(defun %restart-arity (restart)
+  "Best-effort arity for the restart's interactive-function. Without one,
+return 0 (the restart takes no args), unless the restart's name suggests
+otherwise: USE-VALUE / STORE-VALUE conventionally take one arg."
+  (let* ((interactive
+           (or (sb-kernel::restart-interactive-function restart) nil))
+         (name (and (restart-name restart)
+                    (symbol-name (restart-name restart)))))
+    (cond
+      (interactive
+       (let* ((args (handler-case (sb-introspect:function-lambda-list interactive)
+                      (error () nil))))
+         (count-if (lambda (s)
+                     (and (symbolp s)
+                          (not (member s lambda-list-keywords))))
+                   args)))
+      ((member name '("USE-VALUE" "STORE-VALUE") :test #'string=) 1)
+      (t 0))))
+
+(defun %restart-json (restart)
+  "Rich serialization for one restart object."
+  (let ((name (restart-name restart)))
+    (list :object
+          (list (cons "name" (and name (symbol-name name)))
+                (cons "report" (handler-case
+                                   (with-output-to-string (s)
+                                     (let ((rf (sb-kernel::restart-report-function restart)))
+                                       (cond
+                                         (rf (funcall rf s))
+                                         (name (format s "~A" name))
+                                         (t (format s "<unnamed restart>")))))
+                                 (error () "<restart report failed>")))
+                (cons "interactive"
+                      (and (sb-kernel::restart-interactive-function restart) t))
+                (cons "args_arity"
+                      (handler-case (%restart-arity restart)
+                        (error () 0)))))))
+
+(defun %condition-slot-values (condition)
+  "Capture the slot values of CONDITION as a list of (slot-name . prin1)
+pairs. Uses MOP to find slots; falls back to an empty list when the
+implementation doesn't expose them."
+  (handler-case
+      (let* ((class (class-of condition))
+             (slots
+               #+sbcl (sb-mop:class-slots class)
+               #-sbcl nil))
+        (loop for slot in slots
+              for slot-name = #+sbcl (sb-mop:slot-definition-name slot)
+                              #-sbcl nil
+              when (and slot-name (slot-boundp condition slot-name))
+              collect (cons (symbol-name slot-name)
+                            (%safe-prin1 (slot-value condition slot-name)))))
+    (error () nil)))
+
+#+sbcl
+(defun %frame-vars (frame)
+  "Best-effort capture of FRAME's lexical variables as an alist of
+(name . prin1'd value). May return NIL when SBCL has optimized vars
+into the void."
+  (handler-case
+      (let ((debug-fun (sb-di:frame-debug-fun frame))
+            (vars '()))
+        (when debug-fun
+          (sb-di:do-debug-fun-vars (v debug-fun)
+            (let ((name (sb-di:debug-var-symbol v)))
+              (when name
+                (push (cons (symbol-name name)
+                            (handler-case
+                                (%safe-prin1
+                                 (sb-di:debug-var-value v frame))
+                              (error () "<unavailable>")))
+                      vars)))))
+        (nreverse vars))
+    (error () nil)))
+
+#+sbcl
+(defun %frame-name (frame)
+  (handler-case
+      (let* ((debug-fun (sb-di:frame-debug-fun frame))
+             (name (sb-di:debug-fun-name debug-fun)))
+        (cond
+          ((null name) "?")
+          ((symbolp name) (symbol-name name))
+          (t (princ-to-string name))))
+    (error () "?")))
+
+#+sbcl
+(defun %frame-args (frame)
+  "Best-effort prin1'd argument list. The lambda list returned by
+sb-di:debug-fun-lambda-list is a sequence whose elements are either
+debug-var objects (for required args) or keyword-tagged lists (for
+optional / keyword / rest). We render every debug-var we can value, in
+order, and stop at the first non-required element."
+  (handler-case
+      (let* ((debug-fun (sb-di:frame-debug-fun frame))
+             (lambda-list (sb-di:debug-fun-lambda-list debug-fun)))
+        (loop for item in lambda-list
+              while (sb-di:debug-var-p item)
+              collect (handler-case
+                          (%safe-prin1
+                           (sb-di:debug-var-value item frame))
+                        (error () "<unavailable>"))))
+    (error () nil)))
+
+#+sbcl
+(defun %frame-source (frame)
+  "Source location \"file:line\" for the frame, or NIL if SBCL didn't
+record one."
+  (handler-case
+      (let* ((debug-fun (sb-di:frame-debug-fun frame))
+             (source (and debug-fun
+                          (sb-di:debug-fun-name debug-fun)
+                          (handler-case
+                              (sb-introspect:find-definition-source
+                               (fdefinition (sb-di:debug-fun-name debug-fun)))
+                            (error () nil))))
+             (pathname (and source
+                            (sb-introspect:definition-source-pathname source)))
+             (form-path (and source
+                             (sb-introspect:definition-source-form-path source))))
+        (when pathname
+          (format nil "~A~@[:~A~]"
+                  (namestring pathname)
+                  (and (consp form-path) (first form-path)))))
+    (error () nil)))
+
+#+sbcl
+(defun %structured-backtrace (&key (max +max-backtrace-frames+))
+  "Walk the SBCL call stack into a list of frame plists. Bounded by MAX
+so a runaway condition can't drown the response."
+  (handler-case
+      (let ((frames '())
+            (i 0))
+        (sb-debug:map-backtrace
+         (lambda (frame)
+           (when (< i max)
+             (push (list :object
+                         (list (cons "i" i)
+                               (cons "name" (%frame-name frame))
+                               (cons "args" (%json-array
+                                             (mapcar #'identity
+                                                     (or (%frame-args frame) '()))))
+                               (cons "source" (%frame-source frame))
+                               (cons "vars"
+                                     (list :object (%frame-vars frame)))))
+                   frames)
+             (incf i))))
+        (nreverse frames))
+    (error () nil)))
+
 (defun %condition-json (condition &key include-backtrace)
+  "Rich JSON for CONDITION: type, message, report, slot values, full
+restart objects, and (when INCLUDE-BACKTRACE) a structured frame walk
+with names, args, source locations, and locals. Falls back to plain
+strings on every internal failure -- a buggy print-object on a slot
+must not block the eval response."
   (let* ((type (string (type-of condition)))
-         (msg (princ-to-string condition))
-         (entries (list (cons "type" type)
-                        (cons "message" msg)
-                        (cons "restarts" (%json-array (%list-restarts))))))
+         (msg (handler-case (princ-to-string condition)
+                (error () "<condition message unavailable>")))
+         (report (handler-case
+                     (with-output-to-string (s)
+                       (let ((*print-pretty* t))
+                         (format s "~A" condition)))
+                   (error () msg)))
+         (slot-values (%condition-slot-values condition))
+         (restarts (mapcar #'%restart-json (compute-restarts condition)))
+         (entries
+           (list (cons "type" type)
+                 (cons "message" msg)
+                 (cons "report" report)
+                 (cons "slot_values" (list :object slot-values))
+                 (cons "restarts" (%json-array restarts)))))
     (when include-backtrace
-      (let ((frames
-              (handler-case
-                  (let ((all (clpm.repl-bridge.compat:list-backtrace)))
-                    (subseq all 0 (min (length all) +max-backtrace-frames+)))
-                (error () '()))))
+      (let ((frames (or #+sbcl (%structured-backtrace)
+                        ;; Generic fallback: princ each compat-layer frame.
+                        (handler-case
+                            (let* ((all (clpm.repl-bridge.compat:list-backtrace))
+                                   (head (subseq all 0 (min (length all)
+                                                            +max-backtrace-frames+))))
+                              (loop for f in head
+                                    for i from 0
+                                    collect (list :object
+                                                  (list (cons "i" i)
+                                                        (cons "name"
+                                                              (princ-to-string f))))))
+                          (error () nil)))))
         (setf entries
               (append entries
-                      (list (cons "backtrace"
-                                  (%json-array
-                                   (mapcar #'princ-to-string frames))))))))
+                      (list (cons "backtrace" (%json-array frames)))))))
     (list :object entries)))
 
 (defun %read-form (form-text)
@@ -728,6 +902,20 @@ likewise for `+` and `/`. Mutates `cl:*`, `cl:**`, `cl:***`, `cl:+`,
             (*print-pretty* (getf ,opt :print-pretty *print-pretty*)))
        ,@body)))
 
+(defun %capture-error-snapshot (condition)
+  "Snapshot CONDITION as JSON while the stack is still in place. If
+serialization itself fails, return a minimal fallback object so the
+caller still gets *something* to attach to the eval result."
+  (handler-case
+      (%condition-json condition :include-backtrace t)
+    (error ()
+      (list :object
+            (list (cons "type" (handler-case (string (type-of condition))
+                                 (error () "?")))
+                  (cons "message"
+                        (handler-case (princ-to-string condition)
+                          (error () "<unprintable>"))))))))
+
 (defun %eval-one (form-text &key package-override options job)
   "Evaluate FORM-TEXT inside the worker. Returns an eval-result struct.
 
@@ -781,7 +969,12 @@ sessions."
          (code nil)
          (conditions '())
          (signaled '())
-         (redefined nil))
+         (redefined nil)
+         ;; Live snapshot of the failing condition's restarts + backtrace,
+         ;; captured by the handler-bind below *before* the stack unwinds
+         ;; into the handler-case error handler. Without this, %condition-json
+         ;; runs after unwind and only sees the toplevel ABORT.
+         (error-snapshot nil))
     (when (and package-override (null override-pkg))
       (let ((c (make-condition 'simple-error
                                :format-control "No such package: ~A"
@@ -804,7 +997,12 @@ sessions."
     (labels ((finish (&key err-condition)
                (when err-condition
                  (setf code "eval-error")
-                 (push (%condition-json err-condition :include-backtrace t)
+                 ;; Prefer the pre-unwind snapshot the handler-bind captured;
+                 ;; only fall back to a fresh compute if we somehow don't
+                 ;; have one (e.g., an unwind-triggered error from the outer
+                 ;; let-bindings).
+                 (push (or error-snapshot
+                           (%condition-json err-condition :include-backtrace t))
                        conditions))
                (let ((value-strings
                        (and (null code)
@@ -846,17 +1044,18 @@ sessions."
                 (*package* package))
             (setf redefined (%record-redefinition form package))
             (let ((record-signals? (getf options :record-signals)))
-              (handler-bind
-                  ((condition
-                     (lambda (c)
-                       ;; Only record non-error conditions if requested;
-                       ;; ERRORs are surfaced via the outer handler-case.
-                       (when (and record-signals?
-                                  (not (typep c 'error))
-                                  (not (typep c 'user-interrupt)))
-                         (push (%condition-json c) signaled)))))
-                (setf returned-values
-                      (multiple-value-list (eval form)))))
+              (flet ((on-condition (c)
+                       (cond
+                         ((typep c 'user-interrupt) nil)
+                         ((typep c 'error)
+                          (unless error-snapshot
+                            (setf error-snapshot
+                                  (%capture-error-snapshot c))))
+                         (record-signals?
+                          (push (%condition-json c) signaled)))))
+                (handler-bind ((condition #'on-condition))
+                  (setf returned-values
+                        (multiple-value-list (eval form))))))
             (setf package *package*)
             ;; History is updated *only* when no override was specified --
             ;; the override is per-call scoped.

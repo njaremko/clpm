@@ -123,7 +123,10 @@
                (restarts (array-items (lookup c0 "restarts"))))
           (assert-true (search "SIMPLE-ERROR" (lookup c0 "type"))
                        "expected SIMPLE-ERROR type, got ~S" (lookup c0 "type"))
-          (assert-true (find "ABORT" restarts :test #'string=)
+          ;; v2 restart shape: a list of {name, report, interactive, args_arity}
+          ;; objects. ABORT must appear by name.
+          (assert-true (find "ABORT" restarts
+                             :test (lambda (s r) (string= s (lookup r "name"))))
                        "expected ABORT restart, got ~S" restarts)
           (assert-true (consp (lookup c0 "backtrace"))
                        "expected backtrace array")))))
