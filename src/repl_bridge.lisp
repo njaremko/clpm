@@ -924,77 +924,321 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
 
 ;;; --------------------------------------------------------------------------
 ;;; Method dispatch
+;;;
+;;; +METHOD-REGISTRY+ is the single source of truth for what RPCs exist,
+;;; their parameter schemas, their documentation, and their handler
+;;; functions. %dispatch-method looks methods up here, and `methods' /
+;;; `help' RPCs serialize the same data structure so docs cannot drift
+;;; from the dispatcher.
 ;;; --------------------------------------------------------------------------
+
+(defstruct method-spec
+  "Self-describing registry entry for one RPC method.
+
+PARAMS is a list of param descriptors, each a plist with
+  :name (string) :type (\"string\" / \"object\" / \"boolean\" / \"integer\")
+  :required (boolean) :description (string).
+
+HANDLER is `(server params id ctx) -> json-response | NIL'. Returning
+NIL means the handler has already emitted its terminal frame."
+  name
+  summary
+  doc
+  params
+  handler)
+
+(defvar +method-registry+ nil
+  "Alist of (method-name . method-spec). Populated below.")
+
+(defun %register-method (spec)
+  (let ((existing (assoc (method-spec-name spec) +method-registry+
+                         :test #'string=)))
+    (cond
+      (existing (setf (cdr existing) spec))
+      (t (setf +method-registry+
+               (append +method-registry+
+                       (list (cons (method-spec-name spec) spec))))))))
+
+(defun %lookup-method (name)
+  (cdr (assoc name +method-registry+ :test #'string=)))
+
+(defun %method-spec-as-json (spec)
+  (%json-object
+   "name" (method-spec-name spec)
+   "summary" (method-spec-summary spec)
+   "doc" (method-spec-doc spec)
+   "params" (%json-array
+             (loop for p in (method-spec-params spec)
+                   collect (%json-object
+                            "name" (getf p :name)
+                            "type" (getf p :type)
+                            "required" (and (getf p :required) t)
+                            "description" (getf p :description))))))
 
 (defun %dispatch-method (server method params id &optional ctx)
   "Return a JSON response for METHOD; never raises."
-  (handler-case
+  (let ((spec (%lookup-method method)))
+    (cond
+      ((null spec)
+       (%error-response id "protocol-error"
+                        (format nil "unknown method: ~A" method)))
+      (t
+       (handler-case
+           (funcall (method-spec-handler spec) server params id ctx)
+         (error (c)
+           (%error-response id "protocol-error"
+                            (format nil "dispatch failed: ~A" c))))))))
+
+;;; ----------------------------------------------------------------------------
+;;; Registered methods
+
+(%register-method
+ (make-method-spec
+  :name "ping"
+  :summary "Liveness probe; returns the daemon pid, uptime, and lisp version."
+  :doc "Returns a small JSON object describing the daemon. No parameters.
+Useful for confirming the connection works and for detecting daemon restarts
+via the `pid' and `eval_count' fields."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore params ctx))
+    (%success-response
+     id
+     (%json-object
+      "pid" (clpm.repl-bridge.compat:getpid)
+      "uptime_ms" (* 1000 (- (get-universal-time)
+                             (server-started-at server)))
+      "lisp" (format nil "~A ~A"
+                     (lisp-implementation-type)
+                     (lisp-implementation-version))
+      "eval_count" (server-eval-count server))))))
+
+(%register-method
+ (make-method-spec
+  :name "current-package"
+  :summary "Return the persistent eval *package* as a string."
+  :doc "No parameters. Returns `{package: \"FOO\"}'."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore params ctx))
+    (%success-response
+     id (%json-object "package" (package-name (server-current-package server)))))))
+
+(%register-method
+ (make-method-spec
+  :name "set-package"
+  :summary "Set the persistent eval *package* by name."
+  :doc "Looks up the package case-insensitively. Returns the canonical name."
+  :params (list (list :name "name" :type "string" :required t
+                      :description "Package name; matched case-insensitively."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((name (%json-getf params "name"))
+           (pkg (and (stringp name) (%find-package-loose name))))
       (cond
-        ((string= method "ping")
-         (%success-response id
-          (%json-object
-           "pid" (clpm.repl-bridge.compat:getpid)
-           "uptime_ms" (* 1000 (- (get-universal-time)
-                                   (server-started-at server)))
-           "lisp" (format nil "~A ~A"
-                          (lisp-implementation-type)
-                          (lisp-implementation-version))
-           "eval_count" (server-eval-count server))))
-        ((string= method "current-package")
-         (%success-response id
-          (%json-object "package"
-                        (package-name (server-current-package server)))))
-        ((string= method "set-package")
-         (let* ((name (%json-getf params "name"))
-                (pkg (and (stringp name) (%find-package-loose name))))
-           (cond
-             ((not (stringp name))
-              (%error-response id "protocol-error" "missing `name` param"))
-             ((null pkg)
-              (%error-response id "eval-error" (format nil "No such package: ~A" name)))
-             (t
-              (setf (server-current-package server) pkg)
-              (%success-response id
-               (%json-object "package" (package-name pkg)))))))
-        ((string= method "eval")
-         (%dispatch-eval server params id ctx))
-        ((string= method "interrupt")
-         (%log-event (server-event-log server) "interrupt")
-         (%interrupt-worker server)
-         (%success-response id (%json-object)))
-        ((string= method "reset")
-         (let ((w (server-worker server)))
-           (when (and w (clpm.repl-bridge.compat:thread-alive-p (worker-thread w)))
-             (%log-event (server-event-log server) "worker-terminated")
-             (clpm.repl-bridge.compat:terminate-thread (worker-thread w)))
-           (setf (server-worker server) nil)
-           (clrhash (server-redefinitions server)))
-         (%success-response id (%json-object)))
-        ((string= method "describe")
-         (%dispatch-describe server params id))
-        ((string= method "list-redefinitions")
-         (%success-response id
-          (%json-object "entries"
-                        (%json-array
-                         (loop for v being the hash-values of
-                               (server-redefinitions server)
-                               collect (list :object v))))))
-        ((string= method "shutdown")
-         (%log-event (server-event-log server) "shutdown")
-         (setf (server-shutdown-requested? server) t)
-         ;; Wake the accept loop: close the listening socket so the blocking
-         ;; `socket-accept' returns. The accept-loop handler-case turns the
-         ;; resulting error into a graceful exit.
-         (ignore-errors
-          (when (server-socket server)
-            (sb-bsd-sockets:socket-close (server-socket server))))
-         (%success-response id (%json-object)))
+        ((not (stringp name))
+         (%error-response id "protocol-error" "missing `name` param"))
+        ((null pkg)
+         (%error-response id "eval-error"
+                          (format nil "No such package: ~A" name)))
         (t
+         (setf (server-current-package server) pkg)
+         (%success-response id
+          (%json-object "package" (package-name pkg)))))))))
+
+(%register-method
+ (make-method-spec
+  :name "eval"
+  :summary "Evaluate a Lisp form and return its values, output, and condition signals."
+  :doc "Required: `form'. Optional: `package' (per-call package override,
+non-persistent), and the v2 toggles `stream' / `debug' / `query_interactive'
+/ `record_signals' / `print_length' / `print_level' / `print_circle' /
+`print_radix' / `print_base' / `print_pretty'.
+
+The response includes `values' (a JSON array of prin1'd values),
+`value' (the primary value, retained for v1 clients), `output' /
+`error_output', `package' (post-eval), `elapsed_ms', `conditions' (any
+ERROR that unwound the form), `signaled_conditions' (non-errors, when
+`record_signals' is set), `history' (a snapshot of the REPL bindings
+*, **, ***, +, ++, +++, /, //, ///), and -- when a top-level form
+redefines something tracked -- `redefined'.
+
+With `stream: true', the daemon emits `event:stdout' / `event:stderr'
+frames as the form runs, in addition to the full `output' string in
+the terminal frame.
+
+With `query_interactive: true', any read from *standard-input* /
+*query-io* emits `event:query'; the client replies with a
+`query-response' message on the same id."
+  :params (list (list :name "form" :type "string" :required t
+                      :description "Lisp source for exactly one form.")
+                (list :name "package" :type "string" :required nil
+                      :description "Per-call package override.")
+                (list :name "stream" :type "boolean" :required nil
+                      :description "Emit incremental stdout/stderr events.")
+                (list :name "query_interactive" :type "boolean" :required nil
+                      :description "Bind *standard-input* to a bidirectional query stream.")
+                (list :name "record_signals" :type "boolean" :required nil
+                      :description "Record non-error conditions signaled during eval.")
+                (list :name "print_length" :type "integer" :required nil
+                      :description "Bind *print-length* during prin1 of values.")
+                (list :name "print_level" :type "integer" :required nil
+                      :description "Bind *print-level* during prin1 of values."))
+  :handler
+  (lambda (server params id ctx)
+    (%dispatch-eval server params id ctx))))
+
+(%register-method
+ (make-method-spec
+  :name "interrupt"
+  :summary "Signal a user-interrupt inside the worker, unwinding its current eval."
+  :doc "No parameters. Async: returns immediately. If no eval is running,
+this is a no-op."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore params ctx))
+    (%log-event (server-event-log server) "interrupt")
+    (%interrupt-worker server)
+    (%success-response id (%json-object)))))
+
+(%register-method
+ (make-method-spec
+  :name "reset"
+  :summary "Kill the worker thread and clear the redefinition log."
+  :doc "Use to recover from a runaway eval that ignored `interrupt'. The
+next eval request spawns a fresh worker; persistent package state is
+preserved across resets."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore params ctx))
+    (let ((w (server-worker server)))
+      (when (and w (clpm.repl-bridge.compat:thread-alive-p (worker-thread w)))
+        (%log-event (server-event-log server) "worker-terminated")
+        (clpm.repl-bridge.compat:terminate-thread (worker-thread w)))
+      (setf (server-worker server) nil)
+      (clrhash (server-redefinitions server)))
+    (%success-response id (%json-object)))))
+
+(%register-method
+ (make-method-spec
+  :name "describe"
+  :summary "Return the CL:DESCRIBE output for a symbol."
+  :doc "Resolves `symbol' in `package' (default: the persistent package).
+Returns `{output: <text>}'."
+  :params (list (list :name "symbol" :type "string" :required t
+                      :description "Symbol name; matched case-insensitively.")
+                (list :name "package" :type "string" :required nil
+                      :description "Package to resolve the symbol in."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-describe server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "list-redefinitions"
+  :summary "Return the running log of top-level redefinitions seen by eval."
+  :doc "Defun, defmethod, defmacro, defgeneric, defclass, defstruct, defvar,
+defparameter, defconstant, define-condition, defpackage. The log is
+cleared by `reset'."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore params ctx))
+    (%success-response
+     id
+     (%json-object "entries"
+                   (%json-array
+                    (loop for v being the hash-values of
+                          (server-redefinitions server)
+                          collect (list :object v))))))))
+
+(%register-method
+ (make-method-spec
+  :name "shutdown"
+  :summary "Ask the daemon to exit. Always returns success before unwinding."
+  :doc "Closes the listening socket; the daemon's accept loop notices and
+unwinds. Any in-flight evals are interrupted via the unwind-protect."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore params ctx))
+    (%log-event (server-event-log server) "shutdown")
+    (setf (server-shutdown-requested? server) t)
+    (ignore-errors
+     (when (server-socket server)
+       (sb-bsd-sockets:socket-close (server-socket server))))
+    (%success-response id (%json-object)))))
+
+(%register-method
+ (make-method-spec
+  :name "methods"
+  :summary "List every registered RPC with its parameter schema and one-line summary."
+  :doc "Returns `{methods: [<method-spec>, ...]}'. The list is generated
+from the same registry the dispatcher consults, so it cannot drift from
+the implementation."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server params ctx))
+    (%success-response
+     id
+     (%json-object
+      "methods"
+      (%json-array
+       (loop for entry in +method-registry+
+             collect (%method-spec-as-json (cdr entry)))))))))
+
+(%register-method
+ (make-method-spec
+  :name "help"
+  :summary "Return the long-form documentation for one RPC method."
+  :doc "Required: `method'. Returns `{method: <method-spec>}' with the full
+`doc' field. Returns a protocol-error for unknown methods."
+  :params (list (list :name "method" :type "string" :required t
+                      :description "Name of the RPC to document."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server ctx))
+    (let* ((name (%json-getf params "method"))
+           (spec (and (stringp name) (%lookup-method name))))
+      (cond
+        ((not (stringp name))
+         (%error-response id "protocol-error" "missing `method' param"))
+        ((null spec)
          (%error-response id "protocol-error"
-                          (format nil "unknown method: ~A" method))))
-    (error (c)
-      (%error-response id "protocol-error"
-                       (format nil "dispatch failed: ~A" c)))))
+                          (format nil "unknown method: ~A" name)))
+        (t
+         (%success-response id
+          (%json-object "method" (%method-spec-as-json spec)))))))))
+
+;;; query-response is a continuation message routed inline by
+;;; %route-query-response, not dispatched as a normal RPC. We still register
+;;; it here so `methods' / `help' can document the protocol.
+(%register-method
+ (make-method-spec
+  :name "query-response"
+  :summary "Continuation message: reply to a daemon `event:query'."
+  :doc "Sent on the *same* id as the in-flight eval that issued the query.
+Required: `value'. Optional: `eof' (boolean) signals end-of-input. Has no
+terminal frame -- the originating eval's terminal frame is the response."
+  :params (list (list :name "value" :type "string" :required nil
+                      :description "The string the worker's read-line returns.")
+                (list :name "eof" :type "boolean" :required nil
+                      :description "If true, the worker sees EOF on the input stream."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server params ctx))
+    ;; If we ever reach here it's because the connection thread routed
+    ;; this as a fresh request rather than a continuation -- which means
+    ;; there's no matching in-flight eval. Return an error.
+    (%error-response id "protocol-error"
+                     "no in-flight query waiting on this id"))))
 
 (defun %parse-eval-options (params)
   "Translate v2 eval params (a `(:object ((k . v)…))') into the worker's
@@ -1074,6 +1318,10 @@ as a prin1 string, or NIL for `(values)')."
                     :result-mailbox reply-box)))
          (when ctx
            (setf (request-context-options ctx) options))
+         ;; Register *before* posting to the worker so a continuation
+         ;; message racing with `event:query' still finds the job.
+         (when (and ctx (request-context-cstate ctx))
+           (%register-in-flight (request-context-cstate ctx) id job))
          (incf (server-eval-count server))
          (clpm.repl-bridge.compat:send-message mailbox job)
          (let ((result (clpm.repl-bridge.compat:receive-message reply-box)))
@@ -1227,10 +1475,47 @@ thread sees the same instance; only one daemon may run per process."
 ;;; writes from any thread.
 ;;; --------------------------------------------------------------------------
 
+(defstruct connection-state
+  "Per-connection routing state. The connection thread is the *only* reader
+of STREAM; any thread may write under STREAM-MUTEX. IN-FLIGHT maps the
+ids of in-progress requests (currently: evals that opt in to continuation
+messages like `query-response') to their eval-job, so a continuation
+frame the connection thread reads can be routed to the worker that's
+blocked on the corresponding mailbox."
+  stream
+  stream-mutex
+  ;; hash-table: id (any equalp-able JSON scalar) -> eval-job
+  in-flight
+  in-flight-mutex)
+
+(defun %make-connection-state (stream)
+  (make-connection-state
+   :stream stream
+   :stream-mutex (clpm.repl-bridge.compat:make-mutex
+                  :name "clpm.repl-bridge.conn-stream")
+   :in-flight (make-hash-table :test #'equal)
+   :in-flight-mutex (clpm.repl-bridge.compat:make-mutex
+                     :name "clpm.repl-bridge.in-flight")))
+
+(defun %register-in-flight (cstate id job)
+  (clpm.repl-bridge.compat:with-mutex ((connection-state-in-flight-mutex cstate))
+    (setf (gethash id (connection-state-in-flight cstate)) job)))
+
+(defun %unregister-in-flight (cstate id)
+  (clpm.repl-bridge.compat:with-mutex ((connection-state-in-flight-mutex cstate))
+    (remhash id (connection-state-in-flight cstate))))
+
+(defun %lookup-in-flight (cstate id)
+  (clpm.repl-bridge.compat:with-mutex ((connection-state-in-flight-mutex cstate))
+    (gethash id (connection-state-in-flight cstate))))
+
 (defstruct request-context
   server
   stream
   stream-mutex
+  ;; Connection-state, for the in-flight table. May be NIL when the request
+  ;; isn't a candidate for continuation routing.
+  cstate
   id
   ;; Plist of v2 opt-ins parsed out of the request params (:stream, :debug,
   ;; :query-interactive, :handlers, ...). NIL for v1 requests.
@@ -1276,8 +1561,7 @@ so any straggling events from a background thread are dropped."
                         :buffering :line
                         :external-format :utf-8
                         :element-type 'character))
-         (stream-mutex (clpm.repl-bridge.compat:make-mutex
-                        :name "clpm.repl-bridge.conn-stream")))
+         (cstate (%make-connection-state stream)))
     (loop
       (let ((line (handler-case
                       (%read-request-line stream)
@@ -1285,7 +1569,8 @@ so any straggling events from a background thread are dropped."
                       (%log-event (server-event-log server)
                                   "request-parse-error"
                                   "error" (princ-to-string c))
-                      (clpm.repl-bridge.compat:with-mutex (stream-mutex)
+                      (clpm.repl-bridge.compat:with-mutex
+                          ((connection-state-stream-mutex cstate))
                         (handler-case
                             (%write-line-json
                              stream
@@ -1297,25 +1582,94 @@ so any straggling events from a background thread are dropped."
         (cond
           ((eq line :continue))             ; soft-recover from a bad line
           ((null line) (return))            ; EOF: client closed cleanly
-          (t (%handle-one-request server stream stream-mutex line)))))))
+          (t (%handle-incoming-line server cstate line)))))))
 
-(defun %handle-one-request (server stream stream-mutex line)
-  "Parse one request line, dispatch it, and emit the terminal frame.
-A dispatcher that emits its own events (eval --stream, debugger, ...)
-returns NIL; this function only writes a terminal frame when dispatch
-returned a non-NIL JSON object."
+(defun %eval-uses-continuation? (params)
+  "Does this eval request opt into continuation messages (query-response,
+debug-invoke-restart, ...)? Such requests must run in their own thread so
+the connection thread stays free to read those continuations."
+  (and params
+       (or (%json-getf params "query_interactive")
+           (%json-getf params "debug"))))
+
+(defun %write-error-inline (cstate id code message)
+  (clpm.repl-bridge.compat:with-mutex ((connection-state-stream-mutex cstate))
+    (handler-case
+        (%write-line-json (connection-state-stream cstate)
+                          (%error-response id code message))
+      (error () nil))))
+
+(defun %route-query-response (server cstate id params)
+  "Continuation message: deliver the user's reply to the eval-job that is
+blocked on its query-mailbox."
+  (let ((job (%lookup-in-flight cstate id)))
+    (cond
+      ((or (null job) (null (eval-job-query-mailbox job)))
+       (%log-event (server-event-log server) "query-response-unmatched"
+                   "id" id)
+       (%write-error-inline cstate id "protocol-error"
+                            "no in-flight query waiting on this id"))
+      (t
+       (let* ((eof? (%json-getf params "eof"))
+              (raw-value (%json-getf params "value"))
+              (value (cond
+                       (eof? :eof)
+                       ((stringp raw-value) raw-value)
+                       ((null raw-value) "")
+                       (t (princ-to-string raw-value)))))
+         (clpm.repl-bridge.compat:send-message
+          (eval-job-query-mailbox job)
+          value)
+         ;; query-response has no terminal frame of its own.
+         (%log-event (server-event-log server) "query-response"
+                     "id" id))))))
+
+(defun %dispatch-and-finalize (server cstate id method params)
+  "Run %dispatch-method, log the response, and emit the terminal frame.
+Used by both the inline path and the threaded path."
+  (let* ((ctx (make-request-context :server server
+                                    :stream (connection-state-stream cstate)
+                                    :stream-mutex (connection-state-stream-mutex cstate)
+                                    :cstate cstate
+                                    :id id
+                                    :options params))
+         (start (get-internal-real-time))
+         (response (handler-case
+                       (%dispatch-method server method params id ctx)
+                     (error (c)
+                       (%error-response id "protocol-error"
+                                        (format nil "dispatch failed: ~A" c)))))
+         (elapsed (round (* 1000.0
+                            (/ (- (get-internal-real-time) start)
+                               internal-time-units-per-second))))
+         (err (and (consp response)
+                   (eq (car response) :object)
+                   (cdr (assoc "error" (cadr response)
+                               :test #'string=)))))
+    (%log-event (server-event-log server) "response"
+                "id" id "method" method
+                "elapsed_ms" elapsed
+                "error" (and err
+                             (cdr (assoc "code" (cadr err)
+                                         :test #'string=))))
+    ;; Dispatchers that pump their own events return NIL after emitting
+    ;; their terminal frame directly. Otherwise we emit it.
+    (when response
+      (%emit-terminal ctx response))
+    (%unregister-in-flight cstate id)))
+
+(defun %handle-incoming-line (server cstate line)
+  "Parse one line off the connection. Continuation messages (query-response,
+...) are routed inline and produce no terminal frame. New requests are
+either dispatched inline (fast RPCs) or in a dedicated thread (`eval'
+with v2 toggles requiring continuations)."
   (handler-case
       (let* ((request (handler-case
                           (clpm.io.json:read-json-from-string line)
                         (error (c)
-                          (clpm.repl-bridge.compat:with-mutex (stream-mutex)
-                            (handler-case
-                                (%write-line-json
-                                 stream
-                                 (%error-response nil "protocol-error"
-                                                  (princ-to-string c)))
-                              (error () nil)))
-                          (return-from %handle-one-request))))
+                          (%write-error-inline cstate nil "protocol-error"
+                                               (princ-to-string c))
+                          (return-from %handle-incoming-line))))
              (id (%json-getf request "id"))
              (method (%json-getf request "method"))
              (params (%json-getf request "params"))
@@ -1323,61 +1677,43 @@ returned a non-NIL JSON object."
              (expected-token (and transport (transport-token transport))))
         (cond
           ((not (stringp method))
-           (%log-event (server-event-log server) "request-invalid"
-                       "id" id)
-           (clpm.repl-bridge.compat:with-mutex (stream-mutex)
-             (handler-case
-                 (%write-line-json
-                  stream (%error-response id "protocol-error"
-                                          "missing `method'"))
-               (error () nil))))
+           (%log-event (server-event-log server) "request-invalid" "id" id)
+           (%write-error-inline cstate id "protocol-error" "missing `method'"))
           ((and expected-token
                 (let ((tok (%json-getf params "token")))
                   (or (not (stringp tok))
                       (not (%constant-string= tok expected-token)))))
            (%log-event (server-event-log server) "auth-rejected"
                        "id" id "method" method)
-           (clpm.repl-bridge.compat:with-mutex (stream-mutex)
-             (handler-case
-                 (%write-line-json
-                  stream (%error-response id "protocol-error"
-                                          "missing or invalid `token`"))
-               (error () nil))))
+           (%write-error-inline cstate id "protocol-error"
+                                "missing or invalid `token`"))
+          ;; Continuation: the user's reply to an `event:query'.
+          ((string= method "query-response")
+           (%route-query-response server cstate id params))
+          ;; eval with v2 continuation toggles -> spawn a dispatcher thread.
+          ((and (string= method "eval")
+                (%eval-uses-continuation? params))
+           (%log-event (server-event-log server) "request"
+                       "id" id "method" method)
+           (clpm.repl-bridge.compat:make-thread
+            (lambda ()
+              (handler-case
+                  (%dispatch-and-finalize server cstate id method params)
+                (error (c)
+                  (%log-event (server-event-log server)
+                              "dispatch-thread-error"
+                              "id" id "error" (princ-to-string c))
+                  (%write-error-inline cstate id "protocol-error"
+                                       (princ-to-string c))
+                  (%unregister-in-flight cstate id))))
+            :name "clpm.repl-bridge.dispatch"))
           (t
            (%log-event (server-event-log server) "request"
                        "id" id "method" method)
-           (let* ((ctx (make-request-context :server server
-                                             :stream stream
-                                             :stream-mutex stream-mutex
-                                             :id id
-                                             :options params))
-                  (start (get-internal-real-time))
-                  (response (%dispatch-method server method params id ctx))
-                  (elapsed (round (* 1000.0
-                                     (/ (- (get-internal-real-time) start)
-                                        internal-time-units-per-second))))
-                  (err (and (consp response)
-                            (eq (car response) :object)
-                            (cdr (assoc "error" (cadr response)
-                                        :test #'string=)))))
-             (%log-event (server-event-log server) "response"
-                         "id" id "method" method
-                         "elapsed_ms" elapsed
-                         "error" (and err
-                                       (cdr (assoc "code" (cadr err)
-                                                   :test #'string=))))
-             ;; Dispatchers that pump their own events return NIL after
-             ;; emitting their terminal frame directly. Only write a
-             ;; terminal frame here for the v1-style RESPONSE return value.
-             (when response
-               (%emit-terminal ctx response))))))
+           (%dispatch-and-finalize server cstate id method params))))
     (error (c)
-      (clpm.repl-bridge.compat:with-mutex (stream-mutex)
-        (handler-case
-            (%write-line-json
-             stream (%error-response nil "protocol-error"
-                                     (princ-to-string c)))
-          (error () nil))))))
+      (%write-error-inline cstate nil "protocol-error"
+                           (princ-to-string c)))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Client
