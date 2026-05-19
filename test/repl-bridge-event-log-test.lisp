@@ -77,14 +77,16 @@
     (let ((events (read-log-events log)))
       (assert-true (plusp (length events))
                    "log is empty: ~A" log)
-      ;; First event should be `start' with the pid+socket fields.
+      ;; First event should be `start' with the pid+transport fields.
       (let ((first (first events)))
         (assert-true (string= "start" (event-type first))
                      "first event is not `start': ~S" first)
         (assert-true (integerp (event-field first "pid"))
                      "start event has no pid")
-        (assert-true (stringp (event-field first "socket"))
-                     "start event has no socket path"))
+        (assert-true (stringp (event-field first "transport"))
+                     "start event has no transport")
+        (assert-true (stringp (event-field first "path"))
+                     "start event has no path"))
       ;; jq-able: each event-line is a complete JSON object with a `ts' and
       ;; `event' field.
       (dolist (e events)

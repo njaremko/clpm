@@ -331,6 +331,23 @@
            #:resolution-to-lockfile
            #:conflict-explanation))
 
+(defpackage #:clpm.repl-bridge.compat
+  (:use #:cl)
+  (:export #:host-impl
+           #:make-thread
+           #:interrupt-thread
+           #:thread-alive-p
+           #:terminate-thread
+           #:join-thread
+           #:make-mutex
+           #:call-with-mutex
+           #:with-mutex
+           #:make-mailbox
+           #:send-message
+           #:receive-message
+           #:getpid
+           #:list-backtrace))
+
 (defpackage #:clpm.repl-bridge
   (:use #:cl #:clpm.log #:clpm.errors)
   (:export #:start-server

@@ -50,6 +50,7 @@
       :components
       ((:file "driver")
        (:file "orchestrator")))
+     (:file "repl_bridge_compat")
      (:file "repl_bridge")
      (:file "commands")
      (:file "main")))))

@@ -521,7 +521,7 @@ Backtrace in `eval-error` responses is the first 16 stack frames, skipping bridg
 - `ping` round-trip is under 5 ms wall-clock on localhost.
 - An `eval-error` includes `error.backtrace` as an array of up to 16 strings, none beginning with `CLPM.REPL-BRIDGE::` or `SB-IMPL::`.
 
-### #024 — `[ ]` `P3` `repl-bridge` `cross-platform` Windows TCP fallback
+### #024 — `[x]` `P3` `repl-bridge` `cross-platform` Windows TCP fallback
 
 Windows lacks Unix domain sockets (until very recent builds). Fall back to a loopback TCP socket bound to `127.0.0.1` on a random ephemeral port; write `.clpm/repl-bridge.port` containing the port and a 32-hex-char shared token. Every request must include `"token": "..."` in its params; daemon rejects requests without the matching token.
 
@@ -567,7 +567,7 @@ Lets the user (or LLM via `Bash(rg <error> .clpm/repl-bridge.log)`) see what's b
 - One-line-per-event format; `jq` can consume the log.
 - Log rotates after 10 MB (rename to `.1`, start fresh).
 
-### #028 — `[ ]` `P3` `repl-bridge` `cross-impl` CCL/ECL support
+### #028 — `[x]` `P3` `repl-bridge` `cross-impl` CCL/ECL support
 
 The bridge core is SBCL-specific in two places: thread interrupt (`sb-thread:interrupt-thread`) and socket binding (`sb-bsd-sockets`). Generalize:
 

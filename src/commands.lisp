@@ -1603,10 +1603,24 @@ deps don't churn)."
 ;;; accept loop. `eval' auto-spawns a `serve --detach' child if no daemon is
 ;;; running, then sends one eval request.
 
+(defun %bridge-windows-p ()
+  "Are we running on Windows? Bridge picks TCP transport when true."
+  (and (find-package "UIOP/OS")
+       (fboundp (find-symbol "OS-WINDOWS-P" "UIOP/OS"))
+       (funcall (find-symbol "OS-WINDOWS-P" "UIOP/OS"))))
+
 (defun %bridge-paths (project-root)
-  "Return (values sock-path pid-path log-path) for PROJECT-ROOT."
-  (let ((dir (merge-pathnames ".clpm/" project-root)))
-    (values (namestring (merge-pathnames "repl-bridge.sock" dir))
+  "Return (values endpoint pid-path log-path) for PROJECT-ROOT.
+
+ENDPOINT is the per-project advertisement file passed to start-server and
+send-request. On Unix that's `.clpm/repl-bridge.sock' (the bound Unix
+socket); on Windows that's `.clpm/repl-bridge.port' (a two-line file
+giving the loopback port and a 32-hex shared token)."
+  (let* ((dir (merge-pathnames ".clpm/" project-root))
+         (endpoint-name (if (%bridge-windows-p)
+                            "repl-bridge.port"
+                            "repl-bridge.sock")))
+    (values (namestring (merge-pathnames endpoint-name dir))
             (namestring (merge-pathnames "repl-bridge.pid" dir))
             (namestring (merge-pathnames "repl-bridge.log" dir)))))
 
@@ -1781,9 +1795,16 @@ because the daemon couldn't come up."
            (%bridge-load-project project-root))
          (unwind-protect
               (handler-case
-                  (progn
-                    (clpm.repl-bridge:start-server :socket-path sock
-                                                   :log-path log)
+                  (let ((tcp-p (%bridge-windows-p)))
+                    (if tcp-p
+                        (clpm.repl-bridge:start-server
+                         :transport-kind :tcp
+                         :port-path sock
+                         :log-path log)
+                        (clpm.repl-bridge:start-server
+                         :transport-kind :unix
+                         :socket-path sock
+                         :log-path log))
                     0)
                 (error (c)
                   (format *error-output* "daemon crashed: ~A~%" c)

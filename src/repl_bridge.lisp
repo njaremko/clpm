@@ -10,9 +10,9 @@
 ;;;;   send-request    -- one-shot client helper
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (require :sb-bsd-sockets)
-  (require :sb-concurrency)
-  (require :sb-posix))
+  #+sbcl (require :sb-bsd-sockets)
+  #+sbcl (require :sb-concurrency)
+  #+sbcl (require :sb-posix))
 
 (in-package #:clpm.repl-bridge)
 
@@ -130,14 +130,168 @@ possibly-truncated text."
        text))))
 
 ;;; --------------------------------------------------------------------------
+;;; Transport: Unix socket vs. TCP loopback
+;;;
+;;; Unix sockets are the preferred transport: mode-0600 on the file system
+;;; gives us free authentication (only the project owner's processes can
+;;; connect). Windows lacked AF_UNIX until recent builds, so we fall back to
+;;; a loopback TCP socket on a random ephemeral port and authenticate via a
+;;; 32-hex-char shared token written to `.clpm/repl-bridge.port'.
+;;; --------------------------------------------------------------------------
+
+(defstruct transport
+  "Listener configuration shared between server and client.
+
+KIND is :unix or :tcp.
+PATH is the filesystem path the transport advertises:
+  - :unix -> the Unix-domain socket file (mode 0600)
+  - :tcp  -> the `.clpm/repl-bridge.port' file containing `<port>~%<token>~%'
+TOKEN is a 32-hex-char shared secret, used only with :tcp.
+LISTENER and PORT are filled in once the listener is opened."
+  (kind :unix :type (member :unix :tcp))
+  (path "" :type string)
+  (token nil :type (or null string))
+  (listener nil)
+  (port nil :type (or null (integer 0 65535))))
+
+(defun %default-transport-kind ()
+  "Pick the right transport for the host. Unix everywhere except Windows."
+  (if (and (find-package "UIOP/OS")
+           (fboundp (find-symbol "OS-WINDOWS-P" "UIOP/OS"))
+           (funcall (find-symbol "OS-WINDOWS-P" "UIOP/OS")))
+      :tcp
+      :unix))
+
+(defun %random-token ()
+  "Return a 32-hex-char shared secret used for TCP transport authentication.
+The token is generated from `clpm.platform:secure-random-bytes' (which reads
+from /dev/urandom on Unix), so guessing it costs 2^128."
+  (clpm.crypto.sha256:bytes-to-hex
+   (clpm.platform:secure-random-bytes 16)))
+
+(defun %constant-string= (a b)
+  "String equality that doesn't short-circuit on the first mismatch. Used for
+token comparison so a remote attacker can't reconstruct the token byte-by-byte
+from response timings. Returns NIL on length mismatch (also constant-time
+within the longer string)."
+  (declare (type (or null string) a b))
+  (cond
+    ((or (null a) (null b)) (eq a b))
+    ((/= (length a) (length b)) nil)
+    (t
+     (let ((diff 0))
+       (declare (type fixnum diff))
+       (loop for i fixnum from 0 below (length a)
+             do (setf diff (logior diff (logxor (char-code (char a i))
+                                                (char-code (char b i))))))
+       (zerop diff)))))
+
+(defun %write-port-file (path port token)
+  (with-open-file (s path :direction :output
+                          :if-exists :supersede
+                          :if-does-not-exist :create
+                          :external-format :utf-8)
+    (format s "~D~%~A~%" port token))
+  ;; Restrict the port file to the owner: it leaks the auth token. POSIX
+  ;; mode bits are a no-op on Windows; we attempt the call only where
+  ;; sb-posix is available.
+  #+sbcl (handler-case (sb-posix:chmod path #o600) (error () nil))
+  #-sbcl path)
+
+(defun %read-port-file (path)
+  "Return (values port token) from PATH, or signal an error."
+  (with-open-file (s path :direction :input :external-format :utf-8)
+    (let* ((port-line (read-line s nil nil))
+           (token-line (read-line s nil nil))
+           (port (and port-line (parse-integer (string-trim '(#\Space #\Newline #\Return) port-line)
+                                                :junk-allowed nil))))
+      (unless (and (integerp port) (stringp token-line))
+        (error "Invalid port file ~A" path))
+      (values port (string-trim '(#\Space #\Newline #\Return) token-line)))))
+
+(defun %open-listener (transport)
+  "Open and bind the listening socket described by TRANSPORT. Stores the
+socket (and, for :tcp, the bound port) back into the struct. For :tcp, also
+writes the port file."
+  (ecase (transport-kind transport)
+    (:unix
+     (let ((sock (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+       (ignore-errors (delete-file (transport-path transport)))
+       (sb-bsd-sockets:socket-bind sock (transport-path transport))
+       #+sbcl
+       (handler-case (sb-posix:chmod (transport-path transport) #o600)
+         (error () nil))
+       (sb-bsd-sockets:socket-listen sock 8)
+       (setf (transport-listener transport) sock)))
+    (:tcp
+     (let ((sock (make-instance 'sb-bsd-sockets:inet-socket
+                                :type :stream :protocol :tcp)))
+       ;; Bind to localhost on a kernel-assigned ephemeral port.
+       (sb-bsd-sockets:socket-bind sock #(127 0 0 1) 0)
+       (multiple-value-bind (addr port) (sb-bsd-sockets:socket-name sock)
+         (declare (ignore addr))
+         (setf (transport-port transport) port))
+       (sb-bsd-sockets:socket-listen sock 8)
+       (setf (transport-listener transport) sock)
+       (%write-port-file (transport-path transport)
+                         (transport-port transport)
+                         (or (transport-token transport)
+                             (setf (transport-token transport)
+                                   (%random-token)))))))
+  transport)
+
+(defun %close-listener (transport)
+  "Close the listening socket and remove the advertise file."
+  (when (transport-listener transport)
+    (ignore-errors (sb-bsd-sockets:socket-close (transport-listener transport)))
+    (setf (transport-listener transport) nil))
+  (ignore-errors (delete-file (transport-path transport))))
+
+(defun %connect-transport (kind path &key (timeout-seconds 5))
+  "Open a connected stream socket. For :unix, PATH is the socket path. For
+:tcp, PATH is the port file path; the port and token are read from it.
+Returns (values socket token) where TOKEN is non-NIL only for :tcp.
+
+Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
+  (let ((deadline (+ (get-internal-real-time)
+                     (* timeout-seconds internal-time-units-per-second))))
+    (loop
+      (handler-case
+          (return
+            (ecase kind
+              (:unix
+               (let ((s (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+                 (sb-bsd-sockets:socket-connect s path)
+                 (values s nil)))
+              (:tcp
+               (multiple-value-bind (port token) (%read-port-file path)
+                 (let ((s (make-instance 'sb-bsd-sockets:inet-socket
+                                         :type :stream :protocol :tcp)))
+                   (sb-bsd-sockets:socket-connect s #(127 0 0 1) port)
+                   (values s token))))))
+        (error ()
+          (when (>= (get-internal-real-time) deadline)
+            (return (values nil nil)))
+          (sleep 0.05))))))
+
+(defun %infer-transport-kind (path)
+  "Guess transport kind from PATH's extension: `.port' -> :tcp, else :unix."
+  (cond
+    ((and (>= (length path) 5)
+          (string= ".port" path :start2 (- (length path) 5)))
+     :tcp)
+    (t :unix)))
+
+;;; --------------------------------------------------------------------------
 ;;; Server state
 ;;; --------------------------------------------------------------------------
 
 (defclass server ()
   ((socket-path :initarg :socket-path :reader server-socket-path)
+   (transport :initarg :transport :initform nil :accessor server-transport)
    (socket :initform nil :accessor server-socket)
    (worker :initform nil :accessor server-worker)
-   (worker-mutex :initform (sb-thread:make-mutex :name "clpm.repl-bridge.worker")
+   (worker-mutex :initform (clpm.repl-bridge.compat:make-mutex :name "clpm.repl-bridge.worker")
                  :reader server-worker-mutex)
    (current-package :initform (find-package "COMMON-LISP-USER")
                     :accessor server-current-package)
@@ -155,7 +309,7 @@ possibly-truncated text."
   (path "" :type string)
   (stream nil)
   (bytes-written 0 :type unsigned-byte)
-  (mutex (sb-thread:make-mutex :name "clpm.repl-bridge.log")))
+  (mutex (clpm.repl-bridge.compat:make-mutex :name "clpm.repl-bridge.log")))
 
 (defun %rfc3339-now ()
   "Return the current time as an RFC-3339 / ISO-8601 string in UTC, e.g.
@@ -220,7 +374,7 @@ is NIL."
            (line (with-output-to-string (b)
                    (clpm.io.json:write-json entry b)
                    (write-char #\Newline b))))
-      (sb-thread:with-mutex ((event-log-mutex log))
+      (clpm.repl-bridge.compat:with-mutex ((event-log-mutex log))
         (when (event-log-stream log)
           (handler-case
               (progn
@@ -276,7 +430,7 @@ its connection or sends an explicit `interrupt' request."))
     (when include-backtrace
       (let ((frames
               (handler-case
-                  (let ((all (sb-debug:list-backtrace)))
+                  (let ((all (clpm.repl-bridge.compat:list-backtrace)))
                     (subseq all 0 (min (length all) +max-backtrace-frames+)))
                 (error () '()))))
         (setf entries
@@ -418,7 +572,7 @@ its connection or sends an explicit `interrupt' request."))
   "Pull jobs from MAILBOX, eval each, post the result to job's result-mailbox.
 Returns when a `:stop' sentinel arrives."
   (loop
-    (let ((job (sb-concurrency:receive-message mailbox)))
+    (let ((job (clpm.repl-bridge.compat:receive-message mailbox)))
       (cond
         ((eq job :stop) (return))
         (t
@@ -434,20 +588,20 @@ Returns when a `:stop' sentinel arrives."
                                        :package "" :elapsed-ms 0
                                        :conditions '() :truncated? nil
                                        :redefined nil)))))
-           (sb-concurrency:send-message (eval-job-result-mailbox job) result)))))))
+           (clpm.repl-bridge.compat:send-message (eval-job-result-mailbox job) result)))))))
 
 (defun %ensure-worker (server)
   "Start a worker thread for SERVER if none is alive. Returns the worker's
 inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
-  (sb-thread:with-mutex ((server-worker-mutex server))
+  (clpm.repl-bridge.compat:with-mutex ((server-worker-mutex server))
     (when (or (null (server-worker server))
-              (not (sb-thread:thread-alive-p
+              (not (clpm.repl-bridge.compat:thread-alive-p
                     (worker-thread (server-worker server)))))
-      (let ((mailbox (sb-concurrency:make-mailbox)))
+      (let ((mailbox (clpm.repl-bridge.compat:make-mailbox)))
         (setf (server-worker server)
               (make-worker
                :mailbox mailbox
-               :thread (sb-thread:make-thread
+               :thread (clpm.repl-bridge.compat:make-thread
                         (lambda () (%worker-loop mailbox))
                         :name "clpm.repl-bridge.worker")))))
     (worker-mailbox (server-worker server))))
@@ -455,8 +609,8 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
 (defun %interrupt-worker (server)
   "Signal user-interrupt inside the worker, unwinding its current eval."
   (let ((w (server-worker server)))
-    (when (and w (sb-thread:thread-alive-p (worker-thread w)))
-      (sb-thread:interrupt-thread
+    (when (and w (clpm.repl-bridge.compat:thread-alive-p (worker-thread w)))
+      (clpm.repl-bridge.compat:interrupt-thread
        (worker-thread w)
        (lambda () (signal 'user-interrupt))))))
 
@@ -471,7 +625,7 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
         ((string= method "ping")
          (%success-response id
           (%json-object
-           "pid" (sb-posix:getpid)
+           "pid" (clpm.repl-bridge.compat:getpid)
            "uptime_ms" (* 1000 (- (get-universal-time)
                                    (server-started-at server)))
            "lisp" (format nil "~A ~A"
@@ -502,9 +656,9 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
          (%success-response id (%json-object)))
         ((string= method "reset")
          (let ((w (server-worker server)))
-           (when (and w (sb-thread:thread-alive-p (worker-thread w)))
+           (when (and w (clpm.repl-bridge.compat:thread-alive-p (worker-thread w)))
              (%log-event (server-event-log server) "worker-terminated")
-             (sb-thread:terminate-thread (worker-thread w)))
+             (clpm.repl-bridge.compat:terminate-thread (worker-thread w)))
            (setf (server-worker server) nil)
            (clrhash (server-redefinitions server)))
          (%success-response id (%json-object)))
@@ -542,14 +696,14 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
        (%error-response id "protocol-error" "missing `form` param"))
       (t
        (let* ((mailbox (%ensure-worker server))
-              (reply-box (sb-concurrency:make-mailbox))
+              (reply-box (clpm.repl-bridge.compat:make-mailbox))
               (job (make-eval-job
                     :form form
                     :package-override package-override
                     :result-mailbox reply-box)))
          (incf (server-eval-count server))
-         (sb-concurrency:send-message mailbox job)
-         (let ((result (sb-concurrency:receive-message reply-box)))
+         (clpm.repl-bridge.compat:send-message mailbox job)
+         (let ((result (clpm.repl-bridge.compat:receive-message reply-box)))
            (cond
              ((null (eval-result-code result))
               (let ((payload
@@ -619,10 +773,18 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
 ;;; Server: accept loop
 ;;; --------------------------------------------------------------------------
 
-(defun start-server (&key socket-path log-path)
-  "Start a daemon listening on SOCKET-PATH (a string filesystem path). Blocks
-until a `shutdown' request arrives. Cleans up the socket and ensures the
-worker thread is stopped before returning.
+(defun start-server (&key socket-path log-path transport-kind port-path)
+  "Start a daemon listening for JSON-RPC connections. Blocks until a
+`shutdown' request arrives. Cleans up the listener and ensures the worker
+thread is stopped before returning.
+
+TRANSPORT-KIND selects the listener:
+  :unix (default on non-Windows) - bind a Unix-domain socket at SOCKET-PATH
+                                   with mode 0600.
+  :tcp  (default on Windows)     - bind a loopback TCP socket on a random
+                                   ephemeral port and write `<port>~%<token>~%'
+                                   to PORT-PATH. Every request must carry
+                                   `token: <token>' in its params.
 
 When LOG-PATH is supplied, append one JSON line per protocol event
 (accept, request, response, interrupt, worker-died, shutdown) and rotate
@@ -630,22 +792,27 @@ once the file exceeds 10 MB.
 
 Sets the toplevel value of `*server*' (not a dynamic binding) so the worker
 thread sees the same instance; only one daemon may run per process."
-  (check-type socket-path string)
-  (ignore-errors (delete-file socket-path))
-  (let* ((server (make-instance 'server :socket-path socket-path))
-         (sock (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+  (let* ((kind (or transport-kind (%default-transport-kind)))
+         (advertise (ecase kind
+                      (:unix (or socket-path
+                                 (error ":unix transport requires :socket-path")))
+                      (:tcp  (or port-path
+                                 (error ":tcp transport requires :port-path")))))
+         (transport (make-transport :kind kind :path advertise))
+         (server (make-instance 'server :socket-path advertise
+                                        :transport transport)))
     (when (and log-path (stringp log-path))
       (setf (server-event-log server) (%open-event-log log-path)))
     (setf *server* server)
     (unwind-protect
          (progn
-           (sb-bsd-sockets:socket-bind sock socket-path)
-           (sb-posix:chmod socket-path #o600)
-           (sb-bsd-sockets:socket-listen sock 8)
-           (setf (server-socket server) sock)
+           (%open-listener transport)
+           (setf (server-socket server) (transport-listener transport))
            (%log-event (server-event-log server) "start"
-                       "pid" (sb-posix:getpid)
-                       "socket" socket-path)
+                       "pid" (clpm.repl-bridge.compat:getpid)
+                       "transport" (string-downcase (string kind))
+                       "path" advertise
+                       "port" (transport-port transport))
            ;; Spawn a thread per connection so eval (which blocks on the worker)
            ;; doesn't wedge the accept loop. The worker mailbox serializes
            ;; eval requests; other methods (interrupt, ping, status, ...) run
@@ -656,9 +823,10 @@ thread sees the same instance; only one daemon may run per process."
            ;; handler-case turns that into a clean loop exit.
            (loop until (server-shutdown-requested? server) do
              (handler-case
-                 (let ((conn (sb-bsd-sockets:socket-accept sock)))
+                 (let ((conn (sb-bsd-sockets:socket-accept
+                              (transport-listener transport))))
                    (%log-event (server-event-log server) "accept")
-                   (sb-thread:make-thread
+                   (clpm.repl-bridge.compat:make-thread
                     (let ((c conn))
                       (lambda ()
                         (unwind-protect
@@ -676,15 +844,14 @@ thread sees the same instance; only one daemon may run per process."
                  (when (server-shutdown-requested? server)
                    (loop-finish))))))
       (let ((w (server-worker server)))
-        (when (and w (sb-thread:thread-alive-p (worker-thread w)))
-          (sb-concurrency:send-message (worker-mailbox w) :stop)
+        (when (and w (clpm.repl-bridge.compat:thread-alive-p (worker-thread w)))
+          (clpm.repl-bridge.compat:send-message (worker-mailbox w) :stop)
           (handler-case
-              (sb-thread:join-thread (worker-thread w))
+              (clpm.repl-bridge.compat:join-thread (worker-thread w))
             (error () nil))))
       (%log-event (server-event-log server) "stop")
       (%close-event-log (server-event-log server))
-      (ignore-errors (sb-bsd-sockets:socket-close sock))
-      (ignore-errors (delete-file socket-path))
+      (%close-listener transport)
       (setf *server* nil))))
 
 (defun %handle-connection (server conn)
@@ -711,7 +878,10 @@ thread sees the same instance; only one daemon may run per process."
                                  (return-from %handle-connection))))
                     (id (%json-getf request "id"))
                     (method (%json-getf request "method"))
-                    (params (%json-getf request "params")))
+                    (params (%json-getf request "params"))
+                    (transport (server-transport server))
+                    (expected-token (and transport
+                                         (transport-token transport))))
                (cond
                  ((not (stringp method))
                   (%log-event (server-event-log server) "request-invalid"
@@ -719,6 +889,16 @@ thread sees the same instance; only one daemon may run per process."
                   (%write-line-json stream
                                     (%error-response id "protocol-error"
                                                      "missing `method'")))
+                 ((and expected-token
+                       (let ((tok (%json-getf params "token")))
+                         (or (not (stringp tok))
+                             (not (%constant-string= tok expected-token)))))
+                  (%log-event (server-event-log server) "auth-rejected"
+                              "id" id "method" method)
+                  (%write-line-json
+                   stream
+                   (%error-response id "protocol-error"
+                                    "missing or invalid `token`")))
                  (t
                   (%log-event (server-event-log server) "request"
                               "id" id "method" method)
@@ -751,47 +931,50 @@ thread sees the same instance; only one daemon may run per process."
 ;;; Client
 ;;; --------------------------------------------------------------------------
 
-(defun %connect (socket-path &key (timeout-seconds 5))
-  "Return a connected sb-bsd-sockets:local-socket, or NIL if the socket file
-is absent / refused. Polls for up to TIMEOUT-SECONDS."
-  (let ((deadline (+ (get-internal-real-time)
-                     (* timeout-seconds internal-time-units-per-second))))
-    (loop
-      (handler-case
-          (let ((s (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
-            (sb-bsd-sockets:socket-connect s socket-path)
-            (return s))
-        (error ()
-          (when (>= (get-internal-real-time) deadline)
-            (return nil))
-          (sleep 0.05))))))
-
-(defun send-request (socket-path method &key params (id 1) (connect-timeout 5))
+(defun send-request (endpoint method &key params (id 1) (connect-timeout 5))
   "Send one request and return the parsed response. Returns
-   :no-daemon if the socket is absent or unreachable,
+   :no-daemon if the daemon is absent / unreachable,
    :io-error  if the connection dropped mid-exchange.
-The response is a `(:object ...)` form on success / error.
+
+ENDPOINT is a filesystem path. If it ends in `.port', the TCP transport
+is used: the file's first line is the bound port, the second line is a
+32-hex shared token, and the token is injected into the request's
+params. Otherwise the path is treated as a Unix-domain socket.
 
 Responses are read without a size cap; daemon output (`+max-output-bytes+`,
 1 MB) can legitimately fill a line."
-  (let ((sock (%connect socket-path :timeout-seconds connect-timeout)))
-    (unless sock
-      (return-from send-request :no-daemon))
-    (unwind-protect
-         (let* ((stream (sb-bsd-sockets:socket-make-stream
-                         sock :input t :output t :buffering :full
-                              :external-format :utf-8
-                              :element-type 'character))
-                (request
-                  (%json-object "id" id
-                                "method" method
-                                "params" (or params (%json-object)))))
-           (handler-case
-               (progn
-                 (%write-line-json stream request)
-                 (let ((line (read-line stream nil nil)))
-                   (cond
-                     ((null line) :io-error)
-                     (t (clpm.io.json:read-json-from-string line)))))
-             (error () :io-error)))
-      (ignore-errors (sb-bsd-sockets:socket-close sock)))))
+  (check-type endpoint string)
+  (let ((kind (%infer-transport-kind endpoint)))
+    (multiple-value-bind (sock token)
+        (%connect-transport kind endpoint :timeout-seconds connect-timeout)
+      (unless sock
+        (return-from send-request :no-daemon))
+      (unwind-protect
+           (let* ((stream (sb-bsd-sockets:socket-make-stream
+                           sock :input t :output t :buffering :full
+                                :external-format :utf-8
+                                :element-type 'character))
+                  (effective-params
+                    (cond
+                      ((null token) (or params (%json-object)))
+                      (t
+                       (let ((base (or params (%json-object))))
+                         (cond
+                           ((and (consp base) (eq (car base) :object))
+                            (list :object
+                                  (cons (cons "token" token) (cadr base))))
+                           (t
+                            (%json-object "token" token)))))))
+                  (request
+                    (%json-object "id" id
+                                  "method" method
+                                  "params" effective-params)))
+             (handler-case
+                 (progn
+                   (%write-line-json stream request)
+                   (let ((line (read-line stream nil nil)))
+                     (cond
+                       ((null line) :io-error)
+                       (t (clpm.io.json:read-json-from-string line)))))
+               (error () :io-error)))
+        (ignore-errors (sb-bsd-sockets:socket-close sock))))))
