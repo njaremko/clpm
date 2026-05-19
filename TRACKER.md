@@ -15,6 +15,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - `2026-05-19` **#004 + #005 landed.** `constraint-union` had zero callers in `src/` or `test/` and the implementation note "Simplified: just append ranges (could be merged for optimization)" tellingly admitted it didn't actually compute a union. Per the no-dead-code policy in `~/.claude/CLAUDE.md`, deleted both the function and its `:export` from `clpm.solver.constraint`. If a future caller needs union semantics, it can be reintroduced correctly (sorted, overlap-merged) at that point — there's no need to keep a broken implementation around for a hypothetical user.
 - `2026-05-19` **#008 landed.** `:optional t` is now real: the solver's `add-root-constraints` consults a `with-optional` set on `solver-state`; `cmd-resolve` and `cmd-update` pass through `clpm.commands:*with-optional*` (settable via `--with-optional <sys>` repeatable, or `--with-all-optional`). The opt-in survives across invocations via a new `:opted-in-optionals` field in the lockfile (sorted, omitted when empty so existing lockfiles round-trip unchanged). `clpm tree` and `clpm why` tag optional-root entries with `(optional)`. `test/optional-deps-test.lisp` exercises default-skip, opt-in + persistence, persistence-across-resolve, and `--with-all-optional`. Full suite 60/60 green.
 - `2026-05-19` **#009 landed (drop semantics).** `dependency-features` was parsed and serialized but had zero consumers in the solver, fetcher, or builder; the test that exercised it only round-tripped the field, never validated any meaning. CLPM does not have a feature model and adding one is not in scope. Removed the `features` slot from `dependency`, the `(:features ...)` parser clause, the serializer's `:features` emission, and the `#:dependency-features` export. The project-roundtrip test was updated to drop its `:features '("feat-a" "feat-b")` reference. If a real feature model is ever needed it can be reintroduced with semantics defined up front.
+- `2026-05-19` **#010 landed.** `merge-project-config` now returns a third value (effective `:lisp`) by reading `:defaults (:lisp ...)` from the global config. `effective-lisp-kind` extends its precedence chain to `CLI > project > global config defaults > :sbcl`. `clpm doctor` emits two new lines: "config: effective lisp = X (from ...)" and "config: effective build options = (...)" — useful for understanding why a particular Lisp/build configuration is being used. `test/config-merge-test.lisp` covers empty config, global-default propagation, project override, and per-key plist-merge of `:build` options.
 
 ## Lessons / decisions
 
@@ -183,7 +184,7 @@ Depends on #008 for shared opt-in plumbing if both stay.
 
 ---
 
-### #010 — `[ ]` `P2` `config` `merge` Extend `merge-project-config` beyond registries and build
+### #010 — `[x]` `P2` `config` `merge` Extend `merge-project-config` beyond registries and build
 
 `src/config.lisp:97-109` merges only `:registries` and `:build`. The project struct supports `:lisp`, `:scripts`, `:test`, `:run`, `:package`, etc., but a user can't set defaults for any of these in `~/.config/clpm/config.sxp`.
 

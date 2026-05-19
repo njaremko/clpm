@@ -128,13 +128,19 @@ return value is what is written. Returns the written struct."
 (defun merge-project-config (project &key (config (read-config)))
   "Merge CONFIG with PROJECT settings.
 
-Returns (values registries build-options).
+Returns (values registries build-options lisp).
+
 Merge rules:
 - project registries append after global registries
-- project build options override config defaults"
+- project build options override config defaults
+- project :lisp overrides config defaults :lisp; if neither is set the
+  returned lisp value is NIL and callers fall back to :sbcl"
   (let* ((merged-registries (append (config-registries config)
                                     (clpm.project:project-registries project)))
          (global-build (getf (config-defaults config) :build))
          (project-build (clpm.project:project-build-options project))
-         (merged-build (plist-merge global-build project-build)))
-    (values merged-registries merged-build)))
+         (merged-build (plist-merge global-build project-build))
+         (global-lisp (getf (config-defaults config) :lisp))
+         (project-lisp (clpm.project:project-lisp project))
+         (merged-lisp (or project-lisp global-lisp)))
+    (values merged-registries merged-build merged-lisp)))

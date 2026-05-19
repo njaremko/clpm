@@ -1660,13 +1660,19 @@ SECTIONS is a list of keywords: :DEPENDS, :DEV-DEPENDS, :TEST-DEPENDS."
 (defun effective-lisp-kind (project)
   "Return the effective Lisp kind for PROJECT.
 
-Precedence: CLI `--lisp` (*lisp*) > project :lisp > default :sbcl."
+Precedence: CLI `--lisp` (*lisp*) > project :lisp > global config :defaults
+:lisp > default :sbcl."
   (cond
     (*lisp*
      (clpm.lisp:parse-lisp-kind *lisp*))
     ((and project (clpm.project:project-lisp project))
      (clpm.lisp:parse-lisp-kind (clpm.project:project-lisp project)))
-    (t :sbcl)))
+    (t
+     (let* ((config (ignore-errors (clpm.config:read-config)))
+            (default (and config (getf (clpm.config:config-defaults config) :lisp))))
+       (if default
+           (clpm.lisp:parse-lisp-kind default)
+           :sbcl)))))
 
 (defun lisp-load-systems-eval-forms (systems)
   (mapcar (lambda (sys)
@@ -3849,6 +3855,32 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
            (bad "no registries configured (run: clpm registry add ...)"))
           (t
            (note-warn "no registries configured"))))
+
+      ;; Effective merged config: surfaces global defaults so users can see
+      ;; why a particular Lisp or build option is in effect.
+      (handler-case
+          (let* ((config (clpm.config:read-config))
+                 (project (handler-case
+                              (multiple-value-bind (proot mpath)
+                                  (clpm.project:find-project-root)
+                                (declare (ignore proot))
+                                (and mpath (clpm.project:read-project-file mpath)))
+                            (error () nil))))
+            (multiple-value-bind (regs build lisp)
+                (clpm.config:merge-project-config (or project (clpm.project:make-project))
+                                                  :config config)
+              (declare (ignore regs))
+              (format t "config: effective lisp = ~A~A~%"
+                      (or lisp "sbcl")
+                      (cond
+                        ((and project (clpm.project:project-lisp project))
+                         " (from project)")
+                        ((getf (clpm.config:config-defaults config) :lisp)
+                         " (from global config)")
+                        (t " (default)")))
+              (format t "config: effective build options = ~S~%" build)))
+        (error (c)
+          (note-warn "Failed to read effective config: ~A" c)))
 
       (if (zerop failures)
           (progn
