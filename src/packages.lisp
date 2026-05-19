@@ -330,6 +330,12 @@
            #:resolution-to-lockfile
            #:conflict-explanation))
 
+(defpackage #:clpm.repl-bridge
+  (:use #:cl #:clpm.log #:clpm.errors)
+  (:export #:start-server
+           #:send-request
+           #:user-interrupt))
+
 (defpackage #:clpm.fetch
   (:use #:cl #:clpm.platform #:clpm.store #:clpm.crypto.sha256 #:clpm.errors)
   (:export #:fetch-url
