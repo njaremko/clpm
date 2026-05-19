@@ -86,6 +86,33 @@ To generate a deterministic SBOM from your lockfile:
 clpm sbom --format cyclonedx-json --out sbom.json
 ```
 
+## AI-assisted development
+
+CLPM ships a **repl-bridge**: a persistent project-scoped SBCL daemon that
+answers JSON-RPC over a Unix socket. It exists so an LLM (or any non-Lisp
+tool) can drive a long-lived image — redefining one `defun` instead of
+reloading systems, capturing stdout/stderr per call, surfacing in-image
+drift from disk.
+
+```bash
+# inside any clpm project
+clpm install
+clpm repl-bridge serve --detach
+clpm repl-bridge eval '(asdf:load-system "my-app")'
+clpm repl-bridge eval '(my-app:hello)'
+clpm repl-bridge stop
+```
+
+State persists across `eval` calls. Each response is one line of JSON with
+the printed value, captured output, and (on error) the condition message
+plus a short backtrace. Hung evals can be unwound with
+`clpm repl-bridge interrupt`. Run `clpm repl-bridge diff` to list functions
+you've redefined in-image but haven't saved back to source files.
+
+A Claude Code skill at [`.claude/skills/clpm-repl-bridge.md`](.claude/skills/clpm-repl-bridge.md)
+documents the operating model in detail (response shape, caps, edit/test
+loop). Run `clpm help repl-bridge <subcommand>` for per-subcommand flags.
+
 ## Project File Format
 
 The `clpm.project` file is a data-only S-expression:
