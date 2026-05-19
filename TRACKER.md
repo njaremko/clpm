@@ -17,6 +17,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - `2026-05-19` **#009 landed (drop semantics).** `dependency-features` was parsed and serialized but had zero consumers in the solver, fetcher, or builder; the test that exercised it only round-tripped the field, never validated any meaning. CLPM does not have a feature model and adding one is not in scope. Removed the `features` slot from `dependency`, the `(:features ...)` parser clause, the serializer's `:features` emission, and the `#:dependency-features` export. The project-roundtrip test was updated to drop its `:features '("feat-a" "feat-b")` reference. If a real feature model is ever needed it can be reintroduced with semantics defined up front.
 - `2026-05-19` **#010 landed.** `merge-project-config` now returns a third value (effective `:lisp`) by reading `:defaults (:lisp ...)` from the global config. `effective-lisp-kind` extends its precedence chain to `CLI > project > global config defaults > :sbcl`. `clpm doctor` emits two new lines: "config: effective lisp = X (from ...)" and "config: effective build options = (...)" — useful for understanding why a particular Lisp/build configuration is being used. `test/config-merge-test.lisp` covers empty config, global-default propagation, project override, and per-key plist-merge of `:build` options.
 - `2026-05-19` **#011 landed.** `cmd-package` now branches on `effective-lisp-kind` and generates a kind-specific save form: SBCL uses `sb-ext:save-lisp-and-die` (writes `<output>.bin` plus an sh wrapper that injects `--end-runtime-options`), CCL uses `ccl:save-application :prepend-kernel t :purify t` (writes the image directly to `<output>`, chmod +x). CCL symbols are resolved at runtime via `uiop:find-symbol*` so SBCL can still compile the source. The subprocess is launched through `clpm.lisp:lisp-run-argv` so each lisp gets the right `-q/--noinform/--non-interactive/--batch` flags. ECL is explicitly rejected with "Packaging on ECL is not yet implemented" (out of scope; a future ticket can wire `c:build-program`). Package metadata now records `:lisp-kind` and `:lisp-version` so consumers can tell which image they're looking at.
+- `2026-05-19` **#014 landed.** `clpm info <sys> --all` (text mode) now emits per-candidate source kind/URL/hash/commit and license — matching the JSON branch. Output without `--all` is unchanged: still one line per candidate. `test/info-command-test.lisp` adds a `--all` case asserting both source URLs and the MIT license tag show up.
 
 ## Lessons / decisions
 
@@ -254,7 +255,7 @@ The most useful overrides are probably `:lisp` (default implementation for proje
 
 ## CLI ergonomics
 
-### #014 — `[ ]` `P2` `cli` `info` Honor `--all` in `cmd-info` text mode
+### #014 — `[x]` `P2` `cli` `info` Honor `--all` in `cmd-info` text mode
 
 `src/commands.lisp:837-974` parses `--all` (line 858) but consults `allp` only inside the JSON branch (line 920). Text-mode output ignores it entirely while the help text (`src/commands.lisp:3474-3481`) advertises "Include metadata for all candidates".
 

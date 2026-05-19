@@ -119,7 +119,22 @@
                (assert-equal (format nil "  main~Cfoo@2.0.0" #\Tab)
                              (nth (1+ i-cand) lines))
                (assert-equal (format nil "  main~Cfoo@1.0.0" #\Tab)
-                             (nth (+ i-cand 2) lines))))))
+                             (nth (+ i-cand 2) lines))))
+
+           ;; --all (text mode) must surface per-candidate source + license,
+           ;; matching what the JSON branch produces.
+           (multiple-value-bind (code stdout stderr)
+               (run-cli-captured '("info" "foo" "--all"))
+             (unless (eql code 0)
+               (fail "clpm info --all failed: ~D~%stdout:~A~%stderr:~A" code stdout stderr))
+             (assert-true (search "https://example.invalid/foo-2.0.0.tgz" stdout)
+                          "Expected v2 source URL in --all output:~%~A" stdout)
+             (assert-true (search "https://example.invalid/foo-1.0.0.tgz" stdout)
+                          "Expected v1 source URL in --all output:~%~A" stdout)
+             (assert-true (search "license" stdout)
+                          "Expected license field in --all output:~%~A" stdout)
+             (assert-true (search "MIT" stdout)
+                          "Expected MIT license in --all output:~%~A" stdout))))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME"))))

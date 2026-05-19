@@ -974,8 +974,34 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                               #\Tab (clpm.registry:release-metadata-license sel-meta))))
                   (format t "Candidates:~%")
                   (dolist (c candidates)
-                    (format t "  ~A~C~A~%"
-                            (getf c :registry-name) #\Tab (getf c :release)))
+                    (cond
+                      (allp
+                       (let* ((reg (getf c :registry))
+                              (pkg (getf c :package))
+                              (ver (getf c :version))
+                              (meta (clpm.registry:get-release-metadata reg pkg ver))
+                              (fields (and meta (source->fields
+                                                 (clpm.registry:release-metadata-source meta))))
+                              (license (and meta
+                                            (clpm.registry:release-metadata-license meta))))
+                         (format t "  ~A~C~A~%"
+                                 (getf c :registry-name) #\Tab (getf c :release))
+                         (when fields
+                           (destructuring-bind (kind url hash commit) fields
+                             (format t "      source~C~A~C~A"
+                                     #\Tab (string-downcase (symbol-name kind))
+                                     #\Tab (or url ""))
+                             (cond
+                               ((and hash (plusp (length hash)))
+                                (format t "~Chash:~A~%" #\Tab hash))
+                               ((and commit (plusp (length commit)))
+                                (format t "~Ccommit:~A~%" #\Tab commit))
+                               (t (terpri)))))
+                         (when (and license (plusp (length license)))
+                           (format t "      license~C~A~%" #\Tab license))))
+                      (t
+                       (format t "  ~A~C~A~%"
+                               (getf c :registry-name) #\Tab (getf c :release)))))
                   0))))))))
 
 ;;; dependency graph introspection (tree/why)
