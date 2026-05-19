@@ -1585,6 +1585,398 @@ deps don't churn)."
         (declare (ignore output error-output))
         exit-code)))))
 
+;;; repl-bridge command -- persistent Lisp image for LLM-driven dev
+;;;
+;;; Layout per project:
+;;;   .clpm/repl-bridge.sock   Unix socket the daemon binds (mode 0600)
+;;;   .clpm/repl-bridge.pid    decimal PID of the running daemon
+;;;   .clpm/repl-bridge.log    daemon stdout+stderr in --detach mode
+;;;
+;;; `serve' loads the project (via .clpm/asdf-config.lisp) and enters the
+;;; accept loop. `eval' auto-spawns a `serve --detach' child if no daemon is
+;;; running, then sends one eval request.
+
+(defun %bridge-paths (project-root)
+  "Return (values sock-path pid-path log-path) for PROJECT-ROOT."
+  (let ((dir (merge-pathnames ".clpm/" project-root)))
+    (values (namestring (merge-pathnames "repl-bridge.sock" dir))
+            (namestring (merge-pathnames "repl-bridge.pid" dir))
+            (namestring (merge-pathnames "repl-bridge.log" dir)))))
+
+(defun %bridge-read-pidfile (path)
+  "Return the integer PID stored in PATH, or NIL if the file is missing /
+malformed."
+  (when (uiop:file-exists-p path)
+    (handler-case
+        (let* ((text (uiop:read-file-string path))
+               (trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) text)))
+          (parse-integer trimmed :junk-allowed nil))
+      (error () nil))))
+
+(defun %bridge-pid-alive-p (pid)
+  "Best-effort: is PID running? Uses kill(pid, 0). Returns NIL on any error."
+  (handler-case
+      (progn (sb-posix:kill pid 0) t)
+    (error () nil)))
+
+(defun %bridge-clean-stale (sock-path pid-path)
+  "Remove SOCK-PATH and PID-PATH if the PID is dead or the pidfile is bogus."
+  (let ((pid (%bridge-read-pidfile pid-path)))
+    (when (or (null pid) (not (%bridge-pid-alive-p pid)))
+      (ignore-errors (delete-file pid-path))
+      (ignore-errors (delete-file sock-path))
+      t)))
+
+(defun %bridge-write-pidfile (path)
+  (ensure-directories-exist path)
+  (with-open-file (s path :direction :output :if-exists :supersede
+                          :external-format :utf-8)
+    (format s "~D~%" (sb-posix:getpid))))
+
+(defun %bridge-load-project (project-root)
+  "Activate the project: load .clpm/asdf-config.lisp if present so the
+daemon's image has the lockfile-resolved systems on the ASDF source-registry."
+  (let ((config (merge-pathnames ".clpm/asdf-config.lisp" project-root)))
+    (when (uiop:file-exists-p config)
+      (handler-case
+          (load config)
+        (error (c)
+          (log-error "Failed to load project config: ~A" c))))))
+
+;; Foreground `serve' never touches stdio. Detachment is done by the parent
+;; via `uiop:launch-program` which inherits the right file descriptors --
+;; we don't need fork/setsid/dup2 from inside the daemon.
+
+(defun %bridge-resolve-project ()
+  "Return (values project-root sock pid log) or NIL on error (after logging)."
+  (multiple-value-bind (project-root manifest-path lock-path workspace-root)
+      (find-effective-project-root)
+    (declare (ignore lock-path))
+    (unless manifest-path
+      (when (null workspace-root)
+        (log-no-project-found))
+      (return-from %bridge-resolve-project nil))
+    (multiple-value-bind (sock pid log) (%bridge-paths project-root)
+      (values project-root sock pid log))))
+
+(defun %bridge-serve (args)
+  "Handle `clpm repl-bridge serve [--detach] [--no-load] [-p MEMBER]'."
+  (let ((detach nil)
+        (no-load nil))
+    (loop while args do
+      (let ((arg (pop args)))
+        (cond
+          ((string= arg "--detach") (setf detach t))
+          ((string= arg "--no-load") (setf no-load t))
+          (t
+           (log-error "Unknown serve option: ~A" arg)
+           (return-from %bridge-serve 1)))))
+    (multiple-value-bind (project-root sock pid log)
+        (%bridge-resolve-project)
+      (unless project-root (return-from %bridge-serve 1))
+      ;; If a live daemon is already running, refuse.
+      (%bridge-clean-stale sock pid)
+      (let ((existing (%bridge-read-pidfile pid)))
+        (when (and existing (%bridge-pid-alive-p existing))
+          (log-error "Daemon already running (pid ~D, socket ~A)" existing sock)
+          (return-from %bridge-serve 1)))
+      (cond
+        (detach
+         (let ((clpm-bin (uiop:argv0)))
+           (unless (and clpm-bin (probe-file clpm-bin))
+             (log-error "Could not find clpm binary at ~S; --detach unavailable"
+                        clpm-bin)
+             (return-from %bridge-serve 1))
+           (let ((argv (append (list clpm-bin "repl-bridge" "serve")
+                               (when no-load (list "--no-load")))))
+             (ensure-directories-exist log)
+             (handler-case
+                 (with-open-file (log-stream log :direction :output
+                                                  :if-exists :append
+                                                  :if-does-not-exist :create
+                                                  :external-format :utf-8)
+                   (uiop:launch-program argv
+                                        :output log-stream
+                                        :error-output log-stream
+                                        :input nil))
+               (error (c)
+                 (log-error "Failed to launch daemon: ~A" c)
+                 (return-from %bridge-serve 1)))
+             (loop for i from 0 below 50
+                   while (not (probe-file sock))
+                   do (sleep 0.1))
+             (cond
+               ((probe-file sock)
+                (log-info "Daemon started: ~A" sock)
+                0)
+               (t
+                (log-error "Daemon failed to bind socket within 5s (see ~A)" log)
+                1)))))
+        (t
+         (ensure-directories-exist sock)
+         (%bridge-write-pidfile pid)
+         (unless no-load
+           (%bridge-load-project project-root))
+         (unwind-protect
+              (handler-case
+                  (progn
+                    (clpm.repl-bridge:start-server :socket-path sock)
+                    0)
+                (error (c)
+                  (format *error-output* "daemon crashed: ~A~%" c)
+                  1))
+           (ignore-errors (delete-file pid))))))))
+
+(defun %bridge-pretty-print (response stream)
+  "Render RESPONSE (a parsed JSON object) as a human summary."
+  (let* ((id (clpm.io.json:read-json-from-string
+              (clpm.io.json:write-json-to-string
+               (let ((cell (and (consp response)
+                                (eq (car response) :object)
+                                (assoc "id" (cadr response) :test #'string=))))
+                 (and cell (cdr cell))))))
+         (result (and (consp response) (eq (car response) :object)
+                      (cdr (assoc "result" (cadr response) :test #'string=))))
+         (err (and (consp response) (eq (car response) :object)
+                   (cdr (assoc "error" (cadr response) :test #'string=)))))
+    (declare (ignore id))
+    (cond
+      (result
+       (let* ((obj (cadr result))
+              (value (cdr (assoc "value" obj :test #'string=)))
+              (output (cdr (assoc "output" obj :test #'string=)))
+              (eo (cdr (assoc "error_output" obj :test #'string=)))
+              (pkg (cdr (assoc "package" obj :test #'string=)))
+              (elapsed (cdr (assoc "elapsed_ms" obj :test #'string=))))
+         (when (and pkg (stringp pkg)) (format stream "package: ~A~%" pkg))
+         (when (and elapsed (integerp elapsed))
+           (format stream "elapsed: ~Dms~%" elapsed))
+         (when (and output (stringp output) (plusp (length output)))
+           (format stream "stdout:~%~A~%" output))
+         (when (and eo (stringp eo) (plusp (length eo)))
+           (format stream "stderr:~%~A~%" eo))
+         (when value (format stream "=> ~A~%" value))))
+      (err
+       (let* ((obj (cadr err))
+              (code (cdr (assoc "code" obj :test #'string=)))
+              (msg (cdr (assoc "message" obj :test #'string=))))
+         (format stream "error: [~A] ~A~%" code msg)))
+      (t
+       (clpm.io.json:write-json response stream)
+       (terpri stream)))))
+
+(defun %bridge-send-or-autostart (sock pid project-root method
+                                  &key params (autostart t))
+  "Send a request, auto-starting the daemon on connect failure."
+  (let ((resp (clpm.repl-bridge:send-request sock method
+                                             :params params
+                                             :connect-timeout 1)))
+    (cond
+      ((eq resp :no-daemon)
+       (cond
+         ((not autostart)
+          (log-error "No daemon running. Start one with `clpm repl-bridge serve` or drop --no-autostart.")
+          (return-from %bridge-send-or-autostart nil))
+         (t
+          ;; Auto-start.
+          (let ((rc (%bridge-serve (list "--detach"))))
+            (declare (ignore rc))
+            (declare (ignorable project-root pid))
+            (clpm.repl-bridge:send-request sock method :params params
+                                           :connect-timeout 5)))))
+      (t resp))))
+
+(defun %bridge-eval (args)
+  "Handle `clpm repl-bridge eval FORM [--package PKG] [--no-autostart] [--pretty]'."
+  (let ((form nil)
+        (package nil)
+        (autostart t)
+        (pretty nil))
+    (loop while args do
+      (let ((arg (pop args)))
+        (cond
+          ((string= arg "--package")
+           (setf package (pop args))
+           (unless (stringp package)
+             (log-error "Missing value for --package")
+             (return-from %bridge-eval 1)))
+          ((string= arg "--no-autostart") (setf autostart nil))
+          ((string= arg "--pretty") (setf pretty t))
+          ((null form) (setf form arg))
+          (t
+           (log-error "Unknown eval option: ~A" arg)
+           (return-from %bridge-eval 1)))))
+    (unless form
+      (log-error "Usage: clpm repl-bridge eval FORM [--package PKG] [--no-autostart] [--pretty]")
+      (return-from %bridge-eval 1))
+    (multiple-value-bind (project-root sock pid)
+        (%bridge-resolve-project)
+      (unless project-root (return-from %bridge-eval 1))
+      (let* ((params (list :object
+                           (append (list (cons "form" form))
+                                   (when package (list (cons "package" package))))))
+             (resp (%bridge-send-or-autostart sock pid project-root
+                                              "eval"
+                                              :params params
+                                              :autostart autostart)))
+        (cond
+          ((null resp) 2)
+          ((eq resp :no-daemon)
+           (log-error "Could not start daemon")
+           2)
+          ((eq resp :io-error)
+           (log-error "I/O error talking to daemon")
+           2)
+          (t
+           (if pretty
+               (%bridge-pretty-print resp *standard-output*)
+               (progn
+                 (clpm.io.json:write-json resp *standard-output*)
+                 (terpri *standard-output*)))
+           (if (assoc "error" (cadr resp) :test #'string=) 1 0)))))))
+
+(defun %bridge-simple-method (method)
+  "Send a no-param request and print the JSON response. Returns rc."
+  (multiple-value-bind (project-root sock)
+      (%bridge-resolve-project)
+    (unless project-root (return-from %bridge-simple-method 1))
+    (let ((resp (clpm.repl-bridge:send-request sock method :connect-timeout 1)))
+      (cond
+        ((eq resp :no-daemon)
+         (log-error "No daemon running")
+         2)
+        ((eq resp :io-error)
+         (log-error "I/O error talking to daemon")
+         2)
+        (t
+         (clpm.io.json:write-json resp *standard-output*)
+         (terpri *standard-output*)
+         (if (assoc "error" (cadr resp) :test #'string=) 1 0))))))
+
+(defun %bridge-status (args)
+  (declare (ignore args))
+  (multiple-value-bind (project-root sock pid log)
+      (%bridge-resolve-project)
+    (unless project-root (return-from %bridge-status 1))
+    (let ((existing (%bridge-read-pidfile pid)))
+      (cond
+        ((null existing)
+         (format t "not running~%")
+         0)
+        ((not (%bridge-pid-alive-p existing))
+         (ignore-errors (delete-file pid))
+         (ignore-errors (delete-file sock))
+         (format t "stale pidfile (cleaned)~%")
+         0)
+        (t
+         (let ((ping (clpm.repl-bridge:send-request sock "ping"
+                                                   :connect-timeout 1)))
+           (cond
+             ((consp ping)
+              (let* ((result (cdr (assoc "result" (cadr ping)
+                                         :test #'string=)))
+                     (obj (and result (cadr result)))
+                     (uptime (and obj (cdr (assoc "uptime_ms" obj
+                                                    :test #'string=))))
+                     (lisp (and obj (cdr (assoc "lisp" obj :test #'string=))))
+                     (evals (and obj (cdr (assoc "eval_count" obj
+                                                  :test #'string=)))))
+                (format t "running (pid ~D)~%" existing)
+                (format t "  socket: ~A~%" sock)
+                (format t "  log:    ~A~%" log)
+                (when uptime (format t "  uptime: ~,1Fs~%" (/ uptime 1000.0)))
+                (when lisp (format t "  lisp:   ~A~%" lisp))
+                (when evals (format t "  evals:  ~D~%" evals)))
+              0)
+             (t
+              (format t "running but unresponsive (pid ~D)~%" existing)
+              (format t "  try: clpm repl-bridge stop~%")
+              0))))))))
+
+(defun %bridge-stop (args)
+  (declare (ignore args))
+  (multiple-value-bind (project-root sock pid)
+      (%bridge-resolve-project)
+    (unless project-root (return-from %bridge-stop 1))
+    (let ((existing (%bridge-read-pidfile pid)))
+      (cond
+        ((null existing)
+         (format t "not running~%")
+         0)
+        ((not (%bridge-pid-alive-p existing))
+         (ignore-errors (delete-file pid))
+         (ignore-errors (delete-file sock))
+         (format t "cleaned stale pidfile~%")
+         0)
+        (t
+         ;; Graceful shutdown: send the request and wait for the socket file
+         ;; to disappear (start-server deletes it from its unwind-protect once
+         ;; the accept loop exits). The socket is the authoritative signal --
+         ;; the pid may legitimately belong to a long-lived host process (e.g.
+         ;; an editor) that hosts the daemon as one of many threads, so we
+         ;; can't safely SIGTERM on pid-liveness alone.
+         (handler-case
+             (clpm.repl-bridge:send-request sock "shutdown" :connect-timeout 1)
+           (error () nil))
+         ;; Poll for the socket file going away. `probe-file' isn't safe here
+         ;; because on macOS it can fault on a Unix-socket path during the
+         ;; brief window when the daemon's unwind-protect is unlinking it;
+         ;; `uiop:file-exists-p' uses lstat-based checks that don't truename.
+         (loop for i from 0 below 50
+               while (uiop:file-exists-p sock)
+               do (sleep 0.1))
+         (when (uiop:file-exists-p sock)
+           ;; Daemon ignored the shutdown request; only escalate to SIGTERM
+           ;; if the pid file still names a live process.
+           (when (%bridge-pid-alive-p existing)
+             (handler-case (sb-posix:kill existing 15) (error () nil))
+             (loop for i from 0 below 20
+                   while (uiop:file-exists-p sock)
+                   do (sleep 0.1))))
+         (ignore-errors (delete-file pid))
+         (ignore-errors (delete-file sock))
+         (format t "stopped~%")
+         0)))))
+
+(defun cmd-repl-bridge (&rest args)
+  "Dispatcher for `clpm repl-bridge <subcommand>'."
+  (let ((sub (pop args)))
+    (cond
+      ((null sub)
+       (log-error "Usage: clpm repl-bridge <serve|eval|interrupt|status|stop|ping|describe|diff>")
+       1)
+      ((string= sub "serve") (%bridge-serve args))
+      ((string= sub "eval") (%bridge-eval args))
+      ((string= sub "interrupt") (%bridge-simple-method "interrupt"))
+      ((string= sub "ping") (%bridge-simple-method "ping"))
+      ((string= sub "status") (%bridge-status args))
+      ((string= sub "stop") (%bridge-stop args))
+      ((string= sub "describe")
+       (let ((sym (first args)))
+         (cond
+           ((null sym)
+            (log-error "Usage: clpm repl-bridge describe SYMBOL")
+            1)
+           (t
+            (multiple-value-bind (project-root sock)
+                (%bridge-resolve-project)
+              (unless project-root (return-from cmd-repl-bridge 1))
+              (let ((resp (clpm.repl-bridge:send-request
+                           sock "describe"
+                           :params (list :object (list (cons "symbol" sym)))
+                           :connect-timeout 1)))
+                (cond
+                  ((eq resp :no-daemon) (log-error "No daemon running") 2)
+                  ((eq resp :io-error) (log-error "I/O error") 2)
+                  (t
+                   (clpm.io.json:write-json resp *standard-output*)
+                   (terpri *standard-output*)
+                   0))))))))
+      ((string= sub "diff") (%bridge-simple-method "list-redefinitions"))
+      (t
+       (log-error "Unknown subcommand: ~A" sub)
+       1))))
+
 ;;; run/exec commands
 
 (defun ensure-project-activated (project-root)

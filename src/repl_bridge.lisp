@@ -433,6 +433,12 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
                                collect (list :object v))))))
         ((string= method "shutdown")
          (setf (server-shutdown-requested? server) t)
+         ;; Wake the accept loop: close the listening socket so the blocking
+         ;; `socket-accept' returns. The accept-loop handler-case turns the
+         ;; resulting error into a graceful exit.
+         (ignore-errors
+          (when (server-socket server)
+            (sb-bsd-sockets:socket-close (server-socket server))))
          (%success-response id (%json-object)))
         (t
          (%error-response id "protocol-error"
@@ -548,19 +554,27 @@ thread sees the same instance; only one daemon may run per process."
            ;; doesn't wedge the accept loop. The worker mailbox serializes
            ;; eval requests; other methods (interrupt, ping, status, ...) run
            ;; concurrently with whatever the worker is doing.
+           ;;
+           ;; Shutdown path: the `shutdown' handler closes this listening
+           ;; socket so the blocking `socket-accept' below errors out; the
+           ;; handler-case turns that into a clean loop exit.
            (loop until (server-shutdown-requested? server) do
-             (let ((conn (sb-bsd-sockets:socket-accept sock)))
-               (sb-thread:make-thread
-                (let ((c conn))
-                  (lambda ()
-                    (unwind-protect
-                         (handler-case
-                             (%handle-connection server c)
-                           (error (e)
-                             (format *error-output*
-                                     "repl-bridge handler error: ~A~%" e)))
-                      (ignore-errors (sb-bsd-sockets:socket-close c)))))
-                :name "clpm.repl-bridge.conn"))))
+             (handler-case
+                 (let ((conn (sb-bsd-sockets:socket-accept sock)))
+                   (sb-thread:make-thread
+                    (let ((c conn))
+                      (lambda ()
+                        (unwind-protect
+                             (handler-case
+                                 (%handle-connection server c)
+                               (error (e)
+                                 (format *error-output*
+                                         "repl-bridge handler error: ~A~%" e)))
+                          (ignore-errors (sb-bsd-sockets:socket-close c)))))
+                    :name "clpm.repl-bridge.conn"))
+               (error ()
+                 (when (server-shutdown-requested? server)
+                   (loop-finish))))))
       (let ((w (server-worker server)))
         (when (and w (sb-thread:thread-alive-p (worker-thread w)))
           (sb-concurrency:send-message (worker-mailbox w) :stop)

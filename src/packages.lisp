@@ -389,6 +389,7 @@
            #:cmd-workspace
            #:cmd-registry
            #:cmd-repl
+           #:cmd-repl-bridge
            #:cmd-run
            #:cmd-exec
            #:cmd-test

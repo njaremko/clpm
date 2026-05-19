@@ -52,6 +52,7 @@ Commands:
   keys ...         Key management (registry signing)
   publish ...      Publish to a registry
   workspace ...    Workspace management
+  repl-bridge ...  Persistent Lisp image (for LLM-driven dev)
 
 Options:
   -v, --verbose    Verbose output
@@ -324,6 +325,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
 	     (apply #'clpm.commands:cmd-audit command-args))
 	    (:sbom
 	     (apply #'clpm.commands:cmd-sbom command-args))
+	    (:repl-bridge
+	     (apply #'clpm.commands:cmd-repl-bridge command-args))
 	    (t
 	     (format *error-output* "Unknown command: ~A~%" command)
 	     (print-usage)
