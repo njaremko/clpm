@@ -267,16 +267,49 @@ Signals CLPM-FETCH-ERROR if any entry is unsafe."
              :message (format nil "Unsafe archive entry: ~A" entry)
              :url (namestring archive-path)))))
 
-(defun validate-tar-contents (archive-path &key (gzip nil))
-  "Validate tar (optionally gzip) contents before extracting."
+(defun %tar-list-flag (compression)
+  "Return the tar listing flag for COMPRESSION (:none :gzip :xz :bz2)."
+  (ecase compression
+    (:none "-tf")
+    (:gzip "-tzf")
+    (:xz   "-tJf")
+    (:bz2  "-tjf")))
+
+(defun %tar-extract-flag (compression)
+  "Return the tar extract flag for COMPRESSION."
+  (ecase compression
+    (:none "-xf")
+    (:gzip "-xzf")
+    (:xz   "-xJf")
+    (:bz2  "-xjf")))
+
+(defun %compression-helper-tool (compression)
+  "Return the helper tool name a user must have installed for COMPRESSION."
+  (case compression
+    (:xz  "xz")
+    (:bz2 "bzip2")
+    (t    nil)))
+
+(defun %ensure-compression-tool (compression archive-path)
+  "Verify that the helper tool for COMPRESSION is available; signal a
+clpm-missing-tool-error with install hints otherwise."
+  (let ((helper (%compression-helper-tool compression)))
+    (when (and helper (not (clpm.platform:which helper)))
+      (error 'clpm.errors:clpm-missing-tool-error
+             :tool helper
+             :install-hints (clpm.platform:tool-install-hints helper)
+             :message (format nil "~A required to extract ~A"
+                              helper (namestring archive-path))))))
+
+(defun validate-tar-contents (archive-path &key (compression :none))
+  "Validate tar contents (with optional COMPRESSION) before extracting."
   (let ((tar (clpm.platform:find-tar)))
     (unless tar
       (error 'clpm.errors:clpm-missing-tool-error
              :tool "tar"
              :install-hints (clpm.platform:tool-install-hints "tar")))
-    (let ((args (if gzip
-                    (list tar "-tzf" (namestring archive-path))
-                    (list tar "-tf" (namestring archive-path)))))
+    (%ensure-compression-tool compression archive-path)
+    (let ((args (list tar (%tar-list-flag compression) (namestring archive-path))))
       (multiple-value-bind (lines error-output exit-code)
           (clpm.platform:run-program args :output :lines :error-output :string)
         (declare (ignore error-output))
@@ -308,13 +341,20 @@ Signals CLPM-FETCH-ERROR if any entry is unsafe."
 
 (defun extract-archive (archive-path dest-dir)
   "Extract archive at ARCHIVE-PATH to DEST-DIR.
-Supports .tar.gz, .tgz, .tar, .zip"
+Supports .tar.gz/.tgz, .tar.xz/.txz, .tar.bz2/.tbz/.tbz2, .tar, .zip."
   (let ((name (file-namestring archive-path)))
     (ensure-directories-exist dest-dir)
     (cond
       ((or (ends-with-p name ".tar.gz")
            (ends-with-p name ".tgz"))
-       (extract-tar-gz archive-path dest-dir))
+       (extract-tar-compressed archive-path dest-dir :gzip))
+      ((or (ends-with-p name ".tar.xz")
+           (ends-with-p name ".txz"))
+       (extract-tar-compressed archive-path dest-dir :xz))
+      ((or (ends-with-p name ".tar.bz2")
+           (ends-with-p name ".tbz2")
+           (ends-with-p name ".tbz"))
+       (extract-tar-compressed archive-path dest-dir :bz2))
       ((ends-with-p name ".tar")
        (extract-tar archive-path dest-dir))
       ((ends-with-p name ".zip")
@@ -330,18 +370,20 @@ Supports .tar.gz, .tgz, .tar, .zip"
     (and (>= slen suflen)
          (string= string suffix :start1 (- slen suflen)))))
 
-(defun extract-tar-gz (archive-path dest-dir)
-  "Extract .tar.gz archive."
+(defun extract-tar-compressed (archive-path dest-dir compression)
+  "Extract a compressed tar archive. COMPRESSION is :gzip, :xz, or :bz2."
   (let ((tar (clpm.platform:find-tar)))
     (unless tar
       (error 'clpm.errors:clpm-missing-tool-error
              :tool "tar"
              :install-hints (clpm.platform:tool-install-hints "tar")))
-    (validate-tar-contents archive-path :gzip t)
+    (validate-tar-contents archive-path :compression compression)
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program
-         (list tar "-xzf" (namestring archive-path)
-               "-C" (namestring dest-dir)))
+         (list tar (%tar-extract-flag compression)
+               (namestring archive-path)
+               "-C" (namestring dest-dir))
+         :error-output :string)
       (declare (ignore output))
       (unless (zerop exit-code)
         (error 'clpm.errors:clpm-fetch-error
@@ -355,11 +397,12 @@ Supports .tar.gz, .tgz, .tar, .zip"
       (error 'clpm.errors:clpm-missing-tool-error
              :tool "tar"
              :install-hints (clpm.platform:tool-install-hints "tar")))
-    (validate-tar-contents archive-path :gzip nil)
+    (validate-tar-contents archive-path :compression :none)
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program
          (list tar "-xf" (namestring archive-path)
-               "-C" (namestring dest-dir)))
+               "-C" (namestring dest-dir))
+         :error-output :string)
       (declare (ignore output))
       (unless (zerop exit-code)
         (error 'clpm.errors:clpm-fetch-error
