@@ -19,6 +19,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - `2026-05-19` **#011 landed.** `cmd-package` now branches on `effective-lisp-kind` and generates a kind-specific save form: SBCL uses `sb-ext:save-lisp-and-die` (writes `<output>.bin` plus an sh wrapper that injects `--end-runtime-options`), CCL uses `ccl:save-application :prepend-kernel t :purify t` (writes the image directly to `<output>`, chmod +x). CCL symbols are resolved at runtime via `uiop:find-symbol*` so SBCL can still compile the source. The subprocess is launched through `clpm.lisp:lisp-run-argv` so each lisp gets the right `-q/--noinform/--non-interactive/--batch` flags. ECL is explicitly rejected with "Packaging on ECL is not yet implemented" (out of scope; a future ticket can wire `c:build-program`). Package metadata now records `:lisp-kind` and `:lisp-version` so consumers can tell which image they're looking at.
 - `2026-05-19` **#014 landed.** `clpm info <sys> --all` (text mode) now emits per-candidate source kind/URL/hash/commit and license — matching the JSON branch. Output without `--all` is unchanged: still one line per candidate. `test/info-command-test.lisp` adds a `--all` case asserting both source URLs and the MIT license tag show up.
 - `2026-05-19` **#015 landed.** Added `clpm workspace remove <member>` (and updated usage/help for both `cmd-workspace`'s error path and `print-command-help :workspace`). Member name is normalized the same way as `add` (trailing slashes stripped); missing members error with the full current member list. Does NOT touch the on-disk member directory — symmetric with `add`. `test/workspace-subcommand-test.lisp` was extended with add → remove round-trip and missing-member error coverage.
+- `2026-05-19` **#016 landed.** `cmd-keys` gained three subcommands: `list [--keys-dir <dir>]`, `import --pub <path> [--id <id>] [--keys-dir <dir>]`, and `verify --pub <path> --file <path> --sig <path>`. List prints one line per `*.pub` file with a 16-hex-char SHA-256 fingerprint; import copies a public key into `~/.config/clpm/keys/` with `<id>.pub` naming, refuses to overwrite, and validates the file is a 64-char hex Ed25519 public key; verify performs an Ed25519 detached-signature round-trip on demand (rc 0 valid, non-zero invalid/error). Help text in `print-command-help :keys` describes all four subcommands. `test/keys-subcommand-test.lisp` exercises generate → import → list → import-overwrite-refusal → sign-from-private → verify-good → verify-tampered.
 
 ## Lessons / decisions
 
@@ -289,7 +290,7 @@ The most useful overrides are probably `:lisp` (default implementation for proje
 
 ---
 
-### #016 — `[ ]` `P2` `cli` `keys` Flesh out `clpm keys`
+### #016 — `[x]` `P2` `cli` `keys` Flesh out `clpm keys`
 
 `src/commands.lisp:2664-2720` only implements `generate`. The help text (`src/commands.lisp:3520-3528`) and README don't mention any other subcommands, but several are obvious gaps:
 

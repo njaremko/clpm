@@ -2872,13 +2872,48 @@ to the output path; no wrapper is needed since CCL doesn't grab CLI flags."
                                  :output nil
                                  :error-output nil))))
 
+(defun %keys-dir-or-default (override)
+  "Return the keys directory to operate on. If OVERRIDE is a non-empty string,
+expand it; otherwise return `clpm.platform:keys-dir`."
+  (if (and (stringp override) (plusp (length override)))
+      (uiop:ensure-directory-pathname (clpm.platform:expand-path override))
+      (uiop:ensure-directory-pathname (clpm.platform:keys-dir))))
+
+(defun %read-pub-key-hex (path)
+  "Read a public key file (32-byte Ed25519 hex). Returns the trimmed hex
+string, or NIL if the file is not a valid 64-char hex line."
+  (handler-case
+      (with-open-file (s path :direction :input :external-format :utf-8)
+        (let* ((line (read-line s nil nil))
+               (trim (and line (string-trim '(#\Space #\Tab #\Return #\Newline) line))))
+          (and (stringp trim) (= 64 (length trim))
+               (every (lambda (c)
+                        (find c "0123456789abcdefABCDEF" :test #'char=))
+                      trim)
+               trim)))
+    (error () nil)))
+
+(defun %pub-key-fingerprint (path)
+  "Return a short SHA-256 fingerprint (first 16 hex chars) for the public key
+in PATH, or NIL if the file isn't a recognizable Ed25519 public key."
+  (let ((hex (%read-pub-key-hex path)))
+    (when hex
+      (let ((bytes (clpm.crypto.sha256:hex-to-bytes hex)))
+        (subseq (clpm.crypto.sha256:bytes-to-hex
+                 (clpm.crypto.sha256:sha256 bytes))
+                0 16)))))
+
 (defun cmd-keys (&rest args)
   "Manage Ed25519 keys used for registry signing."
   (let ((subcommand (first args))
         (rest (rest args)))
     (labels ((usage-error (fmt &rest fmt-args)
                (apply #'log-error fmt fmt-args)
-               (log-error "Usage: clpm keys generate --out <dir> --id <id>")
+               (log-error "Usage:")
+               (log-error "  clpm keys generate --out <dir> --id <id>")
+               (log-error "  clpm keys list [--keys-dir <dir>]")
+               (log-error "  clpm keys import --pub <path> [--id <id>] [--keys-dir <dir>]")
+               (log-error "  clpm keys verify --pub <path> --file <path> --sig <path>")
                (return-from cmd-keys 1)))
       (cond
         ((or (null subcommand) (string= subcommand "help"))
@@ -2927,6 +2962,119 @@ to the output path; no wrapper is needed since CCL doesn't grab CLI flags."
                (log-info "Wrote private key: ~A" (namestring priv-path))
                (log-info "Wrote public key:  ~A" (namestring pub-path))
                0))))
+        ((string= subcommand "list")
+         (let ((keys-dir nil))
+           (loop while rest do
+             (let ((arg (pop rest)))
+               (cond
+                 ((string= arg "--keys-dir") (setf keys-dir (pop rest)))
+                 (t (usage-error "Unknown option: ~A" arg)))))
+           (let* ((dir (%keys-dir-or-default keys-dir)))
+             (unless (uiop:directory-exists-p dir)
+               (log-info "No keys directory: ~A" (namestring dir))
+               (return-from cmd-keys 0))
+             (let* ((entries (sort (or (directory (merge-pathnames "*.pub" dir)) '())
+                                   #'string< :key #'namestring))
+                    (any nil))
+               (dolist (path entries)
+                 (let* ((name (pathname-name path))
+                        (fp (%pub-key-fingerprint path)))
+                   (cond
+                     (fp
+                      (setf any t)
+                      (format t "~A~Cfingerprint:~A~%" name #\Tab fp))
+                     (t
+                      (log-error "Skipping unreadable key: ~A" (namestring path))))))
+               (unless any
+                 (log-info "No keys found in: ~A" (namestring dir)))
+               0))))
+        ((string= subcommand "import")
+         (let ((pub-path nil)
+               (id nil)
+               (keys-dir nil))
+           (loop while rest do
+             (let ((arg (pop rest)))
+               (cond
+                 ((string= arg "--pub") (setf pub-path (pop rest)))
+                 ((string= arg "--id") (setf id (pop rest)))
+                 ((string= arg "--keys-dir") (setf keys-dir (pop rest)))
+                 (t (usage-error "Unknown option: ~A" arg)))))
+           (unless (and (stringp pub-path) (plusp (length pub-path)))
+             (usage-error "Missing --pub <path>"))
+           (let ((expanded (uiop:ensure-pathname
+                            (clpm.platform:expand-path pub-path)
+                            :want-existing nil :want-file t)))
+             (unless (uiop:file-exists-p expanded)
+               (log-error "Public key not found: ~A" (namestring expanded))
+               (return-from cmd-keys 1))
+             (unless (%read-pub-key-hex expanded)
+               (log-error "Not a valid Ed25519 public key (expected 32-byte hex on one line): ~A"
+                          (namestring expanded))
+               (return-from cmd-keys 1))
+             (let* ((source-id (or id (pathname-name expanded))))
+               (unless (%key-id-valid-p source-id)
+                 (log-error "Invalid key id (use [A-Za-z0-9._-]+): ~S" source-id)
+                 (return-from cmd-keys 1))
+               (let* ((dest-dir (%keys-dir-or-default keys-dir))
+                      (dest (merge-pathnames (format nil "~A.pub" source-id) dest-dir)))
+                 (ensure-directories-exist dest-dir)
+                 (when (uiop:file-exists-p dest)
+                   (log-error "Key already exists: ~A" (namestring dest))
+                   (return-from cmd-keys 1))
+                 (with-open-file (in expanded :direction :input
+                                              :external-format :utf-8)
+                   (with-open-file (out dest :direction :output
+                                             :if-exists :error
+                                             :external-format :utf-8)
+                     (let ((buf (make-string 4096)))
+                       (loop for n = (read-sequence buf in)
+                             while (plusp n)
+                             do (write-sequence buf out :end n)))))
+                 (%chmod-if-available dest "644")
+                 (log-info "Imported public key: ~A" (namestring dest))
+                 0)))))
+        ((string= subcommand "verify")
+         (let ((pub-path nil)
+               (file-path nil)
+               (sig-path nil))
+           (loop while rest do
+             (let ((arg (pop rest)))
+               (cond
+                 ((string= arg "--pub") (setf pub-path (pop rest)))
+                 ((string= arg "--file") (setf file-path (pop rest)))
+                 ((string= arg "--sig") (setf sig-path (pop rest)))
+                 (t (usage-error "Unknown option: ~A" arg)))))
+           (unless (and (stringp pub-path) (plusp (length pub-path)))
+             (usage-error "Missing --pub <path>"))
+           (unless (and (stringp file-path) (plusp (length file-path)))
+             (usage-error "Missing --file <path>"))
+           (unless (and (stringp sig-path) (plusp (length sig-path)))
+             (usage-error "Missing --sig <path>"))
+           (let ((pp (uiop:ensure-pathname (clpm.platform:expand-path pub-path)
+                                           :want-existing nil :want-file t))
+                 (fp (uiop:ensure-pathname (clpm.platform:expand-path file-path)
+                                           :want-existing nil :want-file t))
+                 (sp (uiop:ensure-pathname (clpm.platform:expand-path sig-path)
+                                           :want-existing nil :want-file t)))
+             (dolist (probe (list (list pp "--pub")
+                                  (list fp "--file")
+                                  (list sp "--sig")))
+               (destructuring-bind (path label) probe
+                 (unless (uiop:file-exists-p path)
+                   (log-error "~A not found: ~A" label (namestring path))
+                   (return-from cmd-keys 1))))
+             (handler-case
+                 (let ((ok (clpm.crypto.ed25519:verify-file-signature fp sp pp)))
+                   (cond
+                     (ok
+                      (log-info "verify: OK")
+                      0)
+                     (t
+                      (log-error "verify: signature does NOT match")
+                      1)))
+               (error (c)
+                 (log-error "verify failed: ~A" c)
+                 1)))))
         (t
          (usage-error "Unknown keys subcommand: ~A" subcommand))))))
 
@@ -3729,13 +3877,25 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
        (p "Generate a software bill of materials (SBOM) from the lockfile.")
        0)
       (:keys
-       (p "Usage: clpm keys generate --out <dir> --id <id>")
+       (p "Usage:")
+       (p "  clpm keys generate --out <dir> --id <id>")
+       (p "  clpm keys list [--keys-dir <dir>]")
+       (p "  clpm keys import --pub <path> [--id <id>] [--keys-dir <dir>]")
+       (p "  clpm keys verify --pub <path> --file <path> --sig <path>")
        (p "")
        (p "Manage Ed25519 keys for signing registries and releases.")
        (p "")
        (p "Generated files:")
        (p "  <id>.key  32-byte seed as ASCII hex (64 chars) (keep secret)")
        (p "  <id>.pub  32-byte public key as ASCII hex (64 chars)")
+       (p "")
+       (p "`keys list` reads <keys-dir> (default: ~/.config/clpm/keys/) and prints")
+       (p "one line per .pub file with a short SHA-256 fingerprint of the public key.")
+       (p "")
+       (p "`keys import` copies a .pub file into the keys directory. The destination")
+       (p "filename is <id>.pub (--id, or the source file's basename).")
+       (p "")
+       (p "`keys verify` performs a standalone Ed25519 detached-signature check.")
        0)
       (:publish
        (p "Usage: clpm publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>] [--git-commit]")
