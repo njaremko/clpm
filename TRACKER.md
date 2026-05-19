@@ -10,6 +10,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - `2026-05-19` **#013 landed.** Adds `clpm.platform:with-file-lock` combining a per-path SB-THREAD mutex (intra-process) with `lockf` on a sibling `.lock` file (inter-process). Consolidated duplicated `projects.sxp` helpers from `build/driver.lisp` into `store.lisp` and exported `upsert-project-index-root`/`remove-project-index-root`/`read-project-index-roots`. Added `config.lisp:update-config` for atomic read-modify-write. `test/concurrent-state-test.lisp` covers both layers (8 child SBCL procs + 6 threads).
 - `2026-05-19` **#007 landed.** `native-requires` now flows: registry metadata → solver (`build-resolution` / `resolution-to-lockfile`) → `locked-release` struct field → lockfile serialization → `check-native-deps`. Rewrote orchestrator's `check-native-deps` to actually read `locked-release-native-requires` instead of the previous `(native-deps nil)` placeholder, with parsing for `(:kind "name")` and `(:kind . "name")` forms, dedup via hash table, and `clpm-missing-native-dep-error` raised on both unresolved deps and malformed entries. `test/native-deps-test.lisp` covers round-trip, empty, missing, and malformed cases. Full suite 57/57 green.
 - `2026-05-19` **#012 landed.** `sha256-tree` now hashes a git-style mode token (`100644` / `100755` / `120000`) per file via `sb-posix:lstat`, so an `chmod +x` flips the digest. Symlinks now hash the link target string instead of the dereferenced contents, with `walk-files` switched to SBCL's `:resolve-symlinks nil` to preserve them through the walker. Bumped `compute-build-id` prefix `clpm-build-v1` → `clpm-build-v2` so stale cached builds don't collide with the new hash format. On non-Unix-SBCL platforms the executable bit is approximated by extension (`.bat/.cmd/.exe/.ps1/.sh`). `test/tree-mode-test.lisp` covers determinism, executable-bit flip, and symlink retargeting. Full suite 58/58 green.
+- `2026-05-19` **#006 landed.** `cmd-update` now honors its `[system ...]` arguments. `solve` accepts `:unlock-set` (`:all`, `nil`, or list-of-id strings); `ordered-candidate-refs` skips the lockfile preference for unlocked systems, and `next-pending-system` orders unlocked systems first so their freshly-chosen versions can force constraints onto still-pending dependents. `clpm update` (no args) re-resolves everything; `clpm update <sys>...` holds untargeted systems at their current versions unless a constraint forces them to move. Unknown systems exit with a non-zero rc and a clear error. `test/update-selective-test.lisp` covers targeted update, held-untargeted, full update, unknown-system error, and forced-bump. Full suite 59/59 green.
 
 ## Lessons / decisions
 
@@ -17,6 +18,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - **SBCL `sb-posix` does not export `flock` on Darwin.** Use `lockf` (POSIX-standard, exclusive-only). Always-exclusive locks are fine since CLPM's critical sections are short.
 - **`SB-EXT` exports `wait-for`.** Test helpers should avoid the name or be defined in their own package, otherwise `defun wait-for ...` in CL-USER hits a package-lock error.
 - **SBCL's `directory` follows symlinks by default and even deduplicates by truename.** A file and a symlink pointing at it collapse to a single entry. Pass `:resolve-symlinks nil` to surface symlinks distinctly — this is required if a tree hash is to encode link targets rather than dereferenced contents.
+- **The backtracking solver does not revisit previously-decided systems on conflict.** When `propagate-dependencies` adds a new constraint that conflicts with an already-decided system, the conflict bubbles up to the most recent decision frame only. Practical implication for selective update: an unlocked system whose only viable version forces a constraint upgrade on a transitively-required dependency must be DECIDED BEFORE that dependency. We achieve this by ordering unlocked systems first in `next-pending-system` rather than by adding a true conflict-driven backjump. A real PubGrub implementation (see #001 Option B) would not need this hack.
 
 ---
 
@@ -94,7 +96,7 @@ Depends on #004 if kept.
 
 ---
 
-### #006 — `[ ]` `P1` `cli` `update` Implement selective update in `cmd-update`
+### #006 — `[x]` `P1` `cli` `update` Implement selective update in `cmd-update`
 
 `src/commands.lisp:1407-1441` declares `(declare (ignore systems))  ; TODO: selective update` but the help text (`src/commands.lisp:3605-3609`) advertises `clpm update [system ...]`. A user running `clpm update alexandria` today silently gets a full re-resolve.
 

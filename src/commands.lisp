@@ -1405,20 +1405,35 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
 ;;; update command
 
 (defun cmd-update (&rest systems)
-  "Update dependencies (re-resolve with latest versions)."
-  (declare (ignore systems))  ; TODO: selective update
-  (multiple-value-bind (project-root manifest-path _lock-path workspace-root _workspace-path)
+  "Update dependencies. With no arguments, re-resolves every system from
+scratch. Given one or more system IDs, only those systems are unlocked;
+every other system is pinned to its current lockfile selection (so unrelated
+deps don't churn)."
+  (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
       (find-effective-project-root)
-    (declare (ignore _lock-path _workspace-path))
+    (declare (ignore _workspace-path))
     (unless manifest-path
       (when (null workspace-root)
         (log-no-project-found))
       (return-from cmd-update 1))
-    (log-info "Updating dependencies...")
-    ;; Force fresh resolve by ignoring lockfile
     (let* ((project (clpm.project:read-project-file manifest-path))
-           (registries (load-project-registries project)))
-      ;; Update registries first
+           (registries (load-project-registries project))
+           (selective (not (null systems)))
+           (existing-lock (and selective lock-path
+                               (clpm.project:read-lock-file lock-path))))
+      (when selective
+        (unless existing-lock
+          (log-error "No clpm.lock found - run 'clpm install' before 'clpm update <system>'")
+          (return-from cmd-update 1))
+        (let ((locked-ids (mapcar #'clpm.project:locked-system-id
+                                  (clpm.project:lockfile-resolved existing-lock))))
+          (dolist (sys systems)
+            (unless (member sys locked-ids :test #'string=)
+              (log-error "System ~A is not present in the current lockfile" sys)
+              (return-from cmd-update 1)))))
+      (if selective
+          (log-info "Updating ~{~A~^, ~}..." systems)
+          (log-info "Updating all dependencies..."))
       (dolist (reg registries)
         (log-verbose "Updating registry: ~A" (clpm.registry:registry-name reg))
         (handler-case
@@ -1426,15 +1441,16 @@ GRAPH is a hash table mapping system-id -> sorted list of dependency system-ids.
           (error (c)
             (log-error "Failed to update registry ~A: ~A"
                        (clpm.registry:registry-name reg) c))))
-      ;; Resolve fresh (no lockfile)
       (handler-case
-          (let ((resolution (clpm.solver:solve project registries)))
-            (let ((new-lockfile (clpm.solver:resolution-to-lockfile
-                                 resolution project registries)))
-              (let ((lock-out (merge-pathnames "clpm.lock"
-                                               project-root)))
-                (clpm.project:write-lock-file new-lockfile lock-out)
-                (log-info "Updated clpm.lock"))))
+          (let* ((resolution (clpm.solver:solve
+                              project registries
+                              :lockfile (when selective existing-lock)
+                              :unlock-set (if selective systems :all)))
+                 (new-lockfile (clpm.solver:resolution-to-lockfile
+                                resolution project registries))
+                 (lock-out (merge-pathnames "clpm.lock" project-root)))
+            (clpm.project:write-lock-file new-lockfile lock-out)
+            (log-info "Updated clpm.lock"))
         (clpm.errors:clpm-resolve-error (c)
           (log-error "~A" c)
           (return-from cmd-update 2))))

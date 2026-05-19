@@ -34,6 +34,11 @@
   "Internal state of the solver."
   (index nil)                ; registry index
   (lockfile nil)             ; existing lockfile for preferences
+  ;; UNLOCK-SET controls per-system lockfile preference suppression:
+  ;;   nil         - prefer lockfile for every system (default for install)
+  ;;   :all        - ignore lockfile entirely (full update)
+  ;;   (s1 s2 ...) - ignore lockfile preference only for the named systems
+  (unlock-set nil)
   (decisions nil :type list) ; alist of (system-id . release-ref)
   (constraints nil :type list) ; alist of (system-id . accumulated-constraint)
   (pending nil :type list)   ; list of system-ids to process
@@ -45,14 +50,20 @@
 
 ;;; Main solver entry point
 
-(defun solve (project registries &key lockfile)
+(defun solve (project registries &key lockfile unlock-set)
   "Resolve dependencies for PROJECT using REGISTRIES.
-If LOCKFILE is provided, prefer those selections.
+
+If LOCKFILE is provided, prefer those selections unless UNLOCK-SET says
+otherwise. UNLOCK-SET is :ALL (re-resolve every system), NIL (prefer the
+lockfile for every system), or a list of system-id strings to unlock; systems
+not in the list are held at their lockfile selections.
+
 Returns a resolution struct or signals clpm-resolve-error."
   (let ((index (clpm.registry:build-registry-index registries))
         (state (make-solver-state)))
     (setf (solver-state-index state) index
           (solver-state-lockfile state) lockfile
+          (solver-state-unlock-set state) unlock-set
           (solver-state-reasons state) (make-hash-table :test 'equal)
           (solver-state-extra-release-metadata state)
           (make-hash-table :test 'equal))
@@ -172,14 +183,21 @@ For pinned/local sources, registry is NIL."
 ;;; Backtracking search solver
 
 (defun next-pending-system (state)
-  "Pick and remove the next pending system deterministically."
+  "Pick and remove the next pending system deterministically.
+
+Unlocked systems (per the solver-state-unlock-set) are decided BEFORE
+lockfile-preferred systems so that the constraints they propagate can
+override stale lockfile preferences on transitive dependencies. Within
+each group ordering is alphabetical for determinism."
   (let ((pending (solver-state-pending state)))
     (when pending
-      (let ((next (reduce (lambda (a b) (if (string< a b) a b))
-                          pending)))
-        (setf (solver-state-pending state)
-              (remove next pending :test #'string= :count 1))
-        next))))
+      (labels ((pick-min (xs) (reduce (lambda (a b) (if (string< a b) a b)) xs)))
+        (let* ((unlocked (remove-if-not (lambda (id) (%system-unlocked-p state id))
+                                        pending))
+               (next (if unlocked (pick-min unlocked) (pick-min pending))))
+          (setf (solver-state-pending state)
+                (remove next pending :test #'string= :count 1))
+          next)))))
 
 (defun snapshot-state (state)
   "Create a snapshot of STATE sufficient for backtracking."
@@ -222,10 +240,19 @@ For pinned/local sources, registry is NIL."
                        (format nil "Conflict: selected ~A does not satisfy ~A"
                                system-id (constraint-to-string constraint))))))
 
+(defun %system-unlocked-p (state system-id)
+  "True when SYSTEM-ID's lockfile preference should be ignored."
+  (let ((set (solver-state-unlock-set state)))
+    (cond
+      ((eq set :all) t)
+      ((listp set) (member system-id set :test #'string=))
+      (t nil))))
+
 (defun ordered-candidate-refs (state system-id candidates)
   "Return candidate release refs in deterministic preference order."
   (let ((refs (mapcar #'car candidates))
-        (preferred (when (solver-state-lockfile state)
+        (preferred (when (and (solver-state-lockfile state)
+                              (not (%system-unlocked-p state system-id)))
                      (dolist (locked (clpm.project:lockfile-resolved
                                       (solver-state-lockfile state)))
                        (when (string= (clpm.project:locked-system-id locked) system-id)
