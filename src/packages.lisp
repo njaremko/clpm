@@ -40,10 +40,19 @@
   (:export #:list-directory-entries
            #:walk-files))
 
+(defpackage #:clpm.log
+  (:use #:cl)
+  (:export #:*verbose*
+           #:log-info
+           #:log-verbose
+           #:log-error))
+
 (defpackage #:clpm.io.json
   (:use #:cl)
   (:export #:write-json
-           #:write-json-to-string))
+           #:write-json-to-string
+           #:read-json
+           #:read-json-from-string))
 
 (defpackage #:clpm.crypto.sha256
   (:use #:cl)
@@ -224,7 +233,8 @@
            #:find-project-or-workspace-root))
 
 (defpackage #:clpm.registry
-  (:use #:cl #:clpm.io.sexp #:clpm.crypto.sha256 #:clpm.crypto.ed25519 #:clpm.errors)
+  (:use #:cl #:clpm.log #:clpm.io.sexp #:clpm.crypto.sha256 #:clpm.crypto.ed25519
+        #:clpm.errors)
   (:export #:registry
            #:registry-name
            #:registry-kind
@@ -345,9 +355,12 @@
            #:check-native-deps))
 
 (defpackage #:clpm.commands
-  (:use #:cl #:clpm.project #:clpm.registry #:clpm.solver #:clpm.fetch #:clpm.build
-        #:clpm.store #:clpm.platform #:clpm.config #:clpm.errors)
+  (:use #:cl #:clpm.log #:clpm.project #:clpm.registry #:clpm.solver #:clpm.fetch
+        #:clpm.build #:clpm.store #:clpm.platform #:clpm.config #:clpm.errors)
   (:export #:*verbose*
+           #:log-info
+           #:log-verbose
+           #:log-error
            #:*offline*
            #:*insecure*
            #:*jobs*

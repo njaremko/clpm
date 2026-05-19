@@ -203,7 +203,7 @@ Modifies REGISTRY in place."
                   (symbol-value 'clpm.commands:*insecure*))
              (progn
                (setf (registry-snapshot-sig-sha256 registry) nil)
-               (clpm.commands::log-info
+               (log-info
                 "WARNING: --insecure: skipping snapshot signature verification for registry ~A"
                 (registry-name registry)))
              (setf (registry-snapshot-sig-sha256 registry)

@@ -3,8 +3,10 @@
 (in-package #:clpm.commands)
 
 ;;; Global options (set from main)
+;;; `*verbose*` and the log-* helpers live in clpm.log so lower layers can
+;;; use them without depending on clpm.commands; clpm.commands re-exports
+;;; them for backwards-compatible callers (e.g. main.lisp).
 
-(defvar *verbose* nil "Enable verbose output")
 (defvar *offline* nil "Offline mode - fail if artifacts missing")
 (defvar *insecure* nil "Skip signature verification")
 (defvar *jobs* 1 "Number of parallel jobs")
@@ -15,21 +17,6 @@
 this invocation; :all = include every :optional dep; (s1 s2 ...) = include
 only these systems. Merged with any persisted opt-in already in the lockfile
 when computing the effective set.")
-
-;;; Helper functions
-
-(defun log-info (format-string &rest args)
-  "Print info message."
-  (format t "~&~?~%" format-string args))
-
-(defun log-verbose (format-string &rest args)
-  "Print verbose message if verbose mode enabled."
-  (when *verbose*
-    (format t "~&  ~?~%" format-string args)))
-
-(defun log-error (format-string &rest args)
-  "Print error message."
-  (format *error-output* "~&error: ~?~%" format-string args))
 
 (defun %searched-parent-directories (&optional (start (uiop:getcwd)))
   "Return a list of directory pathnames searched when looking for clpm.project."

@@ -13,6 +13,7 @@
     :components
      ((:file "packages")
      (:file "errors")
+     (:file "log")
      (:module "io"
       :serial t
       :components
