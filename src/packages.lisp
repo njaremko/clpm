@@ -322,12 +322,18 @@
 
 (defpackage #:clpm.fetch
   (:use #:cl #:clpm.platform #:clpm.store #:clpm.crypto.sha256 #:clpm.errors)
-  (:export #:fetch-artifact
+  (:export #:fetch-url
+           #:fetch-artifact
            #:fetch-git
            #:resolve-git-ref
            #:extract-archive
            #:verify-and-store
-           #:fetch-lockfile-deps))
+           #:fetch-lockfile-deps
+           #:*fetch-retries*
+           #:*fetch-timeout*
+           #:*fetch-backoff-base*
+           #:*fetch-sleep-fn*
+           #:*test-fetcher*))
 
 (defpackage #:clpm.build
   (:use #:cl #:clpm.platform #:clpm.store #:clpm.errors)

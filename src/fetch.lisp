@@ -2,23 +2,100 @@
 
 (in-package #:clpm.fetch)
 
+;;; Retry / timeout configuration
+;;;
+;;; A `fetch-url` call wraps the underlying downloader in a retry loop with
+;;; quadratic backoff. The schedule for attempt N (1-indexed) waits
+;;; `*fetch-backoff-base* * (N-1)^2` seconds before the next attempt. With the
+;;; default base of 1s and 3 attempts: pauses of 0s, 1s, 4s -- the third
+;;; attempt happens 5s after the first.
+;;;
+;;; All tunables fall through to env vars so users can override without code
+;;; changes; CLI flags then bind these specials globally for the run.
+
+(defvar *fetch-retries* nil
+  "Number of fetch attempts before giving up. NIL means read CLPM_FETCH_RETRIES
+or fall back to 3.")
+
+(defvar *fetch-timeout* nil
+  "Per-request timeout in seconds. NIL means read CLPM_FETCH_TIMEOUT or fall
+back to 60.")
+
+(defvar *fetch-backoff-base* 1
+  "Base seconds for quadratic backoff (0 disables sleeping; tests set this).")
+
+(defvar *fetch-sleep-fn* nil
+  "If non-NIL, a function (lambda (seconds)) called instead of sleep. Lets
+tests assert on the backoff schedule without actually sleeping.")
+
+(defvar *test-fetcher* nil
+  "If non-NIL, a function (lambda (url dest-path)) that replaces the real
+downloader. Tests inject this to simulate failures deterministically.")
+
+(defun %positive-int-from-env (name)
+  (let ((raw (uiop:getenv name)))
+    (when (and raw (plusp (length raw)))
+      (let ((n (ignore-errors (parse-integer raw :junk-allowed nil))))
+        (and (integerp n) (plusp n) n)))))
+
+(defun %effective-retries ()
+  (or *fetch-retries*
+      (%positive-int-from-env "CLPM_FETCH_RETRIES")
+      3))
+
+(defun %effective-timeout ()
+  (or *fetch-timeout*
+      (%positive-int-from-env "CLPM_FETCH_TIMEOUT")
+      60))
+
+(defun %fetch-sleep (seconds)
+  (when (plusp seconds)
+    (if *fetch-sleep-fn*
+        (funcall *fetch-sleep-fn* seconds)
+        (sleep seconds))))
+
 ;;; Downloader interface
 
-(defun fetch-url (url dest-path &key (progress t))
-  "Fetch URL to DEST-PATH using available downloader."
+(defun %fetch-once (url dest-path &key progress timeout)
+  "Perform a single download attempt; signal `clpm-fetch-error' on failure."
+  (when *test-fetcher*
+    (funcall *test-fetcher* url dest-path)
+    (return-from %fetch-once))
   (let ((downloader (clpm.platform:find-downloader)))
     (unless downloader
       (error 'clpm.errors:clpm-fetch-error
              :message "No downloader available (need curl, wget, or PowerShell)"
              :url url))
     (ecase downloader
-      (:curl (fetch-with-curl url dest-path :progress progress))
-      (:wget (fetch-with-wget url dest-path :progress progress))
-      (:powershell (fetch-with-powershell url dest-path)))))
+      (:curl (fetch-with-curl url dest-path :progress progress :timeout timeout))
+      (:wget (fetch-with-wget url dest-path :progress progress :timeout timeout))
+      (:powershell (fetch-with-powershell url dest-path :timeout timeout)))))
 
-(defun fetch-with-curl (url dest-path &key progress)
+(defun fetch-url (url dest-path &key (progress t))
+  "Fetch URL to DEST-PATH using available downloader.
+
+Retries transient failures up to `*fetch-retries*' times with quadratic
+backoff (`*fetch-backoff-base*' * (N-1)^2 seconds between attempts). Each
+attempt enforces a per-request timeout of `*fetch-timeout*' seconds."
+  (let ((retries (%effective-retries))
+        (timeout (%effective-timeout))
+        (last-error nil))
+    (loop for attempt from 1 to retries do
+      (handler-case
+          (progn
+            (%fetch-once url dest-path :progress progress :timeout timeout)
+            (return-from fetch-url))
+        (clpm.errors:clpm-fetch-error (c)
+          (setf last-error c)
+          (when (< attempt retries)
+            (%fetch-sleep (* *fetch-backoff-base* attempt attempt))))))
+    (error last-error)))
+
+(defun fetch-with-curl (url dest-path &key progress timeout)
   "Fetch URL using curl."
   (let ((args (append (list "curl" "-fsSL")
+                      (when (and timeout (plusp timeout))
+                        (list "--max-time" (princ-to-string timeout)))
                       (when progress (list "-#"))
                       (list "-o" (namestring dest-path) url))))
     (multiple-value-bind (output error-output exit-code)
@@ -30,9 +107,12 @@
                :url url
                :status exit-code)))))
 
-(defun fetch-with-wget (url dest-path &key progress)
+(defun fetch-with-wget (url dest-path &key progress timeout)
   "Fetch URL using wget."
   (let ((args (append (list "wget")
+                      (when (and timeout (plusp timeout))
+                        (list (format nil "--timeout=~A" timeout)
+                              "--tries=1"))
                       (unless progress (list "-q"))
                       (list "-O" (namestring dest-path) url))))
     (multiple-value-bind (output error-output exit-code)
@@ -44,10 +124,14 @@
                :url url
                :status exit-code)))))
 
-(defun fetch-with-powershell (url dest-path)
+(defun fetch-with-powershell (url dest-path &key timeout)
   "Fetch URL using PowerShell (Windows)."
-  (let ((cmd (format nil "Invoke-WebRequest -Uri '~A' -OutFile '~A'"
-                     url (namestring dest-path))))
+  (let* ((timeout-clause
+           (if (and timeout (plusp timeout))
+               (format nil " -TimeoutSec ~A" timeout)
+               ""))
+         (cmd (format nil "Invoke-WebRequest -Uri '~A' -OutFile '~A'~A"
+                      url (namestring dest-path) timeout-clause)))
     (multiple-value-bind (output error-output exit-code)
         (clpm.platform:run-program
          (list "powershell.exe" "-Command" cmd))

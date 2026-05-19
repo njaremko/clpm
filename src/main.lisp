@@ -60,6 +60,8 @@ Options:
   -p, --package M  Workspace member to target
   --offline        Fail if artifacts not in cache
   --insecure       Skip signature verification (dangerous)
+  --fetch-retries N      Retry budget for HTTP fetches (default: 3, env: CLPM_FETCH_RETRIES)
+  --fetch-timeout SECS   Per-request timeout for HTTP fetches (default: 60, env: CLPM_FETCH_TIMEOUT)
   -h, --help       Show this help
   --version        Show version
 
@@ -156,6 +158,28 @@ Returns (values command command-args options)."
              (push (cons :with-optional raw) options)))
           ((string= arg "--with-all-optional")
            (push (cons :with-optional :all) options))
+          ((string= arg "--fetch-retries")
+           (incf i)
+           (when (>= i (length args))
+             (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                       "Missing value for ~A" arg))
+           (let* ((raw (nth i args))
+                  (n (ignore-errors (parse-integer raw :junk-allowed nil))))
+             (unless (and (integerp n) (plusp n))
+               (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                         "Invalid value for --fetch-retries: ~A" raw))
+             (push (cons :fetch-retries n) options)))
+          ((string= arg "--fetch-timeout")
+           (incf i)
+           (when (>= i (length args))
+             (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                       "Missing value for ~A" arg))
+           (let* ((raw (nth i args))
+                  (n (ignore-errors (parse-integer raw :junk-allowed nil))))
+             (unless (and (integerp n) (plusp n))
+               (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                         "Invalid value for --fetch-timeout: ~A" raw))
+             (push (cons :fetch-timeout n) options)))
           ((or (string= arg "-h") (string= arg "--help"))
            (if command
                (return-from parse-args
@@ -218,7 +242,17 @@ This function must not call `sb-ext:exit` so it can be used from tests."
                   (cond
                     ((null vals) nil)
                     ((member :all vals :test #'eq) :all)
-                    (t (remove-duplicates vals :test #'string=))))))
+                    (t (remove-duplicates vals :test #'string=)))))
+              (clpm.fetch:*fetch-retries*
+                (loop for opt in options
+                      when (and (consp opt) (eq (car opt) :fetch-retries))
+                        do (return (cdr opt))
+                      finally (return clpm.fetch:*fetch-retries*)))
+              (clpm.fetch:*fetch-timeout*
+                (loop for opt in options
+                      when (and (consp opt) (eq (car opt) :fetch-timeout))
+                        do (return (cdr opt))
+                      finally (return clpm.fetch:*fetch-timeout*))))
           ;; Dispatch command
           (case command
             (:help
