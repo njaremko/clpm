@@ -49,10 +49,11 @@
          (clpm-dir (merge-pathnames ".clpm/" proj))
          (asdf-config (merge-pathnames "asdf-config.lisp" clpm-dir)))
     (ensure-directories-exist clpm-dir)
-    ;; Minimal project file.
+    ;; Minimal project file. Empty :systems so the preload pass has nothing
+    ;; to chase and we don't depend on a fixture .asd existing here.
     (with-open-file (s manifest :direction :output :if-exists :supersede
                                 :external-format :utf-8)
-      (write-string "(:project :name \"myproj\" :version \"0.1.0\" :systems (\"myproj\") :registries ())" s))
+      (write-string "(:project :name \"myproj\" :version \"0.1.0\" :systems () :registries ())" s))
     ;; Empty asdf-config so %bridge-load-project finds something.
     (with-open-file (s asdf-config :direction :output :if-exists :supersede
                                    :external-format :utf-8)

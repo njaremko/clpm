@@ -157,6 +157,7 @@
            #:project-sbcl-constraints
            #:project-build-options
            #:project-scripts
+           #:project-repl-bridge
            #:dependency
            #:make-dependency
            #:dependency-system

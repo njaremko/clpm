@@ -1483,7 +1483,14 @@ lockfile; NIL persists no opt-ins."
                                      :lisp-kind kind
                                      :lisp-version lisp-version))
       (log-info "Project installed successfully")
-      (log-info "Run 'clpm repl' to start a REPL with the project loaded"))
+      (log-info "Run 'clpm repl' to start a REPL with the project loaded")
+      ;; Manifest may request that the repl-bridge daemon come up automatically
+      ;; on install. Skipped when a daemon for this project is already running,
+      ;; or when stdout isn't a tty (we don't want this happening inside CI).
+      (let* ((rb (and project (clpm.project:project-repl-bridge project)))
+             (autostart (and rb (getf rb :autostart))))
+        (when autostart
+          (%bridge-maybe-autostart project-root))))
     0))
 
 ;;; update command
@@ -1634,18 +1641,73 @@ malformed."
     (format s "~D~%" (sb-posix:getpid))))
 
 (defun %bridge-load-project (project-root)
-  "Activate the project: load .clpm/asdf-config.lisp if present so the
-daemon's image has the lockfile-resolved systems on the ASDF source-registry."
-  (let ((config (merge-pathnames ".clpm/asdf-config.lisp" project-root)))
+  "Activate the project and preload its declared systems.
+
+Phase 1: load `.clpm/asdf-config.lisp' if present, which puts the
+lockfile-resolved sources on the ASDF source-registry.
+
+Phase 2: read `clpm.project' and `asdf:load-system' each name in
+`:systems'. Their transitive dependencies come along for free. We don't
+load `:dev-depends'/`:test-depends' here -- those are scoped to dev/test
+workflows, not the runtime image."
+  (let ((config (merge-pathnames ".clpm/asdf-config.lisp" project-root))
+        (manifest (merge-pathnames "clpm.project" project-root)))
     (when (uiop:file-exists-p config)
       (handler-case
           (load config)
         (error (c)
-          (log-error "Failed to load project config: ~A" c))))))
+          (log-error "Failed to load project config: ~A" c)
+          (return-from %bridge-load-project))))
+    (when (uiop:file-exists-p manifest)
+      (handler-case
+          (let* ((proj (clpm.project:read-project-file manifest))
+                 (systems (and proj (clpm.project:project-systems proj)))
+                 (rb (and proj (clpm.project:project-repl-bridge proj)))
+                 (extra (getf rb :preload)))
+            (dolist (sys (remove-if-not #'stringp
+                                        (append systems
+                                                (when (listp extra) extra))))
+              (handler-case
+                  (asdf:load-system sys :verbose nil)
+                (error (c)
+                  (log-error "Failed to preload system ~A: ~A" sys c)))))
+        (error (c)
+          (log-error "Failed to parse project manifest: ~A" c))))))
 
 ;; Foreground `serve' never touches stdio. Detachment is done by the parent
 ;; via `uiop:launch-program` which inherits the right file descriptors --
 ;; we don't need fork/setsid/dup2 from inside the daemon.
+
+(defun %bridge-maybe-autostart (project-root)
+  "If the manifest sets `:repl-bridge (:autostart t ...)`, ensure a daemon is
+running for PROJECT-ROOT by launching `serve --detach' when one is not.
+
+Idempotent: if the existing pidfile points at a live process, do nothing.
+Failures are logged but never propagate -- `clpm install' must not fail
+because the daemon couldn't come up."
+  (handler-case
+      (multiple-value-bind (sock pid log) (%bridge-paths project-root)
+        (declare (ignore log))
+        (%bridge-clean-stale sock pid)
+        (let ((existing (%bridge-read-pidfile pid)))
+          (when (and existing (%bridge-pid-alive-p existing))
+            (log-info "repl-bridge daemon already running (pid ~D)" existing)
+            (return-from %bridge-maybe-autostart)))
+        (let ((clpm-bin (uiop:argv0)))
+          (unless (and clpm-bin (probe-file clpm-bin))
+            (log-error "repl-bridge autostart: clpm binary not found at ~S"
+                       clpm-bin)
+            (return-from %bridge-maybe-autostart))
+          (log-info "repl-bridge: starting daemon (autostart from manifest)")
+          (handler-case
+              (uiop:with-current-directory (project-root)
+                (uiop:launch-program (list clpm-bin "repl-bridge" "serve"
+                                           "--detach")
+                                     :output nil :error-output nil :input nil))
+            (error (c)
+              (log-error "repl-bridge autostart failed: ~A" c)))))
+    (error (c)
+      (log-error "repl-bridge autostart: ~A" c))))
 
 (defun %bridge-resolve-project ()
   "Return (values project-root sock pid log) or NIL on error (after logging)."

@@ -532,7 +532,7 @@ Deferred unless a Windows user files an issue.
 - `cmd-repl-bridge` detects the OS and uses the right transport.
 - Windows tests skip with a clear message if not running on Windows.
 
-### #025 — `[ ]` `P3` `repl-bridge` `config` Manifest-level autostart and preload
+### #025 — `[x]` `P3` `repl-bridge` `config` Manifest-level autostart and preload
 
 Allow projects to express:
 
@@ -547,7 +547,7 @@ Allow projects to express:
 - Manifest parser (`src/project.lisp`) accepts the new `:repl-bridge` field, round-trips it.
 - `clpm install` honors `autostart: t`; daemon comes up with the listed systems loaded.
 
-### #026 — `[ ]` `P3` `repl-bridge` `preload` Lockfile-driven preload
+### #026 — `[x]` `P3` `repl-bridge` `preload` Lockfile-driven preload
 
 `clpm repl-bridge serve` loads the project's lockfile-resolved systems on startup. Already implicit via #006 if `cmd-repl`'s loading is reused — promote it to an explicit, tested guarantee. The systems loaded are precisely those `clpm.solver:resolution-to-load-order` would return.
 
