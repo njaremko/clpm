@@ -102,46 +102,6 @@
 
 ;;; Activate project
 
-(defun %projects-index-path ()
-  "Return the path to the global projects index."
-  (merge-pathnames "projects.sxp" (clpm.platform:data-dir)))
-
-(defun %read-project-index-roots (path)
-  "Read PATH as a projects index and return its :roots list (or NIL)."
-  (when (uiop:file-exists-p path)
-    (handler-case
-        (let* ((form (clpm.io.sexp:read-safe-sexp-from-file path))
-               (plist (cdr form)))
-          (when (and (consp form) (eq (car form) :projects)
-                     (eql (getf plist :format) 1))
-            (let ((roots (getf plist :roots)))
-              (when (listp roots)
-                (remove-duplicates
-                 (remove-if-not #'stringp roots)
-                 :test #'string=)))))
-      (error ()
-        nil))))
-
-(defun %write-project-index-roots (path roots)
-  "Write ROOTS to PATH in canonical format."
-  (ensure-directories-exist path)
-  (clpm.io.sexp:write-canonical-sexp-to-file
-   `(:projects
-     :format 1
-     :roots ,(sort (copy-list roots) #'string<))
-   path))
-
-(defun %upsert-project-index-root (project-root)
-  "Upsert PROJECT-ROOT into the global projects index."
-  (let* ((project-root
-           (uiop:ensure-directory-pathname
-            (truename (uiop:ensure-directory-pathname project-root))))
-         (root (namestring project-root))
-         (index-path (%projects-index-path))
-         (existing (%read-project-index-roots index-path))
-         (roots (remove-duplicates (cons root existing) :test #'string=)))
-    (%write-project-index-roots index-path roots)))
-
 (defun activate-project (project-root lockfile &key lockfile-path compile-options (lisp-kind :sbcl) lisp-version)
   "Activate a project for use.
 Creates .clpm/ directory with ASDF configuration."
@@ -153,7 +113,7 @@ Creates .clpm/ directory with ASDF configuration."
              (clpm.crypto.sha256:bytes-to-hex
               (clpm.crypto.sha256:sha256-file lockfile-path)))))
     (ensure-directories-exist clpm-dir)
-    (%upsert-project-index-root project-root)
+    (clpm.store:upsert-project-index-root project-root)
     ;; Collect dependency source dirs and build cache dirs
     (let ((dep-source-dirs '())
           (build-cache-dirs '())

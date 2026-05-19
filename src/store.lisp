@@ -222,13 +222,21 @@ MANIFEST is build metadata plist."
          s)))
     dest))
 
-;;; Garbage collection
+;;; Projects index (shared between activation and GC)
 
-(defun %projects-index-path ()
+(defun projects-index-path ()
+  "Return the absolute path to the global projects index."
   (merge-pathnames "projects.sxp" (clpm.platform:data-dir)))
 
-(defun %read-project-index-roots (path)
-  "Read PATH as a projects index and return (values roots found-p)."
+(defun %projects-index-lock-path ()
+  "Return the lock file path co-located with the projects index."
+  (merge-pathnames "projects.sxp.lock" (clpm.platform:data-dir)))
+
+(defun %read-project-index-roots-unlocked (path)
+  "Read PATH as a projects index. Caller must hold the lock when consistency
+across read-modify-write is required.
+
+Returns (values roots found-p)."
   (if (not (uiop:file-exists-p path))
       (values nil nil)
       (handler-case
@@ -236,16 +244,69 @@ MANIFEST is build metadata plist."
                  (plist (cdr form)))
             (unless (and (consp form) (eq (car form) :projects)
                          (eql (getf plist :format) 1))
-              (return-from %read-project-index-roots (values nil nil)))
+              (return-from %read-project-index-roots-unlocked
+                (values nil nil)))
             (let ((roots (getf plist :roots)))
               (unless (listp roots)
-                (return-from %read-project-index-roots (values nil nil)))
+                (return-from %read-project-index-roots-unlocked
+                  (values nil nil)))
               (values (remove-duplicates
                        (remove-if-not #'stringp roots)
                        :test #'string=)
                       t)))
         (error ()
           (values nil nil)))))
+
+(defun read-project-index-roots ()
+  "Read the projects index under a shared lock.
+
+Returns (values roots found-p)."
+  (clpm.platform:with-file-lock ((%projects-index-lock-path) )
+    (%read-project-index-roots-unlocked (projects-index-path))))
+
+(defun %write-project-index-roots-unlocked (path roots)
+  "Write ROOTS to PATH atomically (tmp + rename). Caller holds the lock."
+  (ensure-directories-exist path)
+  (let ((tmp-path (make-pathname :type "tmp" :defaults path)))
+    (clpm.io.sexp:write-canonical-sexp-to-file
+     `(:projects
+       :format 1
+       :roots ,(sort (copy-list roots) #'string<))
+     tmp-path)
+    (rename-file tmp-path path)))
+
+(defun upsert-project-index-root (project-root)
+  "Add PROJECT-ROOT to the projects index. Read-modify-write under exclusive lock.
+
+Returns the updated list of roots."
+  (let* ((project-root
+           (uiop:ensure-directory-pathname
+            (truename (uiop:ensure-directory-pathname project-root))))
+         (root (namestring project-root))
+         (index-path (projects-index-path)))
+    (clpm.platform:with-file-lock ((%projects-index-lock-path) )
+      (let* ((existing (%read-project-index-roots-unlocked index-path))
+             (roots (remove-duplicates (cons root existing) :test #'string=)))
+        (%write-project-index-roots-unlocked index-path roots)
+        roots))))
+
+(defun remove-project-index-root (project-root)
+  "Remove PROJECT-ROOT from the projects index. Idempotent.
+
+Returns the updated list of roots."
+  (let* ((project-root
+           (uiop:ensure-directory-pathname
+            (handler-case
+                (truename (uiop:ensure-directory-pathname project-root))
+              (error ()
+                (uiop:ensure-directory-pathname project-root)))))
+         (root (namestring project-root))
+         (index-path (projects-index-path)))
+    (clpm.platform:with-file-lock ((%projects-index-lock-path) )
+      (let* ((existing (%read-project-index-roots-unlocked index-path))
+             (roots (remove root existing :test #'string=)))
+        (%write-project-index-roots-unlocked index-path roots)
+        roots))))
 
 (defun %mark-strings (strings table)
   (when (listp strings)
@@ -299,7 +360,7 @@ Returns list of paths that were (or would be) deleted."
 
     ;; Mark phase: scan real roots from the global projects index.
     (multiple-value-bind (roots found-p)
-        (%read-project-index-roots (%projects-index-path))
+        (read-project-index-roots)
       (unless found-p
         ;; Without a roots index we can't safely determine reachability.
         (return-from gc-store nil))

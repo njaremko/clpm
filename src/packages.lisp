@@ -97,7 +97,9 @@
            #:find-downloader
            #:find-git
            #:find-tar
-           #:tool-install-hints))
+           #:tool-install-hints
+           #:call-with-file-lock
+           #:with-file-lock))
 
 (defpackage #:clpm.lisp
   (:use #:cl #:clpm.platform #:clpm.errors)
@@ -119,7 +121,11 @@
            #:build-exists-p
            #:compute-build-id
            #:gc-store
-           #:with-temp-dir))
+           #:with-temp-dir
+           #:projects-index-path
+           #:read-project-index-roots
+           #:upsert-project-index-root
+           #:remove-project-index-root))
 
 (defpackage #:clpm.project
   (:use #:cl #:clpm.io.sexp #:clpm.errors)
@@ -264,6 +270,7 @@
            #:config-defaults
            #:read-config
            #:write-config
+           #:update-config
            #:merge-project-config))
 
 (defpackage #:clpm.solver.version

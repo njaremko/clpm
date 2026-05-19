@@ -2,6 +2,10 @@
 
 (in-package #:clpm.platform)
 
+#+(and sbcl unix)
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (require :sb-posix))
+
 ;;; Platform detection at compile time
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
@@ -339,3 +343,68 @@ Returns an absolute path string or NIL."
          (remove nil (list (and is-mac (format nil "macOS: ensure `~A` is on PATH (Homebrew recommended)" tool))
                            (and (not is-win) (format nil "Linux: install `~A` and ensure it is on PATH" tool))
                            (and is-win (format nil "Windows: install `~A` and ensure it is on PATH" tool)))))))))
+
+;;; File locking
+;;;
+;;; Two layers:
+;;;   - Intra-process: a per-path SB-THREAD mutex. POSIX advisory locks
+;;;     (`lockf`/`fcntl`) are per-process, so two threads in the same process
+;;;     would otherwise see the kernel-level lock as already held and not
+;;;     serialize against each other.
+;;;   - Inter-process: POSIX `lockf` on a sibling `.lock` file. We use `lockf`
+;;;     rather than `flock(2)` because SBCL's `sb-posix` does not export
+;;;     `flock` on Darwin. `lockf` is always-exclusive; that's fine since
+;;;     CLPM's critical sections are short read-modify-write blocks.
+
+(defvar *file-lock-registry-mutex*
+  #+sbcl (sb-thread:make-mutex :name "clpm.platform.file-lock-registry")
+  #-sbcl nil
+  "Mutex guarding *file-lock-mutexes*.")
+
+(defvar *file-lock-mutexes* (make-hash-table :test 'equal)
+  "Map from absolute lock-path namestring to per-path mutex. Created lazily.")
+
+(defun %path-mutex (lock-path)
+  #+sbcl
+  (let ((key (namestring lock-path)))
+    (sb-thread:with-mutex (*file-lock-registry-mutex*)
+      (or (gethash key *file-lock-mutexes*)
+          (setf (gethash key *file-lock-mutexes*)
+                (sb-thread:make-mutex :name (format nil "clpm.lock.~A" key))))))
+  #-sbcl
+  (declare (ignore lock-path))
+  #-sbcl nil)
+
+(defun call-with-file-lock (lock-path fn)
+  "Acquire an exclusive lock on LOCK-PATH and call FN with no args.
+
+The lock is held against concurrent threads in the same process and against
+concurrent processes on the same machine. The lock file is created if missing
+and is left in place on release. The lock is released when FN returns or
+unwinds.
+
+On non-SBCL platforms the inter-process layer is a no-op."
+  (let ((lock-path (uiop:ensure-pathname lock-path
+                                         :want-existing nil
+                                         :want-file t)))
+    (ensure-directories-exist lock-path)
+    #+sbcl
+    (sb-thread:with-mutex ((%path-mutex lock-path))
+      #+unix
+      (let ((fd (sb-posix:open (namestring lock-path)
+                               (logior sb-posix:o-creat sb-posix:o-rdwr)
+                               #o644)))
+        (unwind-protect
+             (progn
+               (sb-posix:lockf fd sb-posix:f-lock 0)
+               (funcall fn))
+          (ignore-errors (sb-posix:lockf fd sb-posix:f-ulock 0))
+          (ignore-errors (sb-posix:close fd))))
+      #-unix
+      (funcall fn))
+    #-sbcl
+    (funcall fn)))
+
+(defmacro with-file-lock ((lock-path) &body body)
+  "Run BODY with an exclusive lock held on LOCK-PATH."
+  `(call-with-file-lock ,lock-path (lambda () ,@body)))

@@ -86,35 +86,36 @@ Returns one of:
             :message (format nil "Unknown Quicklisp trust scheme: ~S" trust)))))
 
 (defun %write-quicklisp-trust-to-global-config (registry trust)
-  "Persist TRUST and pins for REGISTRY into global config."
-  (let* ((cfg (clpm.config:read-config))
-         (refs (clpm.config:config-registries cfg))
-         (name (registry-name registry))
-         (existing (find name refs
-                         :key #'clpm.project:registry-ref-name
-                         :test #'string=)))
-    (cond
-      ((and existing (eq (clpm.project:registry-ref-kind existing) :quicklisp))
-       (setf (clpm.project:registry-ref-url existing) (registry-url registry)
-             (clpm.project:registry-ref-trust existing) trust
-             (clpm.project:registry-ref-quicklisp-systems-sha256 existing)
-             (registry-quicklisp-systems-sha256 registry)
-             (clpm.project:registry-ref-quicklisp-releases-sha256 existing)
-             (registry-quicklisp-releases-sha256 registry)))
-      ((null existing)
-       (push (clpm.project::make-registry-ref
-              :kind :quicklisp
-              :name name
-              :url (registry-url registry)
-              :trust trust
-              :quicklisp-systems-sha256 (registry-quicklisp-systems-sha256 registry)
-              :quicklisp-releases-sha256 (registry-quicklisp-releases-sha256 registry))
-             refs)
-       (setf (clpm.config:config-registries cfg) refs))
-      (t
-       ;; Name collision with a non-quicklisp registry; do not clobber.
-       nil))
-    (clpm.config:write-config cfg)))
+  "Persist TRUST and pins for REGISTRY into global config under exclusive lock."
+  (let ((name (registry-name registry)))
+    (clpm.config:update-config
+     (lambda (cfg)
+       (let* ((refs (clpm.config:config-registries cfg))
+              (existing (find name refs
+                              :key #'clpm.project:registry-ref-name
+                              :test #'string=)))
+         (cond
+           ((and existing (eq (clpm.project:registry-ref-kind existing) :quicklisp))
+            (setf (clpm.project:registry-ref-url existing) (registry-url registry)
+                  (clpm.project:registry-ref-trust existing) trust
+                  (clpm.project:registry-ref-quicklisp-systems-sha256 existing)
+                  (registry-quicklisp-systems-sha256 registry)
+                  (clpm.project:registry-ref-quicklisp-releases-sha256 existing)
+                  (registry-quicklisp-releases-sha256 registry)))
+           ((null existing)
+            (push (clpm.project::make-registry-ref
+                   :kind :quicklisp
+                   :name name
+                   :url (registry-url registry)
+                   :trust trust
+                   :quicklisp-systems-sha256 (registry-quicklisp-systems-sha256 registry)
+                   :quicklisp-releases-sha256 (registry-quicklisp-releases-sha256 registry))
+                  refs)
+            (setf (clpm.config:config-registries cfg) refs))
+           (t
+            ;; Name collision with a non-quicklisp registry; do not clobber.
+            nil))
+         cfg)))))
 
 (defun %enforce-quicklisp-distinfo-trust (registry distinfo-sha256-hex
                                          &key refresh-trust (persistp t))

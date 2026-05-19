@@ -2392,27 +2392,28 @@ Manifest schema:
 	              (log-error "Unknown registry kind: ~S" kind)
 	              (return-from cmd-registry 1)))
 
-	           (let* ((cfg (clpm.config:read-config))
-	                  (regs (clpm.config:config-registries cfg))
-	                  (existing (find name regs
-	                                  :key #'clpm.project:registry-ref-name
-	                                  :test #'string=)))
-	             (if existing
-	                 (progn
-	                   (setf (clpm.project:registry-ref-kind existing) kind
-	                         (clpm.project:registry-ref-url existing) url
-	                         (clpm.project:registry-ref-trust existing) trust)
-	                   (log-info "Updated registry: ~A" name))
-	                 (progn
-	                   (push (clpm.project::make-registry-ref
-	                          :kind kind
-	                          :name name
-	                          :url url
-	                          :trust trust)
-	                         regs)
-	                   (setf (clpm.config:config-registries cfg) regs)
-	                   (log-info "Added registry: ~A" name)))
-	             (clpm.config:write-config cfg))
+	           (clpm.config:update-config
+	            (lambda (cfg)
+	              (let* ((regs (clpm.config:config-registries cfg))
+	                     (existing (find name regs
+	                                     :key #'clpm.project:registry-ref-name
+	                                     :test #'string=)))
+	                (if existing
+	                    (progn
+	                      (setf (clpm.project:registry-ref-kind existing) kind
+	                            (clpm.project:registry-ref-url existing) url
+	                            (clpm.project:registry-ref-trust existing) trust)
+	                      (log-info "Updated registry: ~A" name))
+	                    (progn
+	                      (push (clpm.project::make-registry-ref
+	                             :kind kind
+	                             :name name
+	                             :url url
+	                             :trust trust)
+	                            regs)
+	                      (setf (clpm.config:config-registries cfg) regs)
+	                      (log-info "Added registry: ~A" name)))
+	                cfg)))
 	           0)))
 
       ((string= subcommand "init")
@@ -2585,16 +2586,19 @@ Manifest schema:
                 (unless (and (stringp name) (plusp (length name))
                              (stringp trust-raw) (plusp (length trust-raw)))
                   (usage-error "Usage: clpm registry trust set <name> <trust>"))
-                (let* ((trust (normalize-trust-arg trust-raw))
-                       (cfg (clpm.config:read-config))
-                       (refs (clpm.config:config-registries cfg))
-                       (ref (find name refs
-                                  :key #'clpm.project:registry-ref-name
-                                  :test #'string=)))
-                  (unless ref
+                (let ((trust (normalize-trust-arg trust-raw))
+                      (found nil))
+                  (clpm.config:update-config
+                   (lambda (cfg)
+                     (let ((ref (find name (clpm.config:config-registries cfg)
+                                      :key #'clpm.project:registry-ref-name
+                                      :test #'string=)))
+                       (when ref
+                         (setf (clpm.project:registry-ref-trust ref) trust)
+                         (setf found t))
+                       cfg)))
+                  (unless found
                     (usage-error "Unknown registry: ~A" name))
-                  (setf (clpm.project:registry-ref-trust ref) trust)
-                  (clpm.config:write-config cfg)
                   (log-info "Updated trust for ~A" name)
                   0)))
 

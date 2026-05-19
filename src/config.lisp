@@ -12,6 +12,10 @@
   "Return the path to the global config file."
   (merge-pathnames "config.sxp" (clpm.platform:config-dir)))
 
+(defun %config-lock-path ()
+  "Return the lock file co-located with the global config."
+  (merge-pathnames "config.sxp.lock" (clpm.platform:config-dir)))
+
 (defun parse-registry-ref (form)
   "Parse a registry reference FORM into a clpm.project:registry-ref."
   (let ((ref (clpm.project::make-registry-ref)))
@@ -64,17 +68,20 @@
         (:defaults (setf (config-defaults cfg) val))))
     cfg))
 
-(defun read-config ()
-  "Read the global config file.
-
-If absent, returns an empty config."
+(defun %read-config-unlocked ()
   (let ((path (config-path)))
     (if (uiop:file-exists-p path)
         (parse-config (clpm.io.sexp:read-safe-sexp-from-file path))
         (make-config :format 1 :registries nil :defaults nil))))
 
-(defun write-config (cfg)
-  "Write CFG to the global config file in canonical format."
+(defun read-config ()
+  "Read the global config file under a shared lock.
+
+If absent, returns an empty config."
+  (clpm.platform:with-file-lock ((%config-lock-path) )
+    (%read-config-unlocked)))
+
+(defun %write-config-unlocked (cfg)
   (let* ((path (config-path))
          (registries (sort (copy-list (config-registries cfg))
                            #'string<
@@ -83,9 +90,33 @@ If absent, returns an empty config."
          (form `(:config
                  :format ,(config-format cfg)
                  :registries ,(mapcar #'serialize-registry-ref registries)
-                 :defaults ,(config-defaults cfg))))
+                 :defaults ,(config-defaults cfg)))
+         (tmp-path (make-pathname :type "tmp" :defaults path)))
     (ensure-directories-exist path)
-    (clpm.io.sexp:write-canonical-sexp-to-file form path)))
+    (clpm.io.sexp:write-canonical-sexp-to-file form tmp-path)
+    (rename-file tmp-path path)))
+
+(defun write-config (cfg)
+  "Write CFG to the global config file in canonical format.
+
+Acquires an exclusive lock and writes atomically (tmp + rename). Callers that
+read-modify-write should prefer `update-config` to keep the read and write
+inside a single critical section."
+  (clpm.platform:with-file-lock ((%config-lock-path) )
+    (%write-config-unlocked cfg)))
+
+(defun update-config (mutator)
+  "Read the global config under an exclusive lock, call MUTATOR with the config
+struct, then write the (possibly mutated) struct back atomically.
+
+MUTATOR may either mutate the struct in place or return a new struct; the
+return value is what is written. Returns the written struct."
+  (clpm.platform:with-file-lock ((%config-lock-path) )
+    (let* ((cfg (%read-config-unlocked))
+           (result (funcall mutator cfg))
+           (out (or result cfg)))
+      (%write-config-unlocked out)
+      out)))
 
 (defun plist-merge (base override)
   "Return a plist that is BASE with OVERRIDE keys applied."
