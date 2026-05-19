@@ -12,7 +12,8 @@
 (eval-when (:compile-toplevel :load-toplevel :execute)
   #+sbcl (require :sb-bsd-sockets)
   #+sbcl (require :sb-concurrency)
-  #+sbcl (require :sb-posix))
+  #+sbcl (require :sb-posix)
+  #+sbcl (require :sb-introspect))
 
 (in-package #:clpm.repl-bridge)
 
@@ -115,7 +116,10 @@ writes are silently dropped and `truncated?' flips to T."
 (defun %capture-text (stream sink)
   "Read STREAM's accumulated string, charge it to SINK, and return the
 possibly-truncated text."
-  (let ((text (get-output-stream-string stream)))
+  (let ((text (cond
+                ((typep stream 'streaming-output-stream)
+                 (streaming-output-stream-final-text stream))
+                (t (get-output-stream-string stream)))))
     (cond
       ((bounded-sink-truncated? sink) "")
       ((>= (+ (bounded-sink-used sink) (length text))
@@ -128,6 +132,149 @@ possibly-truncated text."
       (t
        (incf (bounded-sink-used sink) (length text))
        text))))
+
+;;; --------------------------------------------------------------------------
+;;; Streaming output: a Gray stream that mirrors writes into an
+;;; accumulating capture buffer *and* emits chunks as `event: stdout' /
+;;; `event: stderr' frames to the request context. Used when the client
+;;; sets `--stream' on eval.
+;;; --------------------------------------------------------------------------
+
+#+sbcl
+(defclass streaming-output-stream (sb-gray:fundamental-character-output-stream)
+  ((ctx :initarg :ctx :reader streaming-output-stream-ctx)
+   (channel :initarg :channel :reader streaming-output-stream-channel)
+   (buffer :initform (make-array 0 :element-type 'character
+                                   :fill-pointer 0 :adjustable t)
+           :reader streaming-output-stream-buffer)
+   (mutex :initform (clpm.repl-bridge.compat:make-mutex
+                     :name "clpm.repl-bridge.stream-buf")
+          :reader streaming-output-stream-mutex)
+   (full :initform (make-string-output-stream)
+         :reader streaming-output-stream-full)
+   (flush-bytes :initarg :flush-bytes :initform 4096
+                :reader streaming-output-stream-flush-bytes)))
+
+#+sbcl
+(defparameter +stream-flush-min-bytes+ 4096)
+
+(defun %streaming-flush (s)
+  "Drain S's buffer and emit a single `event' frame with that chunk.
+Called holding the stream's mutex."
+  (let ((b (streaming-output-stream-buffer s)))
+    (when (plusp (length b))
+      (let ((chunk (subseq b 0 (length b))))
+        (setf (fill-pointer b) 0)
+        (%emit-event (streaming-output-stream-ctx s)
+                     (streaming-output-stream-channel s)
+                     "data" chunk)))))
+
+#+sbcl
+(defmethod sb-gray:stream-write-char ((s streaming-output-stream) ch)
+  (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+    (vector-push-extend ch (streaming-output-stream-buffer s))
+    (write-char ch (streaming-output-stream-full s))
+    (when (>= (length (streaming-output-stream-buffer s))
+              (streaming-output-stream-flush-bytes s))
+      (%streaming-flush s))
+    (when (char= ch #\Newline)
+      (%streaming-flush s)))
+  ch)
+
+#+sbcl
+(defmethod sb-gray:stream-write-string ((s streaming-output-stream) string
+                                         &optional (start 0) end)
+  (let ((end (or end (length string))))
+    (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+      (loop for i from start below end
+            do (vector-push-extend (schar string i)
+                                   (streaming-output-stream-buffer s)))
+      (write-string string (streaming-output-stream-full s) :start start :end end)
+      (when (>= (length (streaming-output-stream-buffer s))
+                (streaming-output-stream-flush-bytes s))
+        (%streaming-flush s))
+      ;; Flush after any newline lands.
+      (when (find #\Newline string :start start :end end)
+        (%streaming-flush s))))
+  string)
+
+#+sbcl
+(defmethod sb-gray:stream-line-column ((s streaming-output-stream))
+  (declare (ignore s))
+  nil)
+
+#+sbcl
+(defmethod sb-gray:stream-finish-output ((s streaming-output-stream))
+  (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+    (%streaming-flush s)))
+
+#+sbcl
+(defmethod sb-gray:stream-force-output ((s streaming-output-stream))
+  (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+    (%streaming-flush s)))
+
+(defun streaming-output-stream-final-text (s)
+  "Drain S's residual buffer and return the full captured text. Idempotent
+once called; subsequent reads return the empty string."
+  (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+    (%streaming-flush s))
+  (get-output-stream-string (streaming-output-stream-full s)))
+
+;;; --------------------------------------------------------------------------
+;;; Bidirectional `query' input stream. When the form reads from
+;;; *standard-input* / *query-io*, we emit `event: query' and block the
+;;; worker on a mailbox until the client posts `query-response'.
+;;; --------------------------------------------------------------------------
+
+#+sbcl
+(defclass query-input-stream (sb-gray:fundamental-character-input-stream)
+  ((ctx :initarg :ctx :reader query-input-stream-ctx)
+   ;; Per-stream mailbox the connection handler pushes query-response values
+   ;; into; the stream's read methods block here.
+   (mailbox :initarg :mailbox :reader query-input-stream-mailbox)
+   (buffer :initform (make-array 0 :element-type 'character
+                                   :fill-pointer 0 :adjustable t)
+           :reader query-input-stream-buffer)
+   (buffer-pos :initform 0 :accessor query-input-stream-buffer-pos)
+   (eof? :initform nil :accessor query-input-stream-eof?)))
+
+(defun %query-refill (s)
+  "If the buffer is empty, emit a query event and wait for response.
+The response is appended to the buffer with a trailing newline so a
+single (read-line) returns the answer."
+  (when (and (>= (query-input-stream-buffer-pos s)
+                 (length (query-input-stream-buffer s)))
+             (not (query-input-stream-eof? s)))
+    (%emit-event (query-input-stream-ctx s) "query")
+    (let ((reply (clpm.repl-bridge.compat:receive-message
+                  (query-input-stream-mailbox s))))
+      (cond
+        ((eq reply :eof) (setf (query-input-stream-eof? s) t))
+        ((stringp reply)
+         (let ((b (query-input-stream-buffer s)))
+           (loop for ch across reply do (vector-push-extend ch b))
+           (vector-push-extend #\Newline b)))
+        (t (setf (query-input-stream-eof? s) t))))))
+
+#+sbcl
+(defmethod sb-gray:stream-read-char ((s query-input-stream))
+  (%query-refill s)
+  (cond
+    ((query-input-stream-eof? s) :eof)
+    (t (prog1 (aref (query-input-stream-buffer s)
+                    (query-input-stream-buffer-pos s))
+         (incf (query-input-stream-buffer-pos s))))))
+
+#+sbcl
+(defmethod sb-gray:stream-unread-char ((s query-input-stream) ch)
+  (declare (ignore ch))
+  (decf (query-input-stream-buffer-pos s))
+  nil)
+
+#+sbcl
+(defmethod sb-gray:stream-listen ((s query-input-stream))
+  (< (query-input-stream-buffer-pos s)
+     (length (query-input-stream-buffer s))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Transport: Unix socket vs. TCP loopback
@@ -404,19 +551,36 @@ its connection or sends an explicit `interrupt' request."))
 (defstruct eval-job
   form
   package-override
+  ;; Plist of v2 opt-ins parsed out of the request params. Examples:
+  ;;   :stream t       -- emit `event:stdout' / `event:stderr' chunks
+  ;;   :query-interactive t -- support bidirectional `query' for reads
+  ;;   :debug t        -- pause in the debugger on error (see #111)
+  ;;   :print-length N -- bind *print-length* for the duration
+  ;;   ...
+  options
+  ;; Request context used for streaming events and (in :debug) for
+  ;; pulling debugger actions out of the wire.
+  ctx
+  ;; Mailbox the connection thread pushes `query-response' values into.
+  query-mailbox
   result-mailbox
   thread)
 
 (defstruct eval-result
-  code        ; nil on success; "eval-error" / "reader-error" / "interrupted"
-  value       ; string (prin1 of primary value) on success
+  code                  ; nil on success; "eval-error" / "reader-error" / "interrupted"
+  ;; Each value SBCL returned, prin1'd to a string. The first is the
+  ;; "primary value"; the v1 `value' field aliases this for back-compat.
+  (values nil :type list)
   output
   error-output
   package
   elapsed-ms
-  conditions  ; list of (:object ...) entries
+  conditions             ; list of (:object ...) entries for ERROR conditions
+  signaled-conditions    ; list for handled / signaled-but-not-errored ones
   truncated?
-  redefined)
+  redefined
+  history                ; alist (("*" . val-string) ("**" . ...) ("/" . arr) ...)
+  )
 
 (defun %list-restarts ()
   (mapcar (lambda (r) (string (restart-name r))) (compute-restarts)))
@@ -486,12 +650,126 @@ its connection or sends an explicit `interrupt' request."))
       (find-package (string-upcase name))
       (find-package (string-downcase name))))
 
-(defun %eval-one (form-text &key package-override)
-  "Evaluate FORM-TEXT inside the worker. Returns an eval-result struct."
+(defun %safe-prin1 (value &key (print-length nil print-length-p)
+                                (print-level nil print-level-p)
+                                (print-circle nil print-circle-p)
+                                (print-radix nil print-radix-p)
+                                (print-base nil print-base-p)
+                                (print-pretty nil print-pretty-p))
+  "Defensive `prin1-to-string'. If the value's `print-object' method
+errors, return a fallback `#<unprintable ...>' string instead of letting
+the error blast through the eval response."
+  (handler-case
+      (let ((*print-length* (if print-length-p print-length (or *print-length* 200)))
+            (*print-level*  (if print-level-p print-level (or *print-level* 8)))
+            (*print-circle* (if print-circle-p print-circle t))
+            (*print-radix*  (if print-radix-p print-radix *print-radix*))
+            (*print-base*   (if print-base-p print-base *print-base*))
+            (*print-pretty* (if print-pretty-p print-pretty nil)))
+        (prin1-to-string value))
+    (error (c)
+      (format nil "#<unprintable ~A: ~A>"
+              (handler-case (type-of value) (error () "?"))
+              (handler-case (princ-to-string c) (error () "?"))))))
+
+(defparameter +history-symbols+ '("*" "**" "***" "+" "++" "+++" "/" "//" "///")
+  "REPL history bindings updated after every eval. CL semantics: `*' is the
+primary value of the last eval, `+' is the last form, `/' is the values
+list of the last eval; `**' / `++' / `//' are the prior, `***' / `+++' /
+`///' the one before that.")
+
+(defun %read-history-snapshot ()
+  "Capture the current values of the history symbols as a JSON-friendly
+alist (string-name . prin1'd-value-string). Caller must have arranged the
+right *package* so the lookups find CL: versions."
+  (let ((pkg (find-package "COMMON-LISP")))
+    (loop for name in +history-symbols+
+          for sym = (find-symbol name pkg)
+          collect (cons name
+                        (if (and sym (boundp sym))
+                            (%safe-prin1 (symbol-value sym))
+                            "")))))
+
+(defun %update-history! (last-form last-values)
+  "Shift the REPL history bindings: `*** ← **`, `** ← *`, `* ← primary`,
+likewise for `+` and `/`. Mutates `cl:*`, `cl:**`, `cl:***`, `cl:+`,
+`cl:++`, `cl:+++`, `cl:/`, `cl://`, `cl:///`."
+  (let* ((pkg (find-package "COMMON-LISP"))
+         (s* (find-symbol "*" pkg))
+         (s** (find-symbol "**" pkg))
+         (s*** (find-symbol "***" pkg))
+         (s+ (find-symbol "+" pkg))
+         (s++ (find-symbol "++" pkg))
+         (s+++ (find-symbol "+++" pkg))
+         (s/ (find-symbol "/" pkg))
+         (s// (find-symbol "//" pkg))
+         (s/// (find-symbol "///" pkg))
+         (primary (if (consp last-values) (first last-values) nil)))
+    (when (and s*** s** (boundp s**)) (setf (symbol-value s***) (symbol-value s**)))
+    (when (and s** s* (boundp s*)) (setf (symbol-value s**) (symbol-value s*)))
+    (when s* (setf (symbol-value s*) primary))
+    (when (and s+++ s++ (boundp s++)) (setf (symbol-value s+++) (symbol-value s++)))
+    (when (and s++ s+ (boundp s+)) (setf (symbol-value s++) (symbol-value s+)))
+    (when s+ (setf (symbol-value s+) last-form))
+    (when (and s/// s// (boundp s//)) (setf (symbol-value s///) (symbol-value s//)))
+    (when (and s// s/ (boundp s/)) (setf (symbol-value s//) (symbol-value s/)))
+    (when s/ (setf (symbol-value s/) (copy-list last-values)))))
+
+(defmacro %with-print-options (options &body body)
+  "Bind *print-*' variables for the duration of BODY according to OPTIONS
+(a plist). Unbound options inherit the surrounding dynamic state."
+  (let ((opt (gensym "OPT")))
+    `(let* ((,opt ,options)
+            (*print-length* (getf ,opt :print-length *print-length*))
+            (*print-level*  (getf ,opt :print-level  *print-level*))
+            (*print-circle* (getf ,opt :print-circle *print-circle*))
+            (*print-radix*  (getf ,opt :print-radix  *print-radix*))
+            (*print-base*   (getf ,opt :print-base   *print-base*))
+            (*print-pretty* (getf ,opt :print-pretty *print-pretty*)))
+       ,@body)))
+
+(defun %eval-one (form-text &key package-override options job)
+  "Evaluate FORM-TEXT inside the worker. Returns an eval-result struct.
+
+OPTIONS is a plist of v2 toggles parsed from the request:
+  :stream t            -- bind *standard-output* / *error-output* to a
+                          streaming Gray stream so chunks are emitted as
+                          `event:stdout' / `event:stderr' to JOB's ctx.
+  :query-interactive t -- bind *standard-input* / *query-io* to a stream
+                          that issues a server `event:query' on read.
+  :print-length / :print-level / :print-circle / :print-radix /
+  :print-base / :print-pretty -- per-eval print-control bindings.
+
+JOB carries the request context for streaming and (eventually) debugger
+sessions."
   (let* ((sink (make-bounded-sink))
-         (out-stream (%make-capture-stream sink))
-         (err-stream (%make-capture-stream sink))
-         (in-stream (make-string-input-stream ""))
+         (ctx (and job (eval-job-ctx job)))
+         (stream? (and ctx (getf options :stream)))
+         (query? (and ctx (getf options :query-interactive)))
+         (out-stream
+           (cond
+             (stream?
+              #+sbcl (make-instance 'streaming-output-stream
+                                    :ctx ctx :channel "stdout"
+                                    :flush-bytes +stream-flush-min-bytes+)
+              #-sbcl (%make-capture-stream sink))
+             (t (%make-capture-stream sink))))
+         (err-stream
+           (cond
+             (stream?
+              #+sbcl (make-instance 'streaming-output-stream
+                                    :ctx ctx :channel "stderr"
+                                    :flush-bytes +stream-flush-min-bytes+)
+              #-sbcl (%make-capture-stream sink))
+             (t (%make-capture-stream sink))))
+         (in-stream
+           (cond
+             (query?
+              #+sbcl (make-instance 'query-input-stream
+                                    :ctx ctx
+                                    :mailbox (eval-job-query-mailbox job))
+              #-sbcl (make-string-input-stream ""))
+             (t (make-string-input-stream ""))))
          (start (get-internal-real-time))
          (form nil)
          (override-pkg (and package-override
@@ -499,9 +777,10 @@ its connection or sends an explicit `interrupt' request."))
          (package (or override-pkg
                       (and *server* (server-current-package *server*))
                       (find-package "COMMON-LISP-USER")))
-         (value nil)
+         (returned-values '())
          (code nil)
          (conditions '())
+         (signaled '())
          (redefined nil))
     (when (and package-override (null override-pkg))
       (let ((c (make-condition 'simple-error
@@ -512,31 +791,43 @@ its connection or sends an explicit `interrupt' request."))
         (return-from %eval-one
           (make-eval-result
            :code code
-           :value nil
+           :values nil
            :output ""
            :error-output ""
            :package (package-name (or *package* (find-package "COMMON-LISP-USER")))
            :elapsed-ms 0
            :conditions (nreverse conditions)
+           :signaled-conditions nil
            :truncated? nil
-           :redefined nil))))
+           :redefined nil
+           :history nil))))
     (labels ((finish (&key err-condition)
                (when err-condition
                  (setf code "eval-error")
                  (push (%condition-json err-condition :include-backtrace t)
                        conditions))
-               (make-eval-result
-                :code code
-                :value (and (null code) (let ((*print-pretty* nil))
-                                          (prin1-to-string value)))
-                :output (%capture-text out-stream sink)
-                :error-output (%capture-text err-stream sink)
-                :package (package-name package)
-                :elapsed-ms (round (* 1000.0 (/ (- (get-internal-real-time) start)
-                                                 internal-time-units-per-second)))
-                :conditions (nreverse conditions)
-                :truncated? (bounded-sink-truncated? sink)
-                :redefined redefined)))
+               (let ((value-strings
+                       (and (null code)
+                            (%with-print-options options
+                              (mapcar (lambda (v) (%safe-prin1 v)) returned-values))))
+                     (history-snap
+                       (and (null code)
+                            (handler-case (%read-history-snapshot)
+                              (error () nil)))))
+                 (make-eval-result
+                  :code code
+                  :values value-strings
+                  :output (%capture-text out-stream sink)
+                  :error-output (%capture-text err-stream sink)
+                  :package (package-name package)
+                  :elapsed-ms (round (* 1000.0
+                                        (/ (- (get-internal-real-time) start)
+                                           internal-time-units-per-second)))
+                  :conditions (nreverse conditions)
+                  :signaled-conditions (nreverse signaled)
+                  :truncated? (bounded-sink-truncated? sink)
+                  :redefined redefined
+                  :history history-snap))))
       (handler-case
           (setf form (%read-form form-text))
         (error (c)
@@ -554,13 +845,25 @@ its connection or sends an explicit `interrupt' request."))
                 (*standard-input* in-stream)
                 (*package* package))
             (setf redefined (%record-redefinition form package))
-            (setf value (eval form))
-            ;; A call to (in-package ...) inside the form mutates *package*.
-            ;; That change persists only when there was no per-call override
-            ;; -- override semantics are "scoped to this eval".
+            (let ((record-signals? (getf options :record-signals)))
+              (handler-bind
+                  ((condition
+                     (lambda (c)
+                       ;; Only record non-error conditions if requested;
+                       ;; ERRORs are surfaced via the outer handler-case.
+                       (when (and record-signals?
+                                  (not (typep c 'error))
+                                  (not (typep c 'user-interrupt)))
+                         (push (%condition-json c) signaled)))))
+                (setf returned-values
+                      (multiple-value-list (eval form)))))
             (setf package *package*)
+            ;; History is updated *only* when no override was specified --
+            ;; the override is per-call scoped.
             (when (and *server* (null override-pkg))
-              (setf (server-current-package *server*) *package*)))
+              (setf (server-current-package *server*) *package*)
+              (handler-case (%update-history! form returned-values)
+                (error () nil))))
         (user-interrupt ()
           (setf code "interrupted")
           (return-from %eval-one (finish)))
@@ -579,15 +882,20 @@ Returns when a `:stop' sentinel arrives."
          (let ((result
                  (handler-case
                      (%eval-one (eval-job-form job)
-                                :package-override (eval-job-package-override job))
+                                :package-override (eval-job-package-override job)
+                                :options (eval-job-options job)
+                                :job job)
                    ;; Any unexpected interrupt at this outermost level becomes
                    ;; an "interrupted" result for the requester.
                    (user-interrupt ()
                      (make-eval-result :code "interrupted"
-                                       :value nil :output "" :error-output ""
+                                       :values nil :output "" :error-output ""
                                        :package "" :elapsed-ms 0
-                                       :conditions '() :truncated? nil
-                                       :redefined nil)))))
+                                       :conditions '()
+                                       :signaled-conditions nil
+                                       :truncated? nil
+                                       :redefined nil
+                                       :history nil)))))
            (clpm.repl-bridge.compat:send-message (eval-job-result-mailbox job) result)))))))
 
 (defun %ensure-worker (server)
@@ -618,7 +926,7 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
 ;;; Method dispatch
 ;;; --------------------------------------------------------------------------
 
-(defun %dispatch-method (server method params id)
+(defun %dispatch-method (server method params id &optional ctx)
   "Return a JSON response for METHOD; never raises."
   (handler-case
       (cond
@@ -649,7 +957,7 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
               (%success-response id
                (%json-object "package" (package-name pkg)))))))
         ((string= method "eval")
-         (%dispatch-eval server params id))
+         (%dispatch-eval server params id ctx))
         ((string= method "interrupt")
          (%log-event (server-event-log server) "interrupt")
          (%interrupt-worker server)
@@ -688,39 +996,90 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
       (%error-response id "protocol-error"
                        (format nil "dispatch failed: ~A" c)))))
 
-(defun %dispatch-eval (server params id)
+(defun %parse-eval-options (params)
+  "Translate v2 eval params (a `(:object ((k . v)…))') into the worker's
+plist of `:stream', `:debug', `:query-interactive', `:record-signals',
+and `:print-*' options. Unknown fields are ignored. Returns NIL when
+PARAMS is plain v1 (no v2 toggles), which keeps the worker fast-path
+identical to v1."
+  (let ((options '()))
+    (flet ((maybe-bool (key plist-key)
+             (let ((v (%json-getf params key 'unset)))
+               (unless (eq v 'unset)
+                 (setf options (list* plist-key (and v t) options)))))
+           (maybe-int (key plist-key)
+             (let ((v (%json-getf params key)))
+               (when (integerp v)
+                 (setf options (list* plist-key v options))))))
+      (maybe-bool "stream" :stream)
+      (maybe-bool "debug" :debug)
+      (maybe-bool "query_interactive" :query-interactive)
+      (maybe-bool "record_signals" :record-signals)
+      (maybe-int "print_length" :print-length)
+      (maybe-int "print_level"  :print-level)
+      (maybe-bool "print_circle" :print-circle)
+      (maybe-bool "print_radix"  :print-radix)
+      (maybe-int "print_base"   :print-base)
+      (maybe-bool "print_pretty" :print-pretty))
+    options))
+
+(defun %history-payload (history)
+  "Convert the history alist returned by `%read-history-snapshot' into the
+JSON object that ships in eval responses."
+  (when history
+    (list :object history)))
+
+(defun %eval-success-payload (result)
+  "Build the JSON `result' object for a successful eval. Includes the v2
+`values' array plus the v1-compatible scalar `value' (the primary value
+as a prin1 string, or NIL for `(values)')."
+  (let ((values (eval-result-values result)))
+    (list :object
+          (append
+           (list (cons "value" (first values))
+                 (cons "values" (%json-array values))
+                 (cons "output" (eval-result-output result))
+                 (cons "error_output" (eval-result-error-output result))
+                 (cons "package" (eval-result-package result))
+                 (cons "elapsed_ms" (eval-result-elapsed-ms result))
+                 (cons "conditions" (%json-array (eval-result-conditions result))))
+           (when (eval-result-signaled-conditions result)
+             (list (cons "signaled_conditions"
+                         (%json-array (eval-result-signaled-conditions result)))))
+           (when (eval-result-history result)
+             (list (cons "history" (%history-payload (eval-result-history result)))))
+           (when (eval-result-redefined result)
+             (list (cons "redefined" (list :object (eval-result-redefined result)))))
+           (when (eval-result-truncated? result)
+             (list (cons "truncated" t)))))))
+
+(defun %dispatch-eval (server params id &optional ctx)
   (let* ((form (%json-getf params "form"))
-         (package-override (%json-getf params "package")))
+         (package-override (%json-getf params "package"))
+         (options (%parse-eval-options params)))
     (cond
       ((not (stringp form))
        (%error-response id "protocol-error" "missing `form` param"))
       (t
        (let* ((mailbox (%ensure-worker server))
               (reply-box (clpm.repl-bridge.compat:make-mailbox))
+              (query-box (and (getf options :query-interactive)
+                              (clpm.repl-bridge.compat:make-mailbox)))
               (job (make-eval-job
                     :form form
                     :package-override package-override
+                    :options options
+                    :ctx ctx
+                    :query-mailbox query-box
                     :result-mailbox reply-box)))
+         (when ctx
+           (setf (request-context-options ctx) options))
          (incf (server-eval-count server))
          (clpm.repl-bridge.compat:send-message mailbox job)
          (let ((result (clpm.repl-bridge.compat:receive-message reply-box)))
            (cond
              ((null (eval-result-code result))
-              (let ((payload
-                      (list :object
-                            (append
-                             (list (cons "value" (eval-result-value result))
-                                   (cons "output" (eval-result-output result))
-                                   (cons "error_output" (eval-result-error-output result))
-                                   (cons "package" (eval-result-package result))
-                                   (cons "elapsed_ms" (eval-result-elapsed-ms result))
-                                   (cons "conditions"
-                                         (%json-array (eval-result-conditions result))))
-                             (when (eval-result-redefined result)
-                               (list (cons "redefined"
-                                           (list :object (eval-result-redefined result)))))
-                             (when (eval-result-truncated? result)
-                               (list (cons "truncated" t)))))))
+              (let ((payload (%eval-success-payload result)))
                 (if (eval-result-truncated? result)
                     (%json-object "id" id "result" payload
                                   "warning" "output-truncated")
@@ -728,13 +1087,18 @@ inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
              (t
               (let ((details
                       (list :object
-                            (list (cons "output" (eval-result-output result))
-                                  (cons "error_output" (eval-result-error-output result))
-                                  (cons "package" (eval-result-package result))
-                                  (cons "elapsed_ms" (eval-result-elapsed-ms result))
-                                  (cons "conditions"
-                                        (%json-array
-                                         (eval-result-conditions result)))))))
+                            (append
+                             (list (cons "output" (eval-result-output result))
+                                   (cons "error_output" (eval-result-error-output result))
+                                   (cons "package" (eval-result-package result))
+                                   (cons "elapsed_ms" (eval-result-elapsed-ms result))
+                                   (cons "conditions"
+                                         (%json-array
+                                          (eval-result-conditions result))))
+                             (when (eval-result-signaled-conditions result)
+                               (list (cons "signaled_conditions"
+                                           (%json-array
+                                            (eval-result-signaled-conditions result)))))))))
                 (%error-response id (eval-result-code result)
                                  (or (let ((c0 (first (eval-result-conditions result))))
                                        (when c0
@@ -854,85 +1218,186 @@ thread sees the same instance; only one daemon may run per process."
       (%close-listener transport)
       (setf *server* nil))))
 
-(defun %handle-connection (server conn)
-  (let ((stream (sb-bsd-sockets:socket-make-stream
-                 conn :input t :output t
-                       :buffering :line
-                       :external-format :utf-8
-                       :element-type 'character)))
+;;; --------------------------------------------------------------------------
+;;; Request context: per-in-flight-request handle used by dispatch to emit
+;;; non-terminal `event' frames and the terminal `result' / `error' frame.
+;;;
+;;; The connection thread owns the socket stream; the worker thread may emit
+;;; events through this context as the eval runs. STREAM-MUTEX serializes
+;;; writes from any thread.
+;;; --------------------------------------------------------------------------
+
+(defstruct request-context
+  server
+  stream
+  stream-mutex
+  id
+  ;; Plist of v2 opt-ins parsed out of the request params (:stream, :debug,
+  ;; :query-interactive, :handlers, ...). NIL for v1 requests.
+  options
+  ;; Internal latch flipped after the terminal frame is written; further
+  ;; %emit-event calls become no-ops.
+  terminated?)
+
+(defun %emit-frame (ctx frame)
+  "Serialize FRAME to the connection's stream under the stream mutex.
+Frames are arbitrary JSON objects (`(:object ...)' forms). Errors are
+swallowed: a broken socket should never propagate into eval."
+  (when (request-context-terminated? ctx)
+    (return-from %emit-frame))
+  (clpm.repl-bridge.compat:with-mutex ((request-context-stream-mutex ctx))
     (handler-case
-        (let ((line (%read-request-line stream)))
-          (cond
-            ((null line))  ; EOF: client closed without sending anything
-            (t
-             (let* ((request (handler-case
-                                 (clpm.io.json:read-json-from-string line)
-                               (clpm.errors:clpm-parse-error (c)
-                                 (%log-event (server-event-log server)
-                                             "request-parse-error"
-                                             "error" (princ-to-string c))
-                                 (%write-line-json
-                                  stream
-                                  (%error-response nil "protocol-error"
-                                                   (princ-to-string c)))
-                                 (return-from %handle-connection))))
-                    (id (%json-getf request "id"))
-                    (method (%json-getf request "method"))
-                    (params (%json-getf request "params"))
-                    (transport (server-transport server))
-                    (expected-token (and transport
-                                         (transport-token transport))))
-               (cond
-                 ((not (stringp method))
-                  (%log-event (server-event-log server) "request-invalid"
-                              "id" id)
-                  (%write-line-json stream
-                                    (%error-response id "protocol-error"
-                                                     "missing `method'")))
-                 ((and expected-token
-                       (let ((tok (%json-getf params "token")))
-                         (or (not (stringp tok))
-                             (not (%constant-string= tok expected-token)))))
-                  (%log-event (server-event-log server) "auth-rejected"
-                              "id" id "method" method)
-                  (%write-line-json
-                   stream
-                   (%error-response id "protocol-error"
-                                    "missing or invalid `token`")))
-                 (t
-                  (%log-event (server-event-log server) "request"
-                              "id" id "method" method)
-                  (let* ((start (get-internal-real-time))
-                         (response (%dispatch-method server method params id))
-                         (elapsed (round (* 1000.0
-                                            (/ (- (get-internal-real-time) start)
-                                               internal-time-units-per-second))))
-                         (err (and (consp response)
-                                   (eq (car response) :object)
-                                   (cdr (assoc "error" (cadr response)
-                                               :test #'string=)))))
-                    (%log-event (server-event-log server) "response"
-                                "id" id "method" method
-                                "elapsed_ms" elapsed
-                                "error" (and err
-                                              (cdr (assoc "code" (cadr err)
-                                                          :test #'string=))))
-                    (handler-case
-                        (%write-line-json stream response)
-                      (error () nil)))))))))
-      (error (c)
+        (%write-line-json (request-context-stream ctx) frame)
+      (error () nil))))
+
+(defun %emit-event (ctx event-name &rest fields)
+  "Send a non-terminal `event' frame with EVENT-NAME and arbitrary FIELDS."
+  (let ((obj (apply #'%json-object
+                    "id" (request-context-id ctx)
+                    "event" event-name
+                    fields)))
+    (%emit-frame ctx obj)))
+
+(defun %emit-terminal (ctx frame)
+  "Send the terminal frame for this request, then mark the context closed
+so any straggling events from a background thread are dropped."
+  (%emit-frame ctx frame)
+  (setf (request-context-terminated? ctx) t))
+
+;;; --------------------------------------------------------------------------
+;;; %handle-connection: keep the connection open across requests so a client
+;;; can pipeline ping/eval/inspect/... or drive a long-lived debug session
+;;; using one TCP/Unix handshake.
+;;; --------------------------------------------------------------------------
+
+(defun %handle-connection (server conn)
+  (let* ((stream (sb-bsd-sockets:socket-make-stream
+                  conn :input t :output t
+                        :buffering :line
+                        :external-format :utf-8
+                        :element-type 'character))
+         (stream-mutex (clpm.repl-bridge.compat:make-mutex
+                        :name "clpm.repl-bridge.conn-stream")))
+    (loop
+      (let ((line (handler-case
+                      (%read-request-line stream)
+                    (clpm.errors:clpm-parse-error (c)
+                      (%log-event (server-event-log server)
+                                  "request-parse-error"
+                                  "error" (princ-to-string c))
+                      (clpm.repl-bridge.compat:with-mutex (stream-mutex)
+                        (handler-case
+                            (%write-line-json
+                             stream
+                             (%error-response nil "protocol-error"
+                                              (princ-to-string c)))
+                          (error () nil)))
+                      ;; Resync and keep the connection alive.
+                      :continue))))
+        (cond
+          ((eq line :continue))             ; soft-recover from a bad line
+          ((null line) (return))            ; EOF: client closed cleanly
+          (t (%handle-one-request server stream stream-mutex line)))))))
+
+(defun %handle-one-request (server stream stream-mutex line)
+  "Parse one request line, dispatch it, and emit the terminal frame.
+A dispatcher that emits its own events (eval --stream, debugger, ...)
+returns NIL; this function only writes a terminal frame when dispatch
+returned a non-NIL JSON object."
+  (handler-case
+      (let* ((request (handler-case
+                          (clpm.io.json:read-json-from-string line)
+                        (error (c)
+                          (clpm.repl-bridge.compat:with-mutex (stream-mutex)
+                            (handler-case
+                                (%write-line-json
+                                 stream
+                                 (%error-response nil "protocol-error"
+                                                  (princ-to-string c)))
+                              (error () nil)))
+                          (return-from %handle-one-request))))
+             (id (%json-getf request "id"))
+             (method (%json-getf request "method"))
+             (params (%json-getf request "params"))
+             (transport (server-transport server))
+             (expected-token (and transport (transport-token transport))))
+        (cond
+          ((not (stringp method))
+           (%log-event (server-event-log server) "request-invalid"
+                       "id" id)
+           (clpm.repl-bridge.compat:with-mutex (stream-mutex)
+             (handler-case
+                 (%write-line-json
+                  stream (%error-response id "protocol-error"
+                                          "missing `method'"))
+               (error () nil))))
+          ((and expected-token
+                (let ((tok (%json-getf params "token")))
+                  (or (not (stringp tok))
+                      (not (%constant-string= tok expected-token)))))
+           (%log-event (server-event-log server) "auth-rejected"
+                       "id" id "method" method)
+           (clpm.repl-bridge.compat:with-mutex (stream-mutex)
+             (handler-case
+                 (%write-line-json
+                  stream (%error-response id "protocol-error"
+                                          "missing or invalid `token`"))
+               (error () nil))))
+          (t
+           (%log-event (server-event-log server) "request"
+                       "id" id "method" method)
+           (let* ((ctx (make-request-context :server server
+                                             :stream stream
+                                             :stream-mutex stream-mutex
+                                             :id id
+                                             :options params))
+                  (start (get-internal-real-time))
+                  (response (%dispatch-method server method params id ctx))
+                  (elapsed (round (* 1000.0
+                                     (/ (- (get-internal-real-time) start)
+                                        internal-time-units-per-second))))
+                  (err (and (consp response)
+                            (eq (car response) :object)
+                            (cdr (assoc "error" (cadr response)
+                                        :test #'string=)))))
+             (%log-event (server-event-log server) "response"
+                         "id" id "method" method
+                         "elapsed_ms" elapsed
+                         "error" (and err
+                                       (cdr (assoc "code" (cadr err)
+                                                   :test #'string=))))
+             ;; Dispatchers that pump their own events return NIL after
+             ;; emitting their terminal frame directly. Only write a
+             ;; terminal frame here for the v1-style RESPONSE return value.
+             (when response
+               (%emit-terminal ctx response))))))
+    (error (c)
+      (clpm.repl-bridge.compat:with-mutex (stream-mutex)
         (handler-case
-            (%write-line-json stream
-                              (%error-response nil "protocol-error"
-                                               (princ-to-string c)))
+            (%write-line-json
+             stream (%error-response nil "protocol-error"
+                                     (princ-to-string c)))
           (error () nil))))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Client
 ;;; --------------------------------------------------------------------------
 
-(defun send-request (endpoint method &key params (id 1) (connect-timeout 5))
-  "Send one request and return the parsed response. Returns
+(defun %inject-token (params token)
+  "Add a `token' field to PARAMS (a JSON object form), creating one if NIL."
+  (cond
+    ((null token) (or params (%json-object)))
+    (t
+     (let ((base (or params (%json-object))))
+       (cond
+         ((and (consp base) (eq (car base) :object))
+          (list :object (cons (cons "token" token) (cadr base))))
+         (t (%json-object "token" token)))))))
+
+(defun send-request (endpoint method &key params (id 1) (connect-timeout 5)
+                                          on-event)
+  "Send one request and return its terminal frame (the `result' / `error'
+JSON object). Returns
    :no-daemon if the daemon is absent / unreachable,
    :io-error  if the connection dropped mid-exchange.
 
@@ -940,6 +1405,11 @@ ENDPOINT is a filesystem path. If it ends in `.port', the TCP transport
 is used: the file's first line is the bound port, the second line is a
 32-hex shared token, and the token is injected into the request's
 params. Otherwise the path is treated as a Unix-domain socket.
+
+ON-EVENT, when supplied, is invoked once per non-terminal frame
+(streamed stdout, debugger-entered, trace lines, ...). It receives the
+parsed JSON object and may return NIL to keep waiting or :stop to abort
+the connection immediately.
 
 Responses are read without a size cap; daemon output (`+max-output-bytes+`,
 1 MB) can legitimately fill a line."
@@ -954,27 +1424,97 @@ Responses are read without a size cap; daemon output (`+max-output-bytes+`,
                            sock :input t :output t :buffering :full
                                 :external-format :utf-8
                                 :element-type 'character))
-                  (effective-params
-                    (cond
-                      ((null token) (or params (%json-object)))
-                      (t
-                       (let ((base (or params (%json-object))))
-                         (cond
-                           ((and (consp base) (eq (car base) :object))
-                            (list :object
-                                  (cons (cons "token" token) (cadr base))))
-                           (t
-                            (%json-object "token" token)))))))
-                  (request
-                    (%json-object "id" id
-                                  "method" method
-                                  "params" effective-params)))
+                  (request (%json-object "id" id
+                                         "method" method
+                                         "params" (%inject-token params token))))
              (handler-case
                  (progn
                    (%write-line-json stream request)
-                   (let ((line (read-line stream nil nil)))
-                     (cond
-                       ((null line) :io-error)
-                       (t (clpm.io.json:read-json-from-string line)))))
+                   (loop
+                     (let ((line (read-line stream nil nil)))
+                       (cond
+                         ((null line) (return :io-error))
+                         (t
+                          (let* ((frame (clpm.io.json:read-json-from-string line))
+                                 (event (%json-getf frame "event")))
+                            (cond
+                              ((null event)
+                               ;; Terminal frame (has either `result' or
+                               ;; `error', no `event').
+                               (return frame))
+                              (t
+                               (when on-event
+                                 (let ((r (funcall on-event frame)))
+                                   (when (eq r :stop)
+                                     (return :io-error))))))))))))
                (error () :io-error)))
         (ignore-errors (sb-bsd-sockets:socket-close sock))))))
+
+(defclass connection ()
+  ((endpoint :initarg :endpoint :reader connection-endpoint)
+   (socket :initarg :socket :reader connection-socket)
+   (stream :initarg :stream :reader connection-stream)
+   (token :initarg :token :reader connection-token)
+   (mutex :initform (clpm.repl-bridge.compat:make-mutex
+                     :name "clpm.repl-bridge.client-conn")
+          :reader connection-mutex)
+   (closed? :initform nil :accessor connection-closed?)))
+
+(defun open-connection (endpoint &key (connect-timeout 5))
+  "Open and return a CONNECTION to ENDPOINT. The connection persists until
+CLOSE-CONNECTION; multiple SEND-ON-CONNECTION calls may share it.
+
+Returns :no-daemon if the daemon is unreachable."
+  (check-type endpoint string)
+  (let ((kind (%infer-transport-kind endpoint)))
+    (multiple-value-bind (sock token)
+        (%connect-transport kind endpoint :timeout-seconds connect-timeout)
+      (unless sock (return-from open-connection :no-daemon))
+      (let ((stream (sb-bsd-sockets:socket-make-stream
+                     sock :input t :output t :buffering :full
+                          :external-format :utf-8
+                          :element-type 'character)))
+        (make-instance 'connection
+                       :endpoint endpoint
+                       :socket sock
+                       :stream stream
+                       :token token)))))
+
+(defun close-connection (conn)
+  "Idempotently close CONN."
+  (unless (connection-closed? conn)
+    (setf (connection-closed? conn) t)
+    (ignore-errors (close (connection-stream conn)))
+    (ignore-errors (sb-bsd-sockets:socket-close (connection-socket conn)))))
+
+(defun send-on-connection (conn method &key params (id 1) on-event)
+  "Like SEND-REQUEST but reuses an open CONNECTION. Returns the terminal
+frame, or :io-error on EOF or socket error.
+
+The connection is single-threaded by convention: do not call this
+function from two threads concurrently with the same CONN."
+  (when (connection-closed? conn)
+    (return-from send-on-connection :io-error))
+  (let* ((stream (connection-stream conn))
+         (request (%json-object "id" id
+                                "method" method
+                                "params" (%inject-token
+                                          params (connection-token conn)))))
+    (handler-case
+        (progn
+          (%write-line-json stream request)
+          (loop
+            (let ((line (read-line stream nil nil)))
+              (cond
+                ((null line) (return :io-error))
+                (t
+                 (let* ((frame (clpm.io.json:read-json-from-string line))
+                        (event (%json-getf frame "event")))
+                   (cond
+                     ((null event) (return frame))
+                     (t
+                      (when on-event
+                        (let ((r (funcall on-event frame)))
+                          (when (eq r :stop)
+                            (return :io-error))))))))))))
+      (error () :io-error))))

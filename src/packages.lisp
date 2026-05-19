@@ -352,6 +352,9 @@
   (:use #:cl #:clpm.log #:clpm.errors)
   (:export #:start-server
            #:send-request
+           #:open-connection
+           #:close-connection
+           #:send-on-connection
            #:user-interrupt))
 
 (defpackage #:clpm.fetch
