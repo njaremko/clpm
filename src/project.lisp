@@ -82,7 +82,10 @@
   (version nil :type (or null string))
   (source nil)
   (artifact-sha256 nil :type (or null string))
-  (tree-sha256 nil :type (or null string)))
+  (tree-sha256 nil :type (or null string))
+  ;; List of (<kind-keyword> <name-string>) pairs declared by release metadata.
+  ;; Surfaced to the build step for native-dep preflight checks.
+  (native-requires nil :type list))
 
 (defstruct locked-source
   "A locked source reference."
@@ -224,7 +227,8 @@
         (:version (setf (locked-release-version rel) val))
         (:source (setf (locked-release-source rel) (parse-locked-source val)))
         (:artifact-sha256 (setf (locked-release-artifact-sha256 rel) val))
-        (:tree-sha256 (setf (locked-release-tree-sha256 rel) val))))
+        (:tree-sha256 (setf (locked-release-tree-sha256 rel) val))
+        (:native-requires (setf (locked-release-native-requires rel) val))))
     ;; Backward/forward compat: allow tree hash to live on :source for :path.
     (when (and (null (locked-release-tree-sha256 rel))
                (locked-release-source rel)
@@ -303,7 +307,9 @@
     :version ,(locked-release-version rel)
     :source ,(serialize-locked-source (locked-release-source rel))
     :artifact-sha256 ,(locked-release-artifact-sha256 rel)
-    :tree-sha256 ,(locked-release-tree-sha256 rel)))
+    :tree-sha256 ,(locked-release-tree-sha256 rel)
+    ,@(when (locked-release-native-requires rel)
+        (list :native-requires (locked-release-native-requires rel)))))
 
 (defun serialize-locked-registry (reg)
   "Serialize a locked registry to sexp form."

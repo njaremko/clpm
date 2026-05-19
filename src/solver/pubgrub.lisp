@@ -513,7 +513,9 @@ Prefers lockfile selection, then highest version."
                         :source source
                         :artifact-sha256 (clpm.registry:release-metadata-artifact-sha256 meta)
                         :tree-sha256 (and (consp source)
-                                          (getf (cdr source) :tree-sha256)))
+                                          (getf (cdr source) :tree-sha256))
+                        :native-requires
+                        (clpm.registry:release-metadata-native-requires meta))
                   systems)
             ;; Add to graph
             (let ((deps-entry (assoc system-id
@@ -612,7 +614,8 @@ Prefers lockfile selection, then highest version."
                          :source locked-source
                          :artifact-sha256 (or (getf sys :artifact-sha256)
                                               source-sha256)
-                         :tree-sha256 tree-sha256)
+                         :tree-sha256 tree-sha256
+                         :native-requires (getf sys :native-requires))
                :deps (cdr (assoc (getf sys :system)
                                  (resolution-graph resolution)
                                  :test #'string=)))

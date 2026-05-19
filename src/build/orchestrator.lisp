@@ -276,23 +276,52 @@ Returns list of (system-id . build-id) pairs."
 
 ;;; Check native dependencies
 
+(defun %parse-native-dep (form)
+  "Parse one native-dep FORM and return (values kind name) or signal nil."
+  (cond
+    ;; (:pkg-config \"libssl\") or (:apt \"libssl-dev\") etc.
+    ((and (consp form) (keywordp (car form))
+          (stringp (cadr form)) (null (cddr form)))
+     (values (car form) (cadr form)))
+    ;; (kind . name) cons cell shorthand
+    ((and (consp form) (keywordp (car form)) (stringp (cdr form)))
+     (values (car form) (cdr form)))
+    (t
+     (values nil nil))))
+
 (defun check-native-deps (lockfile)
-  "Check that native dependencies are available.
-Signals clpm-missing-native-dep-error if any are missing."
-  (dolist (locked (clpm.project:lockfile-resolved lockfile))
-    (let* ((system-id (clpm.project:locked-system-id locked))
-           ;; Native deps would be in release metadata
-           ;; For now this is a placeholder
-           (native-deps nil))
-      (declare (ignore system-id))
-      (dolist (dep native-deps)
-        (let ((kind (car dep))
-              (name (cadr dep)))
-          (unless (check-native-dep kind name)
-            (error 'clpm.errors:clpm-missing-native-dep-error
-                   :native-dep (format nil "~A:~A" kind name)
-                   :required-by system-id
-                   :install-hints (native-dep-install-hints kind name))))))))
+  "Check that native dependencies declared in LOCKFILE are present.
+
+For each `locked-release` with a non-nil `native-requires` list, every entry
+must be of the form (<kind-keyword> <name-string>). The corresponding system
+package is queried via `check-native-dep`; missing deps signal
+`clpm-missing-native-dep-error` with install hints.
+
+Unknown kinds are surfaced as the same error type rather than silently
+ignored, so a typo in registry metadata is loud."
+  (let ((seen (make-hash-table :test 'equal)))
+    (dolist (locked (clpm.project:lockfile-resolved lockfile))
+      (let* ((system-id (clpm.project:locked-system-id locked))
+             (release (clpm.project:locked-system-release locked))
+             (native-deps (and release
+                               (clpm.project:locked-release-native-requires release))))
+        (dolist (dep (or native-deps '()))
+          (multiple-value-bind (kind name) (%parse-native-dep dep)
+            (unless (and kind name)
+              (error 'clpm.errors:clpm-missing-native-dep-error
+                     :native-dep (format nil "~S" dep)
+                     :required-by system-id
+                     :install-hints
+                     (list "Invalid native-requires entry; expected (<kind> <name>).")))
+            ;; De-dupe: don't re-check the same (kind . name) across releases.
+            (let ((key (cons kind name)))
+              (unless (gethash key seen nil)
+                (setf (gethash key seen) t)
+                (unless (check-native-dep kind name)
+                  (error 'clpm.errors:clpm-missing-native-dep-error
+                         :native-dep (format nil "~A:~A" kind name)
+                         :required-by system-id
+                         :install-hints (native-dep-install-hints kind name)))))))))))
 
 (defun check-native-dep (kind name)
   "Check if native dependency is available."

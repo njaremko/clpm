@@ -181,6 +181,7 @@
            #:locked-release-source
            #:locked-release-artifact-sha256
            #:locked-release-tree-sha256
+           #:locked-release-native-requires
            #:locked-source
            #:make-locked-source
            #:locked-source-kind

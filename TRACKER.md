@@ -4,6 +4,18 @@ Open work items uncovered during a full read of the codebase. Each ticket cites 
 
 Legend: `[ ]` open · `[~]` in progress · `[x]` done
 
+## Progress log
+
+- `2026-05-19` Started implementation pass. Baseline: 55 tests passing.
+- `2026-05-19` **#013 landed.** Adds `clpm.platform:with-file-lock` combining a per-path SB-THREAD mutex (intra-process) with `lockf` on a sibling `.lock` file (inter-process). Consolidated duplicated `projects.sxp` helpers from `build/driver.lisp` into `store.lisp` and exported `upsert-project-index-root`/`remove-project-index-root`/`read-project-index-roots`. Added `config.lisp:update-config` for atomic read-modify-write. `test/concurrent-state-test.lisp` covers both layers (8 child SBCL procs + 6 threads).
+- `2026-05-19` **#007 landed.** `native-requires` now flows: registry metadata → solver (`build-resolution` / `resolution-to-lockfile`) → `locked-release` struct field → lockfile serialization → `check-native-deps`. Rewrote orchestrator's `check-native-deps` to actually read `locked-release-native-requires` instead of the previous `(native-deps nil)` placeholder, with parsing for `(:kind "name")` and `(:kind . "name")` forms, dedup via hash table, and `clpm-missing-native-dep-error` raised on both unresolved deps and malformed entries. `test/native-deps-test.lisp` covers round-trip, empty, missing, and malformed cases. Full suite 57/57 green.
+
+## Lessons / decisions
+
+- **POSIX advisory locks are per-process, not per-fd.** `lockf` (and `flock(2)` on most systems) tracked by `(pid, inode)`, so two threads inside one process see the lock as already held and don't serialize. Conclusion: lock helpers in this codebase combine a per-path Lisp mutex with the OS-level file lock. The first thread in a process acquires the kernel lock; subsequent threads queue on the mutex and find the kernel lock still held by their own process when they get their turn (no-op).
+- **SBCL `sb-posix` does not export `flock` on Darwin.** Use `lockf` (POSIX-standard, exclusive-only). Always-exclusive locks are fine since CLPM's critical sections are short.
+- **`SB-EXT` exports `wait-for`.** Test helpers should avoid the name or be defined in their own package, otherwise `defun wait-for ...` in CL-USER hits a package-lock error.
+
 ---
 
 ## Solver
@@ -103,7 +115,7 @@ In the solver, when a system is listed in an `unlock-set`, skip the lockfile pre
 
 ## Build & runtime
 
-### #007 — `[ ]` `P1` `build` `placeholder` Wire `check-native-deps` to real metadata
+### #007 — `[x]` `P1` `build` `placeholder` Wire `check-native-deps` to real metadata
 
 `src/build/orchestrator.lisp:279-295` iterates the lockfile but hardcodes `(native-deps nil)` with the comment "For now this is a placeholder". Meanwhile `release-metadata-native-requires` is parsed off disk (`src/registry/git.lisp:42, 371`) and exported (`src/packages.lisp:244`) but never reaches the build step.
 
@@ -214,7 +226,7 @@ The most useful overrides are probably `:lisp` (default implementation for proje
 
 ---
 
-### #013 — `[ ]` `P1` `infra` `concurrency` Lock global state files
+### #013 — `[x]` `P1` `infra` `concurrency` Lock global state files
 
 `src/build/driver.lisp:134-143` reads, mutates, and rewrites `~/.local/share/clpm/projects.sxp` without holding any lock. `src/config.lisp:76-88` does the same for the global config. Two concurrent `clpm install` invocations in different projects can race and lose entries.
 
