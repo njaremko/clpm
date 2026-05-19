@@ -11,6 +11,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - `2026-05-19` **#007 landed.** `native-requires` now flows: registry metadata → solver (`build-resolution` / `resolution-to-lockfile`) → `locked-release` struct field → lockfile serialization → `check-native-deps`. Rewrote orchestrator's `check-native-deps` to actually read `locked-release-native-requires` instead of the previous `(native-deps nil)` placeholder, with parsing for `(:kind "name")` and `(:kind . "name")` forms, dedup via hash table, and `clpm-missing-native-dep-error` raised on both unresolved deps and malformed entries. `test/native-deps-test.lisp` covers round-trip, empty, missing, and malformed cases. Full suite 57/57 green.
 - `2026-05-19` **#012 landed.** `sha256-tree` now hashes a git-style mode token (`100644` / `100755` / `120000`) per file via `sb-posix:lstat`, so an `chmod +x` flips the digest. Symlinks now hash the link target string instead of the dereferenced contents, with `walk-files` switched to SBCL's `:resolve-symlinks nil` to preserve them through the walker. Bumped `compute-build-id` prefix `clpm-build-v1` → `clpm-build-v2` so stale cached builds don't collide with the new hash format. On non-Unix-SBCL platforms the executable bit is approximated by extension (`.bat/.cmd/.exe/.ps1/.sh`). `test/tree-mode-test.lisp` covers determinism, executable-bit flip, and symlink retargeting. Full suite 58/58 green.
 - `2026-05-19` **#006 landed.** `cmd-update` now honors its `[system ...]` arguments. `solve` accepts `:unlock-set` (`:all`, `nil`, or list-of-id strings); `ordered-candidate-refs` skips the lockfile preference for unlocked systems, and `next-pending-system` orders unlocked systems first so their freshly-chosen versions can force constraints onto still-pending dependents. `clpm update` (no args) re-resolves everything; `clpm update <sys>...` holds untargeted systems at their current versions unless a constraint forces them to move. Unknown systems exit with a non-zero rc and a clear error. `test/update-selective-test.lisp` covers targeted update, held-untargeted, full update, unknown-system error, and forced-bump. Full suite 59/59 green.
+- `2026-05-19` **#001 + #002 + #003 landed (Option A — own the design).** Renamed `src/solver/pubgrub.lisp` → `src/solver/backtrack.lisp` and updated `clpm.asd` + README to advertise "backtracking with reason-chain conflict explanations" rather than "PubGrub". File header has an explicit disclaimer documenting what the algorithm actually is (depth-first backtracking, no unit propagation, no derivation graph, no backjumping). Removed three dead `solver-state` slots — `incompatibilities`, `decision-stack`, `decision-level` — along with their snapshot/restore plumbing and the `incf`/`push` in `decide`. No behavior change (59/59 still green); the implementation is just honest about itself now. A real PubGrub implementation remains a future option but the current solver works and is documented.
 
 ## Lessons / decisions
 
@@ -24,7 +25,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 
 ## Solver
 
-### #001 — `[ ]` `P1` `solver` `naming` Rename or actually implement PubGrub
+### #001 — `[x]` `P1` `solver` `naming` Rename or actually implement PubGrub
 
 `src/solver/pubgrub.lisp` is documented as PubGrub and the README advertises "PubGrub-style conflict explanations", but the implementation is a depth-first backtracking solver with `snapshot-state` / `restore-state` (lines 184-205) and per-system reason strings (lines 93-99). None of the PubGrub primitives are present:
 
@@ -47,7 +48,7 @@ Decide on a direction and follow through:
 
 ---
 
-### #002 — `[ ]` `P2` `solver` `dead-code` Remove or use `solver-state-incompatibilities`
+### #002 — `[x]` `P2` `solver` `dead-code` Remove or use `solver-state-incompatibilities`
 
 `solver-state` declares `(incompatibilities nil :type list)` at `src/solver/pubgrub.lisp:40` with the comment "learned conflict clauses". Nothing in the codebase ever writes to or reads this slot. If #001 lands as "Option A", delete the slot; if "Option B", populate it during conflict analysis.
 
@@ -57,7 +58,7 @@ Decide on a direction and follow through:
 
 ---
 
-### #003 — `[ ]` `P2` `solver` `dead-code` Remove or use `decision-stack` for backjumping
+### #003 — `[x]` `P2` `solver` `dead-code` Remove or use `decision-stack` for backjumping
 
 `solver-state-decision-stack` (`src/solver/pubgrub.lisp:42`) is pushed on every `decide` (line 244-245) and copied on snapshot/restore (lines 191, 204), but its contents are never consulted. The only state actually used for backtracking is the snapshot/restore alist.
 

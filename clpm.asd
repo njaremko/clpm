@@ -42,7 +42,7 @@
       :components
       ((:file "version")
        (:file "constraint")
-       (:file "pubgrub")))
+       (:file "backtrack")))
      (:file "fetch")
      (:module "build"
       :serial t

@@ -4,7 +4,7 @@ A technically excellent package manager for Common Lisp with proper dependency r
 
 ## Features
 
-- **Deterministic dependency resolution** with PubGrub-style conflict explanations
+- **Deterministic dependency resolution** via backtracking with reason-chain conflict explanations
 - **Content-addressed store** for sources and build artifacts
 - **Cryptographic integrity** - all artifacts verified by SHA-256
 - **Registry authentication** via Ed25519 signatures

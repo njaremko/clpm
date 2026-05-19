@@ -1,4 +1,12 @@
-;;;; solver/pubgrub.lisp - PubGrub-style dependency solver
+;;;; solver/backtrack.lisp - Deterministic backtracking dependency solver.
+;;;;
+;;;; This is NOT PubGrub. It is a depth-first backtracking search over
+;;;; per-system candidate lists with version-descending order, lockfile
+;;;; preferences (suppressible per-system via the unlock-set), and reason
+;;;; chains for human-readable conflict explanations. There is no unit
+;;;; propagation, no incompatibility derivation, and no backjumping; the
+;;;; conflict path simply restores a pre-decision snapshot and tries the
+;;;; next candidate.
 
 (in-package #:clpm.solver)
 
@@ -42,9 +50,6 @@
   (decisions nil :type list) ; alist of (system-id . release-ref)
   (constraints nil :type list) ; alist of (system-id . accumulated-constraint)
   (pending nil :type list)   ; list of system-ids to process
-  (incompatibilities nil :type list) ; learned conflict clauses
-  (decision-level 0 :type integer)
-  (decision-stack nil :type list) ; stack of (level system-id . release-ref)
   (reasons (make-hash-table :test 'equal)) ; system-id -> list of reasons
   (extra-release-metadata nil))   ; hash-table release-ref -> release-metadata
 
@@ -205,8 +210,6 @@ each group ordering is alphabetical for determinism."
         :constraints (mapcar (lambda (c) (cons (car c) (cdr c)))
                              (solver-state-constraints state))
         :pending (copy-list (solver-state-pending state))
-        :decision-level (solver-state-decision-level state)
-        :decision-stack (copy-list (solver-state-decision-stack state))
         :reasons (let ((copy (make-hash-table :test 'equal)))
                    (maphash (lambda (k v)
                               (setf (gethash k copy) (copy-list v)))
@@ -218,8 +221,6 @@ each group ordering is alphabetical for determinism."
   (setf (solver-state-decisions state) (getf snapshot :decisions)
         (solver-state-constraints state) (getf snapshot :constraints)
         (solver-state-pending state) (getf snapshot :pending)
-        (solver-state-decision-level state) (getf snapshot :decision-level)
-        (solver-state-decision-stack state) (getf snapshot :decision-stack)
         (solver-state-reasons state) (getf snapshot :reasons)))
 
 (defun decided-release-ref (state system-id)
@@ -266,10 +267,7 @@ each group ordering is alphabetical for determinism."
 
 (defun decide (state system-id release-ref)
   "Record decision that SYSTEM-ID is RELEASE-REF."
-  (push (cons system-id release-ref) (solver-state-decisions state))
-  (incf (solver-state-decision-level state))
-  (push (list (solver-state-decision-level state) system-id release-ref)
-        (solver-state-decision-stack state)))
+  (push (cons system-id release-ref) (solver-state-decisions state)))
 
 (defun solver-search (state)
   "Depth-first backtracking search over candidate versions."
