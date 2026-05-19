@@ -14,6 +14,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - `2026-05-19` **#001 + #002 + #003 landed (Option A — own the design).** Renamed `src/solver/pubgrub.lisp` → `src/solver/backtrack.lisp` and updated `clpm.asd` + README to advertise "backtracking with reason-chain conflict explanations" rather than "PubGrub". File header has an explicit disclaimer documenting what the algorithm actually is (depth-first backtracking, no unit propagation, no derivation graph, no backjumping). Removed three dead `solver-state` slots — `incompatibilities`, `decision-stack`, `decision-level` — along with their snapshot/restore plumbing and the `incf`/`push` in `decide`. No behavior change (59/59 still green); the implementation is just honest about itself now. A real PubGrub implementation remains a future option but the current solver works and is documented.
 - `2026-05-19` **#004 + #005 landed.** `constraint-union` had zero callers in `src/` or `test/` and the implementation note "Simplified: just append ranges (could be merged for optimization)" tellingly admitted it didn't actually compute a union. Per the no-dead-code policy in `~/.claude/CLAUDE.md`, deleted both the function and its `:export` from `clpm.solver.constraint`. If a future caller needs union semantics, it can be reintroduced correctly (sorted, overlap-merged) at that point — there's no need to keep a broken implementation around for a hypothetical user.
 - `2026-05-19` **#008 landed.** `:optional t` is now real: the solver's `add-root-constraints` consults a `with-optional` set on `solver-state`; `cmd-resolve` and `cmd-update` pass through `clpm.commands:*with-optional*` (settable via `--with-optional <sys>` repeatable, or `--with-all-optional`). The opt-in survives across invocations via a new `:opted-in-optionals` field in the lockfile (sorted, omitted when empty so existing lockfiles round-trip unchanged). `clpm tree` and `clpm why` tag optional-root entries with `(optional)`. `test/optional-deps-test.lisp` exercises default-skip, opt-in + persistence, persistence-across-resolve, and `--with-all-optional`. Full suite 60/60 green.
+- `2026-05-19` **#009 landed (drop semantics).** `dependency-features` was parsed and serialized but had zero consumers in the solver, fetcher, or builder; the test that exercised it only round-tripped the field, never validated any meaning. CLPM does not have a feature model and adding one is not in scope. Removed the `features` slot from `dependency`, the `(:features ...)` parser clause, the serializer's `:features` emission, and the `#:dependency-features` export. The project-roundtrip test was updated to drop its `:features '("feat-a" "feat-b")` reference. If a real feature model is ever needed it can be reintroduced with semantics defined up front.
 
 ## Lessons / decisions
 
@@ -166,7 +167,7 @@ Related: #009.
 
 ---
 
-### #009 — `[ ]` `P2` `manifest` `silent-noop` Honor `:features` on dependencies
+### #009 — `[x]` `P2` `manifest` `silent-noop` Honor `:features` on dependencies
 
 `dependency-features` is parsed and serialized symmetrically with `:optional` (`src/project.lisp:107, 391`) but nothing consumes it. Decide whether features are a real concept in CLPM or remove the field:
 

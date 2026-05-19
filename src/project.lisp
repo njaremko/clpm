@@ -29,8 +29,7 @@
   (system nil :type (or null string))
   (constraint nil)
   (source nil)
-  (optional-p nil :type boolean)
-  (features nil :type list))
+  (optional-p nil :type boolean))
 
 (defstruct registry-ref
   "A registry reference."
@@ -109,8 +108,7 @@
         (:system (setf (dependency-system dep) val))
         (:constraint (setf (dependency-constraint dep) val))
         (:source (setf (dependency-source dep) val))
-        (:optional (setf (dependency-optional-p dep) val))
-        (:features (setf (dependency-features dep) val))))
+        (:optional (setf (dependency-optional-p dep) val))))
     dep))
 
 (defun parse-registry-ref (form)
@@ -401,8 +399,6 @@ directory pathnames (as strings) for determinism."
       (setf form (append form (list :source (dependency-source d)))))
     (when (dependency-optional-p d)
       (setf form (append form (list :optional t))))
-    (when (dependency-features d)
-      (setf form (append form (list :features (dependency-features d)))))
     form))
 
 (defun %serialize-registry-ref (r)

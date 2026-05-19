@@ -35,8 +35,7 @@
                 :system "foo"
                 :constraint '(:semver "^1.0.0")
                 :source '(:git :url "https://example.invalid/foo.git" :ref "main")
-                :optional-p t
-                :features '("feat-a" "feat-b")))
+                :optional-p t))
          (dep2 (clpm.project::make-dependency
                 :system "bar"
                 :constraint '(:exact "2.3.4")))

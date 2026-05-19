@@ -154,7 +154,6 @@
            #:dependency-constraint
            #:dependency-source
            #:dependency-optional-p
-           #:dependency-features
            #:registry-ref
            #:registry-ref-name
            #:registry-ref-kind
