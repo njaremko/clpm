@@ -128,13 +128,26 @@
 	             (assert-true (and (stringp lock) (= (length lock) 64))
 	                          "Expected :lock-sha256 64-char hex, got ~S" lock))
 
-	           ;; Non-SBCL packaging is explicitly rejected.
+	           ;; ECL packaging is explicitly deferred with a clear message.
 	           (uiop:with-current-directory (project-root)
 	             (let ((*error-output* (make-string-output-stream)))
-	               (assert-eql 1 (clpm:run-cli '("--lisp" "ccl" "package")))
+	               (assert-eql 1 (clpm:run-cli '("--lisp" "ecl" "package")))
 	               (let ((err (get-output-stream-string *error-output*)))
-	                 (assert-true (search "Packaging currently supports SBCL only" err)
-	                              "Expected SBCL-only message, got: ~S" err))))))
+	                 (assert-true (search "Packaging on ECL is not yet implemented" err)
+	                              "Expected ECL-not-implemented message, got: ~S" err))))
+
+	           ;; CCL packaging dispatches past the SBCL-only gate. If the CCL
+	           ;; binary isn't on PATH we expect a clpm-missing-tool error from
+	           ;; lisp-run-argv (rc 1) rather than the old SBCL-only rejection.
+	           (when (null (clpm.platform:which "ccl"))
+	             (uiop:with-current-directory (project-root)
+	               (let ((*error-output* (make-string-output-stream)))
+	                 (let ((rc (clpm:run-cli '("--lisp" "ccl" "package"))))
+	                   (let ((err (get-output-stream-string *error-output*)))
+	                     (assert-true (and (integerp rc) (not (zerop rc)))
+	                                  "Expected non-zero rc when CCL missing, got ~S" rc)
+	                     (assert-true (not (search "Packaging currently supports SBCL only" err))
+	                                  "CCL path must not be rejected as SBCL-only, err=~S" err))))))))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME"))))

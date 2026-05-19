@@ -2094,7 +2094,12 @@ Uses clpm.project :test metadata:
   "Build a distributable executable according to clpm.project :package metadata.
 
 Manifest schema:
-  :package (:output \"dist/<name>\" :system \"<system>\" :function \"<package>::<fn>\")"
+  :package (:output \"dist/<name>\" :system \"<system>\" :function \"<package>::<fn>\")
+
+Supports SBCL and CCL. SBCL produces a (sb-ext:save-lisp-and-die) image plus
+an sh wrapper that adds --end-runtime-options so user args reach the program.
+CCL produces a (ccl:save-application :prepend-kernel t) image written directly
+to the output path; no wrapper is needed since CCL doesn't grab CLI flags."
   (declare (ignore args))
   (labels ((chmod-755 (path)
              (let ((path (namestring (uiop:ensure-pathname path :want-existing nil))))
@@ -2130,11 +2135,16 @@ Manifest schema:
         (log-no-project-found))
       (return-from cmd-package 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
-           (pkg (clpm.project:project-package project)))
-      (let ((kind (effective-lisp-kind project)))
-        (unless (eq kind :sbcl)
-          (log-error "Packaging currently supports SBCL only; re-run with --lisp sbcl")
-          (return-from cmd-package 1)))
+           (pkg (clpm.project:project-package project))
+           (kind (effective-lisp-kind project)))
+      (case kind
+        ((:sbcl :ccl) nil)
+        (:ecl
+         (log-error "Packaging on ECL is not yet implemented")
+         (return-from cmd-package 1))
+        (t
+         (log-error "Packaging on ~A is not supported" kind)
+         (return-from cmd-package 1)))
       (unless pkg
         (log-error "No :package entry configured in clpm.project")
         (return-from cmd-package 1))
@@ -2168,19 +2178,23 @@ Manifest schema:
               (log-error "Invalid :package :function: expected <package>::<fn>, got ~S" fn-spec)
               (return-from cmd-package 1))
 
-	            (let* ((expanded-output (clpm.platform:expand-path output))
-	                   (output-path (uiop:ensure-pathname expanded-output
-	                                                     :defaults project-root
-	                                                     :want-existing nil
-	                                                     :want-file t))
-                     (bin-path (uiop:ensure-pathname (format nil "~A.bin" (namestring output-path))
+            (let* ((expanded-output (clpm.platform:expand-path output))
+                   (output-path (uiop:ensure-pathname expanded-output
+                                                     :defaults project-root
                                                      :want-existing nil
                                                      :want-file t))
-	                   (lock-sha256
-	                     (clpm.crypto.sha256:bytes-to-hex
-	                      (clpm.crypto.sha256:sha256-file lock-path)))
-	                   (meta-path (make-pathname :name (format nil "~A.meta"
-	                                                          (pathname-name output-path))
+                   ;; SBCL writes the real image to .bin and uses output-path
+                   ;; as the wrapper; CCL writes the image directly to output-path.
+                   (image-path (if (eq kind :sbcl)
+                                   (uiop:ensure-pathname
+                                    (format nil "~A.bin" (namestring output-path))
+                                    :want-existing nil :want-file t)
+                                   output-path))
+                   (lock-sha256
+                     (clpm.crypto.sha256:bytes-to-hex
+                      (clpm.crypto.sha256:sha256-file lock-path)))
+                   (meta-path (make-pathname :name (format nil "~A.meta"
+                                                           (pathname-name output-path))
                                              :type "sxp"
                                              :defaults output-path))
                    (pkg-key (intern (string-upcase pkg-name) :keyword))
@@ -2188,53 +2202,90 @@ Manifest schema:
                    (main-sym (intern "CLPM-PACKAGE-MAIN" "CL-USER"))
                    (args-var (intern "CLPM-PACKAGE-ARGS" "CL-USER"))
                    (result-var (intern "CLPM-PACKAGE-RESULT" "CL-USER"))
-	                   (defun-form
-	                     `(defun ,main-sym ()
-	                        (let* ((,args-var (uiop:command-line-arguments))
-	                               (,result-var (uiop:symbol-call ,pkg-key ,fn-key ,args-var)))
-	                          (sb-ext:exit :code (if (integerp ,result-var) ,result-var 0)))))
-	                   (save-form
-	                     `(sb-ext:save-lisp-and-die ,(namestring bin-path)
-	                                                :toplevel ',main-sym
-	                                                :executable t
-	                                                :compression t))
-	                   (defun-str
-	                     (with-standard-io-syntax
+                   (code-var (intern "CODE" "CL-USER"))
+                   ;; CCL forms reference the CCL package, which does not
+                   ;; exist while CLPM is compiled by SBCL. Resolve those
+                   ;; symbols at run time inside the spawned CCL subprocess
+                   ;; via uiop:find-symbol*.
+                   (exit-form
+                     (case kind
+                       (:sbcl `(sb-ext:exit :code ,code-var))
+                       (:ccl `(funcall (uiop:find-symbol* "QUIT" "CCL") ,code-var))))
+                   (defun-form
+                     `(defun ,main-sym ()
+                        (let* ((,args-var (uiop:command-line-arguments))
+                               (,result-var (uiop:symbol-call ,pkg-key ,fn-key ,args-var))
+                               (,code-var (if (integerp ,result-var) ,result-var 0)))
+                          ,exit-form)))
+                   (save-form
+                     (case kind
+                       (:sbcl
+                        `(sb-ext:save-lisp-and-die ,(namestring image-path)
+                                                   :toplevel ',main-sym
+                                                   :executable t
+                                                   :compression t))
+                       (:ccl
+                        `(funcall (uiop:find-symbol* "SAVE-APPLICATION" "CCL")
+                                  ,(namestring image-path)
+                                  :toplevel-function ',main-sym
+                                  :prepend-kernel t
+                                  :purify t))))
+                   (defun-str
+                     (with-standard-io-syntax
                        (let ((*package* (find-package "CL-USER")))
                          (prin1-to-string defun-form))))
-		                   (save-str
-		                     (with-standard-io-syntax
-		                       (let ((*package* (find-package "CL-USER")))
-		                         (prin1-to-string save-form))))
-			                   (deps (project-dependency-system-ids project '(:depends)))
-			                   (sbcl-args (append (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
-		                                            "--load" (namestring config-path))
-		                                      (sbcl-load-systems-argv deps)
-		                                      (list "--eval" "(ignore-errors (require :sb-posix))"
-		                                            "--eval" (format nil "(asdf:load-system ~S)" system)
-		                                            "--eval" defun-str
-		                                            "--eval" save-str))))
-		              (ensure-directories-exist output-path)
+                   (save-str
+                     (with-standard-io-syntax
+                       (let ((*package* (find-package "CL-USER")))
+                         (prin1-to-string save-form))))
+                   (deps (project-dependency-system-ids project '(:depends)))
+                   (load-eval-forms
+                     (append (lisp-load-systems-eval-forms deps)
+                             (list (format nil "(asdf:load-system ~S)" system)
+                                   defun-str
+                                   save-str)))
+                   (subprocess-argv
+                     (clpm.lisp:lisp-run-argv
+                      kind
+                      :load-files (list (namestring config-path))
+                      :eval-forms load-eval-forms
+                      :noinform t
+                      :noninteractive t
+                      :disable-debugger t)))
+              (ensure-directories-exist output-path)
 
-              (log-info "Packaging ~A -> ~A" system (namestring output-path))
+              (log-info "Packaging ~A -> ~A (lisp: ~A)"
+                        system (namestring output-path) kind)
               (multiple-value-bind (out err rc)
-                  (clpm.platform:run-program sbcl-args
+                  (clpm.platform:run-program subprocess-argv
                                              :directory project-root
                                              :output :interactive
                                              :error-output :interactive
                                              :timeout 600000)
-	                (declare (ignore out err))
-	                (unless (zerop rc)
-	                  (log-error "Packaging failed (exit code ~D)" rc)
-	                  (return-from cmd-package rc)))
+                (declare (ignore out err))
+                (unless (zerop rc)
+                  (log-error "Packaging failed (exit code ~D)" rc)
+                  (return-from cmd-package rc)))
 
-	              ;; Write wrapper to ensure SBCL runtime options don't steal flags.
-	              (write-sbcl-wrapper output-path (file-namestring bin-path))
+              (when (eq kind :sbcl)
+                ;; SBCL's runtime parses --core etc.; wrapper inserts the
+                ;; --end-runtime-options sentinel so user args pass through.
+                (write-sbcl-wrapper output-path (file-namestring image-path)))
+              (when (eq kind :ccl)
+                ;; CCL writes the image directly to output-path; mark it
+                ;; executable for symmetry with the SBCL wrapper.
+                (unless (chmod-755 output-path)
+                  (log-error "Failed to mark CCL image executable: ~A"
+                             (namestring output-path))
+                  (return-from cmd-package 1)))
 
-	              (clpm.io.sexp:write-canonical-sexp-to-file
-	               `(:package-meta
-	                 :lock-sha256 ,lock-sha256
-	                 :sbcl-version ,(clpm.platform:sbcl-version)
+              (clpm.io.sexp:write-canonical-sexp-to-file
+               `(:package-meta
+                 :lock-sha256 ,lock-sha256
+                 :lisp-kind ,kind
+                 :lisp-version ,(case kind
+                                  (:sbcl (clpm.platform:sbcl-version))
+                                  (t (clpm.lisp:lisp-version kind)))
                  :platform ,(clpm.platform:platform-triple))
                meta-path)
               (log-info "Wrote package metadata: ~A" (namestring meta-path))
