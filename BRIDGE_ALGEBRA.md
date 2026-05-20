@@ -229,11 +229,11 @@ Implemented:
    Unknown params, non-object params, and wrong JSON types fail as protocol
    errors before handlers run. Transport-wide `token` and dispatch-wide
    `explain` remain explicit implicit params.
-7. Shutdown now resolves active debug sessions before stopping workers, so a
+7. Terminal responses now have an internal `terminal-response` representation;
+   the outer `{id,result/error}` JSON frame is rendered at the wire boundary,
+   and eval-specific markers such as `truncated` / `worker_restarted` live in
+   the eval result rather than as extra terminal-frame fields. Eval payloads
+   remain structured as `eval-result` until their method renderer chooses
+   success or error.
+8. Shutdown now resolves active debug sessions before stopping workers, so a
    kept debugger stop cannot wedge daemon teardown.
-
-Still open:
-
-1. Separate every internal terminal outcome from the JSON compatibility
-   renderer. Eval already has structured `eval-result` data, but the wider RPC
-   registry still returns rendered JSON frames directly.

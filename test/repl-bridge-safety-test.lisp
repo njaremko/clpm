@@ -113,7 +113,7 @@
 
 ;;; ----------------------------------------------------------------------------
 ;;; #212: killing a named worker mid-life and re-using its name surfaces the
-;;; worker_restarted warning.
+;;; worker_restarted result flag.
 
 (format t "Test: worker-died + worker-restarted after self-terminate~%")
 (with-daemon
@@ -133,16 +133,15 @@
         (assert-true (string= "worker-died" (lookup err "code"))
                      "expected worker-died code, got ~A" (lookup err "code"))))
     ;; Next eval against the same worker name re-spawns the thread; the
-    ;; response carries `worker-restarted' so the client knows state was
-    ;; lost.
+    ;; result carries `worker_restarted' so the client knows state was lost.
     (let ((resp (do-rpc sock "eval"
                         (list (cons "form" "(+ 2 2)")
                               (cons "worker" "crash-test")))))
-      (assert-true (string= "worker-restarted" (lookup resp "warning"))
-                   "expected worker-restarted warning, got ~S" resp)
-      (assert-true (string= "4"
-                            (lookup (lookup resp "result") "value"))
-                   "value should still be 4: ~S" resp))))
+      (let ((result (lookup resp "result")))
+        (assert-true (eq t (lookup result "worker_restarted"))
+                     "expected worker_restarted flag, got ~S" resp)
+        (assert-true (string= "4" (lookup result "value"))
+                     "value should still be 4: ~S" resp)))))
 (format t "  crash recovery OK~%")
 
 (format t "~%REPL-bridge safety tests PASSED!~%")

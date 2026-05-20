@@ -35,7 +35,7 @@ frame.  Lets a client tell `still running' from `daemon dead'.")
 
 (defparameter +max-output-bytes+ (* 1024 1024)
   "Hard cap on captured stdout+stderr per eval. Excess is silently dropped
-and the response carries `code: output-truncated'.")
+and the eval result carries `truncated: true'.")
 
 (defparameter +max-backtrace-frames+ 16
   "Number of backtrace frames included in eval-error responses.")
@@ -58,6 +58,45 @@ form or NIL. Returns DEFAULT if missing."
 
 (defun %json-array (items)
   (list :array items))
+
+(defstruct terminal-response
+  "Internal terminal response. JSON rendering happens only at the wire
+boundary so handlers do not need to hand-build the outer `{id,result/error}'
+frame."
+  id
+  kind
+  result
+  code
+  message
+  details)
+
+(defun %terminal-response-json (response)
+  (ecase (terminal-response-kind response)
+    (:success
+     (%json-object "id" (terminal-response-id response)
+                   "result" (terminal-response-result response)))
+    (:error
+     (let ((err (list (cons "code" (terminal-response-code response))
+                      (cons "message" (terminal-response-message response)))))
+       (when (terminal-response-details response)
+         (setf err (append err
+                           (list (cons "details"
+                                       (terminal-response-details response))))))
+       (%json-object "id" (terminal-response-id response)
+                     "error" (list :object err))))))
+
+(defun %wire-json (frame)
+  (cond
+    ((terminal-response-p frame) (%terminal-response-json frame))
+    (t frame)))
+
+(defun %terminal-response-error-code (response)
+  (etypecase response
+    (null nil)
+    (terminal-response
+     (ecase (terminal-response-kind response)
+       (:success nil)
+       (:error (terminal-response-code response))))))
 
 (defun %read-request-line (stream)
   "Read one line from STREAM, enforcing the size cap. Returns the line, or
@@ -87,18 +126,19 @@ NIL on EOF. Signals `clpm-parse-error' if the line is too long."
 
 (defun %write-line-json (stream json)
   "Write JSON followed by a newline; force-output."
-  (clpm.io.json:write-json json stream)
+  (clpm.io.json:write-json (%wire-json json) stream)
   (write-char #\Newline stream)
   (force-output stream))
 
 (defun %success-response (id result)
-  (%json-object "id" id "result" result))
+  (make-terminal-response :id id :kind :success :result result))
 
 (defun %error-response (id code message &key details)
-  (let ((err (list (cons "code" code) (cons "message" message))))
-    (when details
-      (setf err (append err (list (cons "details" details)))))
-    (%json-object "id" id "error" (list :object err))))
+  (make-terminal-response :id id
+                          :kind :error
+                          :code code
+                          :message message
+                          :details details))
 
 ;;; --------------------------------------------------------------------------
 ;;; Output streams: bounded sink
@@ -2008,7 +2048,7 @@ PARAMS is a list of param descriptors, each a plist with
   :required (boolean)
   :description (string).
 
-HANDLER is `(server params id ctx) -> json-response | NIL'. Returning
+HANDLER is `(server params id ctx) -> terminal-response | NIL'. Returning
 NIL means the handler has already emitted its terminal frame."
   name
   summary
@@ -2148,24 +2188,24 @@ error."
       (t (values params nil)))))
 
 (defun %dispatch-method (server method params id &optional ctx)
-  "Return a JSON response for METHOD; never raises."
+  "Return a terminal response for METHOD; never raises."
   (let ((spec (%lookup-method method)))
     (cond
-	      ((null spec)
-	       (%error-response id "protocol-error"
-	                        (format nil "unknown method: ~A" method)))
-	      (t
-	       (multiple-value-bind (decoded-params decode-error)
-	           (%decode-method-params spec params id)
-	         (cond
-	           (decode-error decode-error)
-	           (t
-	            (handler-case
-	                (funcall (method-spec-handler spec)
-	                         server decoded-params id ctx)
-	              (error (c)
-	                (%error-response id "protocol-error"
-	                                 (format nil "dispatch failed: ~A" c)))))))))))
+      ((null spec)
+       (%error-response id "protocol-error"
+                        (format nil "unknown method: ~A" method)))
+      (t
+       (multiple-value-bind (decoded-params decode-error)
+           (%decode-method-params spec params id)
+         (cond
+           (decode-error decode-error)
+           (t
+            (handler-case
+                (funcall (method-spec-handler spec)
+                         server decoded-params id ctx)
+              (error (c)
+                (%error-response id "protocol-error"
+                                 (format nil "dispatch failed: ~A" c)))))))))))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Registered methods
@@ -2296,8 +2336,8 @@ available_restarts}'. This makes a misspelled restart name (and a form
 lacking the expected `restart-case') distinguishable from a plain
 no-handler-matched outcome.
 
-After an unexpected worker death, the next eval's response carries
-`warning: \"worker-restarted\"' so the client knows in-image state was
+After an unexpected worker death, the next eval's result carries
+`worker_restarted: true' so the client knows in-image state was
 lost."
   :params (list (list :name "form" :type "string" :required t
                       :description "Lisp source for exactly one form.")
@@ -4673,7 +4713,7 @@ JSON object that ships in eval responses."
   (when history
     (list :object history)))
 
-(defun %eval-success-payload (result)
+(defun %eval-success-payload (result &key worker-restarted?)
   "Build the JSON `result' object for a successful eval. Includes the v2
 `values' array plus the v1-compatible scalar `value' (the primary value
 as a prin1 string, or NIL for `(values)')."
@@ -4698,7 +4738,9 @@ as a prin1 string, or NIL for `(values)')."
            (when (eval-result-redefined result)
              (list (cons "redefined" (list :object (eval-result-redefined result)))))
            (when (eval-result-truncated? result)
-             (list (cons "truncated" t)))))))
+             (list (cons "truncated" t)))
+           (when worker-restarted?
+             (list (cons "worker_restarted" t)))))))
 
 (defun %dispatch-eval (server params id &optional ctx)
   (let* ((form (%json-getf params "form"))
@@ -4731,8 +4773,8 @@ as a prin1 string, or NIL for `(values)')."
            (setf (request-context-options ctx) options))
          (setf (worker-last-eval-id worker) id)
          (let ((restarted? (worker-restarted? worker)))
-           ;; Consume the restart flag: the warning ships only with the
-           ;; first eval after a respawn, not every subsequent one.
+           ;; Consume the restart flag: the result marker ships only with
+           ;; the first eval after a respawn, not every subsequent one.
            (when restarted? (setf (worker-restarted? worker) nil))
            ;; Register *before* posting to the worker so a continuation
            ;; message racing with `event:query' still finds the job.
@@ -4783,42 +4825,38 @@ as a prin1 string, or NIL for `(values)')."
                (%remove-worker server (worker-name worker)))
              (cond
                ((null (eval-result-code result))
-                (let ((payload (%eval-success-payload result)))
-                  (cond
-                    ((eval-result-truncated? result)
-                     (%json-object "id" id "result" payload
-                                   "warning" "output-truncated"))
-                    (restarted?
-                     (%json-object "id" id "result" payload
-                                   "warning" "worker-restarted"))
-                    (t (%success-response id payload)))))
-             (t
-              (let ((details
-                      (list :object
-                            (append
-                             (list (cons "output" (eval-result-output result))
-                                   (cons "error_output" (eval-result-error-output result))
-                                   (cons "package" (eval-result-package result))
-                                   (cons "elapsed_ms" (eval-result-elapsed-ms result))
-                                   (cons "conditions"
-                                         (%json-array
-                                          (eval-result-conditions result))))
-                             (when (eval-result-signaled-conditions result)
-                               (list (cons "signaled_conditions"
+                (%success-response
+                 id
+                 (%eval-success-payload
+                  result
+                  :worker-restarted? restarted?)))
+               (t
+                (let ((details
+                        (list :object
+                              (append
+                               (list (cons "output" (eval-result-output result))
+                                     (cons "error_output" (eval-result-error-output result))
+                                     (cons "package" (eval-result-package result))
+                                     (cons "elapsed_ms" (eval-result-elapsed-ms result))
+                                     (cons "conditions"
                                            (%json-array
-                                            (eval-result-signaled-conditions result)))))
-                             (when (eval-result-handler-attempts result)
-                               (list (cons "handler_attempts"
-                                           (%json-array
-                                            (eval-result-handler-attempts result)))))))))
-                (%error-response id (eval-result-code result)
-                                 (or (let ((c0 (first (eval-result-conditions result))))
-                                       (when c0
-                                         (cdr (assoc "message"
-                                                     (cadr c0)
-                                                     :test #'string=))))
-                                     (eval-result-code result))
-                                 :details details)))))))))))
+                                            (eval-result-conditions result))))
+                               (when (eval-result-signaled-conditions result)
+                                 (list (cons "signaled_conditions"
+                                             (%json-array
+                                              (eval-result-signaled-conditions result)))))
+                               (when (eval-result-handler-attempts result)
+                                 (list (cons "handler_attempts"
+                                             (%json-array
+                                              (eval-result-handler-attempts result)))))))))
+                  (%error-response id (eval-result-code result)
+                                   (or (let ((c0 (first (eval-result-conditions result))))
+                                         (when c0
+                                           (cdr (assoc "message"
+                                                       (cadr c0)
+                                                       :test #'string=))))
+                                       (eval-result-code result))
+                                   :details details)))))))))))
 
 (defun %dispatch-describe (server params id)
   (let* ((sym-name (%json-getf params "symbol"))
@@ -5254,17 +5292,12 @@ Used by both the inline path and the threaded path."
          (elapsed (round (* 1000.0
                             (/ (- (get-internal-real-time) start)
                                internal-time-units-per-second))))
-         (err (and (consp response)
-                   (eq (car response) :object)
-                   (cdr (assoc "error" (cadr response)
-                               :test #'string=)))))
-    (%bump-method-count server method (not (null err)))
+         (error-code (%terminal-response-error-code response)))
+    (%bump-method-count server method (not (null error-code)))
     (%log-event (server-event-log server) "response"
                 "id" id "method" method
                 "elapsed_ms" elapsed
-                "error" (and err
-                             (cdr (assoc "code" (cadr err)
-                                         :test #'string=))))
+                "error" error-code)
     ;; Slowlog (#214): any eval over the threshold gets a dedicated
     ;; log entry so a future operator can find pathological forms.
     (when (and (string= method "eval")
