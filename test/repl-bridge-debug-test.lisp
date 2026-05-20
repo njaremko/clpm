@@ -35,6 +35,22 @@
   (when (and (consp object) (eq (car object) :object))
     (cdr (assoc key (cadr object) :test #'string=))))
 
+(defun array-items (array)
+  (when (and (consp array) (eq (car array) :array))
+    (cadr array)))
+
+(defun frame-index-named (debugger-event name)
+  (let* ((condition (lookup debugger-event "condition"))
+         (frames (array-items (lookup condition "backtrace"))))
+    (loop for frame in frames
+          for obj = (and (consp frame) (eq (car frame) :object) frame)
+          for fname = (lookup obj "name")
+          for index = (lookup obj "i")
+          when (and (stringp fname)
+                    (search name fname :test #'char-equal)
+                    (integerp index))
+            return index)))
+
 (defun with-daemon (fn)
   (let* ((sock (format nil "/tmp/clpm-rb-debug-~A.sock" (random (expt 2 32))))
          (thread (sb-thread:make-thread
@@ -142,9 +158,9 @@ can keep reading event frames)."
 (format t "  debug-abort OK~%")
 
 ;;; ----------------------------------------------------------------------------
-;;; #112: debug-eval-in-frame reads frame-local X.
+;;; #112: debug-eval-in-frame uses the frame's lexical environment.
 
-(format t "Test: debug-eval-in-frame reads a frame's local X~%")
+(format t "Test: debug-eval-in-frame sees live frame variables~%")
 (with-daemon
   (lambda (sock)
     (let* ((conn (clpm.repl-bridge:open-connection sock))
@@ -157,20 +173,32 @@ can keep reading event frames)."
                     :id eval-id
                     :params (list :object
                                   (list (cons "form"
-                                              "(let ((x 7)) (error \"x=~A\" x))")
+                                              "(progn
+                                                 (declaim (optimize (debug 3)
+                                                                    (safety 3)
+                                                                    (speed 0)))
+                                                 (defun rb-debug-frame-target (x)
+                                                   (error \"x=~A\" x))
+                                                 (rb-debug-frame-target 7))")
                                         (cons "debug" t)))
                     :on-event
                     (lambda (frame)
                       (cond
                         ((string= "debugger-entered" (lookup frame "event"))
-                         (send-on-thread
-                          conn
-                          (clpm.repl-bridge::%json-object
-                           "id" eval-id
-                           "method" "debug-eval-in-frame"
-                           "params" (clpm.repl-bridge::%json-object
-                                     "frame" 0
-                                     "form" "(* x 2)"))))
+                         (let ((frame-index
+                                 (frame-index-named frame
+                                                    "RB-DEBUG-FRAME-TARGET")))
+                           (assert-true frame-index
+                                        "could not find user frame in ~S"
+                                        frame)
+                           (send-on-thread
+                            conn
+                            (clpm.repl-bridge::%json-object
+                             "id" eval-id
+                             "method" "debug-eval-in-frame"
+                             "params" (clpm.repl-bridge::%json-object
+                                       "frame" frame-index
+                                       "form" "(* x 2)")))))
                         ((string= "frame-eval-result" (lookup frame "event"))
                          (setf frame-result frame)
                          (send-on-thread
@@ -182,17 +210,7 @@ can keep reading event frames)."
              (declare (ignore resp))
              (assert-true frame-result
                           "never got a frame-eval-result event")
-             ;; The error message format is "x=7"; we should be able to find
-             ;; X in *some* frame's vars. We try frame 0 first (innermost);
-             ;; if vars aren't available there, the result will instead carry
-             ;; an error_output we can detect. The key invariant: the daemon
-             ;; *responded* to the frame eval request without crashing the
-             ;; session.
-             (let ((value (lookup frame-result "value"))
-                   (err (lookup frame-result "error_output")))
-               (assert-true (or value err)
-                            "frame-eval-result missing both value and error_output: ~S"
-                            frame-result)))
+             (assert-equal-string "14" (lookup frame-result "value")))
         (clpm.repl-bridge:close-connection conn)))))
 (format t "  debug-eval-in-frame OK~%")
 

@@ -191,6 +191,22 @@
                         (lookup (lookup r3 "result") "package")))))
 (format t "  OK~%")
 
+(format t "Test: persistent package is used while reading future forms~%")
+(with-daemon
+    (lambda (sock)
+      (do-eval sock "(defpackage :clpm-bridge-read-pkg (:use :cl))")
+      (do-eval sock "(in-package :clpm-bridge-read-pkg)")
+      (let* ((def (do-eval sock "(defun package-read-target () :ok)"))
+             (probe (do-eval
+                     sock
+                     "(list (not (null (fboundp 'clpm-bridge-read-pkg::package-read-target)))
+                            (not (null (fboundp 'cl-user::package-read-target))))"))
+             (result (lookup probe "result")))
+        (assert-true (lookup def "result") "defun failed: ~S" def)
+        (assert-string= "(T NIL)"
+                        (lookup result "value")))))
+(format t "  OK~%")
+
 (format t "Test: redefinition tracked~%")
 (with-daemon
     (lambda (sock)

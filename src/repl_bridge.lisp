@@ -834,6 +834,22 @@ record one."
     (error () nil)))
 
 #+sbcl
+(defun %frames-json (frames &key (max +max-backtrace-frames+))
+  "Render FRAMES as structured JSON with indices that refer back to FRAMES."
+  (loop for frame in frames
+        for i from 0
+        while (< i max)
+        collect (list :object
+                      (list (cons "i" i)
+                            (cons "name" (%frame-name frame))
+                            (cons "args" (%json-array
+                                          (mapcar #'identity
+                                                  (or (%frame-args frame) '()))))
+                            (cons "source" (%frame-source frame))
+                            (cons "vars"
+                                  (list :object (%frame-vars frame)))))))
+
+#+sbcl
 (defun %structured-backtrace (&key (max +max-backtrace-frames+))
   "Walk the SBCL call stack into a list of frame plists. Bounded by MAX
 so a runaway condition can't drown the response."
@@ -857,7 +873,7 @@ so a runaway condition can't drown the response."
         (nreverse frames))
     (error () nil)))
 
-(defun %condition-json (condition &key include-backtrace)
+(defun %condition-json (condition &key include-backtrace frames)
   "Rich JSON for CONDITION: type, message, report, slot values, full
 restart objects, and (when INCLUDE-BACKTRACE) a structured frame walk
 with names, args, source locations, and locals. Falls back to plain
@@ -880,7 +896,8 @@ must not block the eval response."
                  (cons "slot_values" (list :object slot-values))
                  (cons "restarts" (%json-array restarts)))))
     (when include-backtrace
-      (let ((frames (or #+sbcl (%structured-backtrace)
+      (let ((frames (or #+sbcl (and frames (%frames-json frames))
+                        #+sbcl (%structured-backtrace)
                         ;; Generic fallback: princ each compat-layer frame.
                         (handler-case
                             (let* ((all (clpm.repl-bridge.compat:list-backtrace))
@@ -1152,25 +1169,17 @@ symbols resolve as the user expects."
   (let ((*package* (or package *package*)))
     (%read-form form-text)))
 
-#+sbcl
-(defun %debug-internal-symbol-p (sym)
-  "True if SYM lives in a system package whose debug-vars we should
-elide from frame-eval LET-wrappers (handler clusters, raw lexenvs,
-ORIGINAL-EXP, etc.). Matches SBCL's nested SB-* packages plus the
-COMMON-LISP package itself -- but *not* COMMON-LISP-USER, since
-that's where ad-hoc user definitions land."
-  (let ((pkg (and (symbolp sym) (symbol-package sym))))
-    (when pkg
-      (let ((name (package-name pkg)))
-        (or (string= name "COMMON-LISP")
-            (and (>= (length name) 3)
-                 (string= "SB-" name :end2 3)))))))
-
 (defun %eval-in-frame (session frame-index form-text)
-  "Evaluate FORM-TEXT in the lexenv of the frame at FRAME-INDEX. Returns
-an alist of result fields suitable for emit-event."
+  "Evaluate FORM-TEXT in the lexical context of FRAME-INDEX.
+
+On SBCL, `sb-di:eval-in-frame' is the semantic operation we want: it sees
+the frame's real lexical variables, local functions, symbol macros, and
+implementation-supported debug environment instead of a guessed LET wrapper."
   (let* ((frames (debug-session-frames session))
-         (frame (and frames (< frame-index (length frames))
+         (frame (and frames
+                     (integerp frame-index)
+                     (<= 0 frame-index)
+                     (< frame-index (length frames))
                      (nth frame-index frames))))
     (cond
       ((null frame)
@@ -1178,55 +1187,18 @@ an alist of result fields suitable for emit-event."
                    (format nil "no frame ~A (have ~A)"
                            frame-index (length frames)))))
       (t
-       (let* ((bindings (handler-case
-                            (let ((debug-fun (sb-di:frame-debug-fun frame))
-                                  (vars '()))
-                              (when debug-fun
-                                (sb-di:do-debug-fun-vars (v debug-fun)
-                                  (let ((name (sb-di:debug-var-symbol v)))
-                                    ;; Skip SBCL internal locals --
-                                    ;; their values (handler clusters,
-                                    ;; lexenvs, raw forms) routinely
-                                    ;; don't survive being quoted into
-                                    ;; a LET binding and just produce
-                                    ;; noise the user can't act on.
-                                    (when (and name
-                                               (not (%debug-internal-symbol-p
-                                                     name)))
-                                      (push (list name
-                                                  (list 'quote
-                                                        (handler-case
-                                                            (sb-di:debug-var-value v frame)
-                                                          (error () nil))))
-                                            vars)))))
-                              ;; A debug-fun can expose the same logical
-                              ;; name multiple times (loop rebindings,
-                              ;; SBCL's internal SB-IMPL::NAME alias,
-                              ;; etc.). LET would signal a compile-time
-                              ;; "occurs more than once" error, so keep
-                              ;; only the most-recently-bound copy --
-                              ;; that's what the user sees at the break.
-                              ;; PUSH stored newest first; default
-                              ;; DELETE-DUPLICATES keeps the first
-                              ;; occurrence, which is what we want.
-                              (nreverse
-                               (delete-duplicates vars
-                                                  :key #'first
-                                                  :test #'eq)))
-                          (error () nil)))
-              (pkg (or (and *server* (server-current-package *server*))
+       (let* ((pkg (or (and *server* (server-current-package *server*))
                        (find-package "COMMON-LISP-USER"))))
          (handler-case
              (let* ((parsed-form (%read-debug-form form-text pkg))
-                    (wrapped (if bindings
-                                 `(let ,bindings ,parsed-form)
-                                 parsed-form))
                     (out (make-string-output-stream))
                     (err (make-string-output-stream))
                     (values (let ((*standard-output* out)
                                   (*error-output* err)
                                   (*package* pkg))
-                              (multiple-value-list (eval wrapped)))))
+                              (multiple-value-list
+                               #+sbcl (sb-di:eval-in-frame frame parsed-form)
+                               #-sbcl (eval parsed-form)))))
                (list (cons "values" (%json-array
                                      (mapcar #'%safe-prin1 values)))
                      (cons "value" (%safe-prin1 (first values)))
@@ -1250,7 +1222,9 @@ restart (unwinds) or returns NIL (we let the error propagate)."
          (frames (%capture-frames))
          (restarts (compute-restarts condition))
          (json-condition (handler-case
-                             (%condition-json condition :include-backtrace t)
+                             (%condition-json condition
+                                             :include-backtrace t
+                                             :frames frames)
                            (error () (%capture-error-snapshot condition))))
          (session (make-debug-session
                    :condition condition
@@ -1425,7 +1399,8 @@ sessions."
                   :history history-snap
                   :handler-attempts (nreverse (car handler-attempts-cell))))))
       (handler-case
-          (setf form (%read-form form-text))
+          (let ((*package* package))
+            (setf form (%read-form form-text)))
         (error (c)
           (setf code "reader-error")
           (push (%condition-json c) conditions)
