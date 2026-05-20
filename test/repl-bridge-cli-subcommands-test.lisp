@@ -237,6 +237,69 @@
                  (assert-contains stderr "Unknown subcommand"))
                (format t "  unknown-subcommand OK~%")
 
+               (format t "Test: complete-symbol prints candidates~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "complete-symbol"
+                                       "def" "--limit" "5"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "DEF"))
+               (format t "  complete-symbol OK~%")
+
+               (format t "Test: class-info renders precedence~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "class-info"
+                                       "standard-object"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "name: STANDARD-OBJECT")
+                 (assert-contains stdout "precedence:"))
+               (format t "  class-info OK~%")
+
+               (format t "Test: package-info renders exports~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "package-info"
+                                       "clpm.io.json"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "exports:"))
+               (format t "  package-info OK~%")
+
+               (format t "Test: describe-system renders fields~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "describe-system" "clpm"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "name: clpm")
+                 (assert-contains stdout "version:"))
+               (format t "  describe-system OK~%")
+
+               (format t "Test: disassemble renders asm~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "disassemble"
+                                       "identity"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "disassembly"))
+               (format t "  disassemble OK~%")
+
+               (format t "Test: compile-file + load-file~%")
+               (let ((src (merge-pathnames "hello.lisp" proj)))
+                 (with-open-file (s src :direction :output
+                                        :if-exists :supersede)
+                   (write-string "(defun hello () \"hi\")" s))
+                 (multiple-value-bind (rc stdout)
+                     (run-cli-captured (list "repl-bridge" "compile-file"
+                                             (namestring src)))
+                   (assert-eql 0 rc)
+                   (assert-contains stdout "compiled"))
+                 (multiple-value-bind (rc stdout)
+                     (run-cli-captured (list "repl-bridge" "load-file"
+                                             (namestring src)))
+                   (assert-eql 0 rc)
+                   (assert-contains stdout "loaded"))
+                 (multiple-value-bind (rc stdout)
+                     (run-cli-captured '("repl-bridge" "eval" "(hello)"
+                                          "--no-autostart"))
+                   (declare (ignore rc))
+                   (assert-contains stdout "hi")))
+               (format t "  compile-file/load-file flow OK~%")
+
                (format t "Test: help text~%")
                (multiple-value-bind (rc stdout)
                    (run-cli-captured '("repl-bridge" "help"))

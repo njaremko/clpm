@@ -2396,7 +2396,9 @@ faithfully; nested objects/arrays fall back to JSON for now."
     (%bridge-with-call (obj "describe-system"
                             :params (%bridge-make-params
                                      (list (cons "name" name))))
-      (%bridge-print-kv obj '("name" "version" "description" "source"))
+      (%bridge-print-kv obj '("name" "version" "description"
+                              ("source_directory" "source")
+                              "license" "author"))
       (let ((deps (%bridge-array-items (%bridge-field obj "depends_on"))))
         (when deps
           (format t "depends_on: ~{~A~^ ~}~%"
@@ -2418,11 +2420,11 @@ faithfully; nested objects/arrays fall back to JSON for now."
         (when use (format t "use: ~{~A~^, ~}~%" use)))
       (let ((ub (%bridge-array-items (%bridge-field obj "used_by"))))
         (when ub (format t "used_by: ~{~A~^, ~}~%" ub)))
-      (let ((ext (%bridge-field obj "external_count"))
-            (int (%bridge-field obj "internal_count"))
-            (inh (%bridge-field obj "inherited_count")))
-        (format t "symbols: external=~A internal=~A inherited=~A~%"
-                ext int inh)))))
+      (let ((ext (or (%bridge-field obj "export_count")
+                     (%bridge-field obj "external_count"))))
+        (when ext (format t "exports: ~A~%" ext)))
+      (let ((head (%bridge-array-items (%bridge-field obj "exports_head"))))
+        (when head (format t "exports_head: ~{~A~^, ~}~%" head))))))
 
 (defun %bridge-cmd-current-package (args)
   "`clpm repl-bridge current-package [--worker NAME]'."
@@ -2485,12 +2487,15 @@ faithfully; nested objects/arrays fall back to JSON for now."
                                        (list (cons "prefix" pre)
                                              (cons "package" (getf opts :package))
                                              (cons "limit" (getf opts :limit)))))
-        (let ((entries (%bridge-array-items (%bridge-field obj "entries"))))
-          (dolist (e entries)
-            (let ((o (cadr e)))
-              (format t "~A:~A~%"
-                      (%bridge-field o "package")
-                      (%bridge-field o "name")))))))))
+        (let ((cands (%bridge-array-items (%bridge-field obj "candidates")))
+              (total (%bridge-field obj "total"))
+              (truncated (%bridge-field obj "truncated")))
+          (dolist (s cands)
+            (when (stringp s) (format t "~A~%" s)))
+          (when (and total
+                     (or truncated
+                         (and (numberp total) (> total (length cands)))))
+            (format t "~&;; ~A total~:[~;, truncated~]~%" total truncated)))))))
 
 (defun %bridge-cmd-arglist (args)
   "`clpm repl-bridge arglist SYMBOL [--package P]'."
@@ -2536,7 +2541,9 @@ faithfully; nested objects/arrays fall back to JSON for now."
                               :params (%bridge-make-params
                                        (list (cons "symbol" sym)
                                              (cons "package" (getf opts :package)))))
-        (format t "~A~%" (or (%bridge-field obj "text") ""))))))
+        (format t "~A~%" (or (%bridge-field obj "output")
+                             (%bridge-field obj "text")
+                             ""))))))
 
 (defun %bridge-cmd-function-info (args)
   "`clpm repl-bridge function-info SYMBOL [--package P]'."
@@ -2566,11 +2573,17 @@ faithfully; nested objects/arrays fall back to JSON for now."
                                        (list (cons "name" name)
                                              (cons "package" (getf opts :package)))))
         (%bridge-print-kv obj '("name" "package" "metaclass" "documentation"))
-        (let ((supers (%bridge-array-items (%bridge-field obj "direct_superclasses")))
-              (subs (%bridge-array-items (%bridge-field obj "direct_subclasses")))
+        (let ((supers (%bridge-array-items
+                       (or (%bridge-field obj "direct_supers")
+                           (%bridge-field obj "direct_superclasses"))))
+              (subs (%bridge-array-items
+                     (or (%bridge-field obj "direct_subs")
+                         (%bridge-field obj "direct_subclasses"))))
+              (prec (%bridge-array-items (%bridge-field obj "precedence")))
               (slots (%bridge-array-items (%bridge-field obj "slots"))))
           (when supers (format t "supers: ~{~A~^, ~}~%" (remove nil supers)))
           (when subs (format t "subs:   ~{~A~^, ~}~%" (remove nil subs)))
+          (when prec (format t "precedence: ~{~A~^, ~}~%" (remove nil prec)))
           (when slots
             (format t "slots:~%")
             (dolist (s slots)
@@ -2741,19 +2754,16 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
                                              (cons "mode" (getf opts :mode))
                                              (cons "top" (getf opts :top))
                                              (cons "package" (getf opts :package)))))
-        (format t "samples: ~A  (~,2Fs of ~A)~%"
-                (%bridge-field obj "samples")
-                (/ (or (%bridge-field obj "elapsed_ms") 0) 1000.0)
-                (%bridge-field obj "mode"))
-        (let ((entries (%bridge-array-items (%bridge-field obj "flat"))))
-          (when entries
-            (format t "~&  self%  cum%  name~%")
-            (dolist (e entries)
-              (let ((o (cadr e)))
-                (format t "  ~5,1F  ~5,1F  ~A~%"
-                        (or (%bridge-field o "self_percent") 0.0)
-                        (or (%bridge-field o "cum_percent") 0.0)
-                        (or (%bridge-field o "name") "?"))))))))))
+        (let* ((value (%bridge-field obj "value"))
+               (profile (%bridge-unwrap (%bridge-field obj "profile")))
+               (entries (%bridge-array-items (%bridge-field profile "entries"))))
+          (when value (format t "value: ~A~%" value))
+          (dolist (e entries)
+            (let* ((eo (cadr e))
+                   (raw (%bridge-field eo "raw_report")))
+              (when raw (format t "~A~%" raw))))
+          (unless entries
+            (format t "(no profile samples; try increasing the workload)~%")))))))
 
 (defun %bridge-cmd-trace (args)
   "`clpm repl-bridge trace SYMBOL... [--package P]'."
