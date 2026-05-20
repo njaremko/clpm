@@ -2776,6 +2776,117 @@ new focus, or :no-part on out-of-range."
        "depth" (length (inspector-session-stack sess))))))
 
 ;;; ----------------------------------------------------------------------------
+;;; Image and ASDF management (#190-#194)
+;;; ----------------------------------------------------------------------------
+
+(%register-method
+ (make-method-spec
+  :name "image-info"
+  :summary "Daemon vitals: pid, lisp, uptime, features, GC, working dir."
+  :doc "No parameters. Useful for `the daemon is in state X' diagnostics."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore params ctx))
+    (%success-response
+     id
+     (%json-object
+      "pid" (clpm.repl-bridge.compat:getpid)
+      "lisp" (format nil "~A ~A"
+                     (lisp-implementation-type)
+                     (lisp-implementation-version))
+      "uptime_ms" (* 1000 (- (get-universal-time)
+                             (server-started-at server)))
+      "default_pathname" (namestring *default-pathname-defaults*)
+      "working_directory"
+      (namestring (or *default-pathname-defaults* (truename ".")))
+      "features" (%json-array
+                  (mapcar (lambda (f)
+                            (if (keywordp f) (symbol-name f)
+                                (princ-to-string f)))
+                          *features*))
+      "bytes_consed"
+      #+sbcl (sb-ext:get-bytes-consed)
+      #-sbcl 0
+      "gc_run_time"
+      #+sbcl sb-ext:*gc-real-time*
+      #-sbcl 0
+      "eval_count" (server-eval-count server))))))
+
+(%register-method
+ (make-method-spec
+  :name "loaded-systems"
+  :summary "ASDF systems currently loaded into the image."
+  :doc "Returns each system's name, version (if any), and source
+directory."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server params ctx))
+    (let ((entries '()))
+      (asdf/session:with-asdf-session ()
+        (asdf:map-systems
+         (lambda (sys)
+           (push (%json-object
+                  "name" (asdf:component-name sys)
+                  "version" (handler-case (asdf:component-version sys)
+                              (error () nil))
+                  "source_directory"
+                  (handler-case (namestring (asdf:system-source-directory sys))
+                    (error () nil)))
+                 entries))))
+      (%success-response
+       id (%json-object "entries" (%json-array (nreverse entries))))))))
+
+(%register-method
+ (make-method-spec
+  :name "list-packages"
+  :summary "List every package with its symbol counts."
+  :doc "Returns name, nicknames, external count, internal count."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server params ctx))
+    (let ((entries
+            (loop for pkg in (list-all-packages)
+                  collect
+                  (let ((internal 0) (external 0))
+                    (do-symbols (s pkg)
+                      (multiple-value-bind (sym status)
+                          (find-symbol (symbol-name s) pkg)
+                        (declare (ignore sym))
+                        (case status
+                          (:internal (incf internal))
+                          (:external (incf external)))))
+                    (%json-object
+                     "name" (package-name pkg)
+                     "nicknames" (%json-array (package-nicknames pkg))
+                     "external" external
+                     "internal" internal)))))
+      (%success-response
+       id (%json-object "entries" (%json-array entries)))))))
+
+(%register-method
+ (make-method-spec
+  :name "gc"
+  :summary "Trigger a GC, return bytes_consed before and after."
+  :doc "Optional: `full' (boolean) for a full GC."
+  :params (list (list :name "full" :type "boolean" :required nil
+                      :description "Full GC (default: minor)."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server ctx))
+    (let* ((full (%json-getf params "full"))
+           (before #+sbcl (sb-ext:get-bytes-consed) #-sbcl 0))
+      #+sbcl (sb-ext:gc :full full)
+      #-sbcl (declare (ignore full))
+      (%success-response
+       id
+       (%json-object
+        "before_bytes" before
+        "after_bytes" #+sbcl (sb-ext:get-bytes-consed) #-sbcl 0))))))
+
+;;; ----------------------------------------------------------------------------
 ;;; Trace / time / profile (#160-#165)
 ;;; ----------------------------------------------------------------------------
 
