@@ -3181,8 +3181,19 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
     (%bridge-with-call (obj "reset"
                             :params (%bridge-make-params
                                      (list (cons "worker" (getf opts :worker)))))
-      (declare (ignore obj))
-      (format t "reset ~A~%" (or (getf opts :worker) "default")))))
+      (let ((outcome (%bridge-field obj "outcome"))
+            (worker (or (%bridge-field obj "worker") "default")))
+        (cond
+          ((string= outcome "reset")
+           (format t "reset worker ~A~%" worker))
+          ((string= outcome "spawned")
+           (format t "spawned fresh default worker ~A~%" worker))
+          ((string= outcome "no-such-worker")
+           (format *error-output* "no such worker: ~A~%" worker)
+           (return-from %bridge-cmd-reset 1))
+          (t
+           (format t "reset outcome=~A worker=~A~%"
+                   (or outcome "?") worker)))))))
 
 (defun %bridge-cmd-list-watches (args)
   (declare (ignore args))

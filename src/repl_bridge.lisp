@@ -2040,26 +2040,42 @@ Pass `worker' to target a named worker; otherwise the default."
   :doc "Use to recover from a runaway eval that ignored `interrupt'. The
 next eval against the same worker name spawns a fresh thread.
 Persistent package state is preserved across resets. Pass `worker' to
-reset a named worker; otherwise the default worker is reset."
+reset a named worker; otherwise the default worker is reset.
+
+Response `outcome' field:
+  \"reset\"           -- existing worker was terminated + respawned.
+  \"spawned\"         -- the default worker did not yet exist; a fresh
+                       one was created. (Only the default; for named
+                       workers the spawning-on-reset would mask typos.)
+  \"no-such-worker\"  -- the user named a worker that doesn't exist."
   :params (list (list :name "worker" :type "string" :required nil
                       :description "Worker name (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (let* ((wname (or (%json-getf params "worker") +default-worker-name+))
-           (w (%find-worker server wname)))
-      (when w
-        (let ((preserved-pkg (worker-package w)))
-          (when (clpm.repl-bridge.compat:thread-alive-p (worker-thread w))
-            (%log-event (server-event-log server)
-                        "worker-terminated" "worker" wname)
-            (clpm.repl-bridge.compat:terminate-thread (worker-thread w)))
-          (%remove-worker server wname)
-          ;; Recreate the named worker eagerly so the persistent package
-          ;; (and the slot itself) survives the reset.
-          (let ((fresh (%ensure-worker server :name wname)))
-            (setf (worker-package fresh) preserved-pkg)))))
-    (%success-response id (%json-object)))))
+           (default? (string= wname +default-worker-name+))
+           (w (%find-worker server wname))
+           (outcome
+             (cond
+               (w
+                (let ((preserved-pkg (worker-package w)))
+                  (when (clpm.repl-bridge.compat:thread-alive-p (worker-thread w))
+                    (%log-event (server-event-log server)
+                                "worker-terminated" "worker" wname)
+                    (clpm.repl-bridge.compat:terminate-thread (worker-thread w)))
+                  (%remove-worker server wname)
+                  (let ((fresh (%ensure-worker server :name wname)))
+                    (setf (worker-package fresh) preserved-pkg)))
+                "reset")
+               (default?
+                ;; The default worker is lazy-spawned; resetting it
+                ;; before any eval has run is well-defined.
+                (%ensure-worker server :name wname)
+                "spawned")
+               (t "no-such-worker"))))
+      (%success-response id
+                         (%json-object "outcome" outcome "worker" wname))))))
 
 (defun %worker-state-string (worker)
   "Human-readable string form of a worker's STATE keyword."

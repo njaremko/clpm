@@ -217,5 +217,27 @@
                    "beta log missing WORKER-B-FN: ~S" b-names))))
 (format t "  per-worker redefinitions OK~%")
 
+(format t "Test: reset outcome distinguishes reset / spawned / no-such-worker~%")
+(with-daemon
+  (lambda (sock)
+    ;; Default worker hasn't been spawned: the response should say
+    ;; `spawned' (not silently claim `reset' against nothing).
+    (let* ((r (do-rpc sock "reset" nil)))
+      (assert-equal-string "spawned"
+                           (lookup (lookup r "result") "outcome")))
+    ;; Spawn the default by running an eval, then a real reset is
+    ;; `reset', not `spawned'.
+    (do-rpc sock "eval" (list (cons "form" "(+ 1 1)")))
+    (let* ((r (do-rpc sock "reset" nil)))
+      (assert-equal-string "reset"
+                           (lookup (lookup r "result") "outcome")))
+    ;; A named worker the user never created -- a typo -- must surface
+    ;; as no-such-worker rather than be silently spawned (which would
+    ;; mask the typo for evals routed to it).
+    (let* ((r (do-rpc sock "reset" (list (cons "worker" "ghost")))))
+      (assert-equal-string "no-such-worker"
+                           (lookup (lookup r "result") "outcome")))))
+(format t "  reset outcomes OK~%")
+
 (format t "~%REPL-bridge workers tests PASSED!~%")
 (sb-ext:exit :code 0)
