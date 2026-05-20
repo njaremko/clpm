@@ -96,8 +96,9 @@ clpm repl-bridge unwatch ID
 
 # workers and tracing
 clpm repl-bridge workers                           # alias: list-workers
-clpm repl-bridge kill-worker NAME
-clpm repl-bridge reset [--worker W]
+clpm repl-bridge kill-worker NAME                  # rc=1 if NAME doesn't exist
+clpm repl-bridge reset [--worker W]                # outcome: reset/spawned/no-such-worker
+clpm repl-bridge interrupt [--worker W]            # outcome: interrupted/idle/no-such-worker
 clpm repl-bridge trace SYMBOL...
 clpm repl-bridge untrace [SYMBOL...]
 clpm repl-bridge list-traced
@@ -218,6 +219,14 @@ Each `--handler` is `TYPE=RESTART[:ARG1[,ARG2[,...]]]`. The TYPE is a
 CL type specifier (matched with `typep`), RESTART names the restart to
 invoke, and ARGS (if present) are read+evaluated daemon-side at
 recovery time. `--handler` is repeatable; specs are tried in order.
+
+When a spec's TYPE matches the raised condition but no restart of that
+name is available (typo, or the form lacked the expected
+`restart-case`), the eval response carries a `handler_attempts` array
+with each failed match and the restarts that *were* available, and the
+CLI prints a "handlers tried (N):" section under the error. That makes
+a misspelled restart name distinguishable from a plain
+no-handler-matched fallthrough.
 
 ## Recipe: inspector
 
