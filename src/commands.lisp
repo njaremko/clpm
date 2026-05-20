@@ -2768,13 +2768,10 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
                                            (cons "package" (getf opts :package)))))
       (let ((traced (%bridge-array-items (%bridge-field obj "traced"))))
         (format t "traced: ~{~A~^, ~}~%" (or (remove nil traced) '("(none)"))))
-      (let ((failed (%bridge-array-items (%bridge-field obj "failed"))))
-        (when failed
-          (dolist (f failed)
-            (let ((o (cadr f)))
-              (format *error-output* "failed ~A: ~A~%"
-                      (%bridge-field o "name")
-                      (%bridge-field o "reason")))))))))
+      (let ((missing (%bridge-array-items (%bridge-field obj "missing"))))
+        (when missing
+          (format *error-output* "missing: ~{~A~^, ~}~%"
+                  (remove nil missing)))))))
 
 (defun %bridge-cmd-untrace (args)
   "`clpm repl-bridge untrace [SYMBOL...] [--package P]'."
@@ -2792,7 +2789,7 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
 (defun %bridge-cmd-list-traced (args)
   (declare (ignore args))
   (%bridge-with-call (obj "list-traced")
-    (let ((entries (%bridge-array-items (%bridge-field obj "traced"))))
+    (let ((entries (%bridge-array-items (%bridge-field obj "entries"))))
       (cond
         ((null entries) (format t "(no functions traced)~%"))
         (t (dolist (s entries) (format t "~A~%" s)))))))
