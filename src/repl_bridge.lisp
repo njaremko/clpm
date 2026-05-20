@@ -4352,8 +4352,18 @@ Used by both the inline path and the threaded path."
                                     :id id
                                     :options params))
          (start (get-internal-real-time))
+         (explain? (and params (%json-getf params "explain")))
          (response (handler-case
-                       (%dispatch-method server method params id ctx)
+                       (progn
+                         ;; `explain: true' -- emit a `plan' event before
+                         ;; the handler runs so the client can verify the
+                         ;; daemon parsed their request the way they
+                         ;; intended. The handler still runs as usual.
+                         (when explain?
+                           (%emit-event ctx "plan"
+                                        "method" method
+                                        "params" (or params (%json-object))))
+                         (%dispatch-method server method params id ctx))
                      (error (c)
                        (%error-response id "protocol-error"
                                         (format nil "dispatch failed: ~A" c)))))

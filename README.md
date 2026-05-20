@@ -86,32 +86,60 @@ To generate a deterministic SBOM from your lockfile:
 clpm sbom --format cyclonedx-json --out sbom.json
 ```
 
-## AI-assisted development
+## AI-assisted development: the repl-bridge operator manual
 
 CLPM ships a **repl-bridge**: a persistent project-scoped SBCL daemon that
 answers JSON-RPC over a Unix socket. It exists so an LLM (or any non-Lisp
 tool) can drive a long-lived image — redefining one `defun` instead of
-reloading systems, capturing stdout/stderr per call, surfacing in-image
-drift from disk.
+reloading systems, capturing stdout/stderr per call, surfacing in-image drift
+from disk.
 
 ```bash
-# inside any clpm project
-clpm install
-clpm repl-bridge serve --detach
+clpm install                                          # one-time setup
+clpm repl-bridge serve --detach                       # background daemon
 clpm repl-bridge eval '(asdf:load-system "my-app")'
 clpm repl-bridge eval '(my-app:hello)'
+clpm repl-bridge methods                              # list every RPC
 clpm repl-bridge stop
 ```
 
-State persists across `eval` calls. Each response is one line of JSON with
-the printed value, captured output, and (on error) the condition message
-plus a short backtrace. Hung evals can be unwound with
-`clpm repl-bridge interrupt`. Run `clpm repl-bridge diff` to list functions
-you've redefined in-image but haven't saved back to source files.
+State persists across `eval` calls. Hung evals are unwound with
+`clpm repl-bridge interrupt` (daemon stays up); a wedged worker is recovered
+with `reset`.
+
+### Capabilities
+
+- **Interactive debugger.** `eval` with `debug: true` pauses on the first
+  unhandled condition, emits a live restart chain, and accepts
+  `debug-invoke-restart` / `debug-eval-in-frame` / `debug-continue` /
+  `debug-abort` continuations on the same request id.
+- **Inspector sessions.** `inspect FORM` returns paginated parts of any
+  value; `inspect-into` / `inspect-pop` walk the structure; `inspect-eval`
+  binds `*` to the focus; `inspect-mutate` replaces an element.
+- **Compile diagnostics.** `compile-file PATH` returns warnings/errors with
+  file + line positions, suitable for surfacing in an editor.
+- **Source navigation.** `find-definitions`, `who-calls`, `apropos`,
+  `documentation`, `arglist`, `complete-symbol`, `disassemble`,
+  `describe-system`.
+- **Named workers.** `eval --worker NAME` runs on an isolated worker with
+  its own `*package*`, history, and redefinition log; `--concurrent`
+  spawns a one-shot disposable worker. `list-workers` / `kill-worker`
+  manage them.
+- **Trace / time / profile.** `trace SYMBOLS`, `time-eval FORM`,
+  `profile-eval FORM`.
+- **File watching.** `watch DIR --glob '*.lisp' --auto-revert` polls and
+  re-LOADs matching files on mtime change, streaming `file-reloaded` /
+  `reload-failed` / `revert-applied` events.
+- **Image introspection.** `image-info`, `loaded-systems`, `list-packages`,
+  `gc [--full]`.
+- **Self-documenting.** Every method is published in the registry the
+  dispatcher reads. `methods` lists them; `help METHOD` returns the long
+  doc + parameter schema; `explain: true` on any call echoes a `plan`
+  event so you can debug protocol misuse.
 
 A Claude Code skill at [`.claude/skills/clpm-repl-bridge.md`](.claude/skills/clpm-repl-bridge.md)
-documents the operating model in detail (response shape, caps, edit/test
-loop). Run `clpm help repl-bridge <subcommand>` for per-subcommand flags.
+documents the v2 operating model as recipes. Run
+`clpm help repl-bridge <subcommand>` for per-subcommand flags.
 
 ## Project File Format
 

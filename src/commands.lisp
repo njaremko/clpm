@@ -1937,6 +1937,75 @@ because the daemon couldn't come up."
          (terpri *standard-output*)
          (if (assoc "error" (cadr resp) :test #'string=) 1 0))))))
 
+(defun %bridge-methods (args)
+  "Print the daemon's RPC method table as a human-readable list. With
+no args, just prints names + summaries. With one arg (a method name),
+prints the long-form doc plus its parameters."
+  (let ((wanted (first args)))
+    (multiple-value-bind (project-root sock)
+        (%bridge-resolve-project)
+      (unless project-root (return-from %bridge-methods 1))
+      (cond
+        (wanted
+         (let ((resp (clpm.repl-bridge:send-request
+                      sock "help"
+                      :params (list :object (list (cons "method" wanted)))
+                      :connect-timeout 1)))
+           (cond
+             ((eq resp :no-daemon) (log-error "No daemon running") 2)
+             ((eq resp :io-error) (log-error "I/O error talking to daemon") 2)
+             ((assoc "error" (cadr resp) :test #'string=)
+              (let ((err (cdr (assoc "error" (cadr resp) :test #'string=))))
+                (format *error-output* "~A~%"
+                        (or (cdr (assoc "message" (cadr err)
+                                         :test #'string=))
+                            "unknown method"))
+                1))
+             (t
+              (let* ((result (cdr (assoc "result" (cadr resp) :test #'string=)))
+                     (obj (and result (cadr result)))
+                     (name (and obj (cdr (assoc "name" obj :test #'string=))))
+                     (summary (and obj (cdr (assoc "summary" obj :test #'string=))))
+                     (doc (and obj (cdr (assoc "doc" obj :test #'string=))))
+                     (params (and obj (cdr (assoc "params" obj :test #'string=)))))
+                (format t "~A~@[ -- ~A~]~%" name summary)
+                (when (and doc (plusp (length doc)))
+                  (format t "~%~A~%" doc))
+                (when (and (consp params) (eq (car params) :array))
+                  (format t "~%parameters:~%")
+                  (dolist (p (cadr params))
+                    (let* ((pobj (cadr p))
+                           (pn (cdr (assoc "name" pobj :test #'string=)))
+                           (pt (cdr (assoc "type" pobj :test #'string=)))
+                           (req (cdr (assoc "required" pobj :test #'string=)))
+                           (pd (cdr (assoc "description" pobj :test #'string=))))
+                      (format t "  ~A: ~A~:[~; (required)~]~@[ -- ~A~]~%"
+                              pn (or pt "?") req pd))))
+                0)))))
+        (t
+         (let ((resp (clpm.repl-bridge:send-request
+                      sock "methods" :connect-timeout 1)))
+           (cond
+             ((eq resp :no-daemon) (log-error "No daemon running") 2)
+             ((eq resp :io-error) (log-error "I/O error talking to daemon") 2)
+             (t
+              (let* ((result (cdr (assoc "result" (cadr resp) :test #'string=)))
+                     (obj (and result (cadr result)))
+                     (entries (and obj (cdr (assoc "methods" obj
+                                                    :test #'string=))))
+                     (items (and (consp entries) (eq (car entries) :array)
+                                 (cadr entries)))
+                     (sorted (sort (copy-list items) #'string<
+                                   :key (lambda (e)
+                                          (cdr (assoc "name" (cadr e)
+                                                       :test #'string=))))))
+                (dolist (m sorted)
+                  (let* ((mobj (cadr m))
+                         (n (cdr (assoc "name" mobj :test #'string=)))
+                         (s (cdr (assoc "summary" mobj :test #'string=))))
+                    (format t "~A~:[~;: ~A~]~%" n s s)))
+                0)))))))))
+
 (defun %bridge-status (args)
   (declare (ignore args))
   (multiple-value-bind (project-root sock pid log)
@@ -2027,7 +2096,7 @@ because the daemon couldn't come up."
   (let ((sub (pop args)))
     (cond
       ((null sub)
-       (log-error "Usage: clpm repl-bridge <serve|eval|interrupt|status|stop|ping|describe|diff>")
+       (log-error "Usage: clpm repl-bridge <serve|eval|interrupt|status|stop|ping|describe|methods|diff>")
        1)
       ((string= sub "serve") (%bridge-serve args))
       ((string= sub "eval") (%bridge-eval args))
@@ -2035,6 +2104,7 @@ because the daemon couldn't come up."
       ((string= sub "ping") (%bridge-simple-method "ping"))
       ((string= sub "status") (%bridge-status args))
       ((string= sub "stop") (%bridge-stop args))
+      ((string= sub "methods") (%bridge-methods args))
       ((string= sub "describe")
        (let ((sym (first args)))
          (cond
