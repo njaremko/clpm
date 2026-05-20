@@ -2775,6 +2775,237 @@ new focus, or :no-part on out-of-range."
                           '("close")))
        "depth" (length (inspector-session-stack sess))))))
 
+;;; ----------------------------------------------------------------------------
+;;; Trace / time / profile (#160-#165)
+;;; ----------------------------------------------------------------------------
+
+(defun %trace-symbol (sym-name pkg-name &key (server *server*))
+  "Resolve SYM-NAME in PKG-NAME and call cl:trace on it. Returns T on
+success, NIL when the symbol isn't fbound. Errors propagate."
+  (let ((sym (%symbol-from-string sym-name pkg-name :server server)))
+    (cond
+      ((or (null sym) (not (fboundp sym))) nil)
+      (t (eval `(trace ,sym)) t))))
+
+(defun %untrace-symbol (sym-name pkg-name &key (server *server*))
+  (let ((sym (%symbol-from-string sym-name pkg-name :server server)))
+    (cond
+      ((null sym) nil)
+      (t (eval `(untrace ,sym)) t))))
+
+(%register-method
+ (make-method-spec
+  :name "trace"
+  :summary "Install cl:trace on one or more symbols."
+  :doc "Required: `symbols' (array of symbol names). Optional:
+`package' (resolves all names in this package). Traced output is
+written to *trace-output*; when the eval that runs the traced function
+opts into `stream: true', the lines are emitted as event:stdout."
+  :params (list (list :name "symbols" :type "array" :required t
+                      :description "Symbol names to trace.")
+                (list :name "package" :type "string" :required nil
+                      :description "Resolve names in this package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((syms-array (%json-getf params "symbols"))
+           (names (array-items-of-param syms-array))
+           (pkg-name (%json-getf params "package"))
+           (traced '())
+           (missing '()))
+      (cond
+        ((not (listp names))
+         (%error-response id "protocol-error" "missing `symbols' array"))
+        (t
+         (dolist (n names)
+           (cond
+             ((not (stringp n)) (push n missing))
+             ((%trace-symbol n pkg-name :server server) (push n traced))
+             (t (push n missing))))
+         (%success-response
+          id
+          (%json-object
+           "traced" (%json-array (nreverse traced))
+           "missing" (%json-array (nreverse missing))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "untrace"
+  :summary "Remove cl:trace from symbols (or all if none given)."
+  :doc "Optional: `symbols' (array). With no symbols, untraces
+everything (cl:untrace with no arguments)."
+  :params (list (list :name "symbols" :type "array" :required nil
+                      :description "Symbol names; default: untrace all.")
+                (list :name "package" :type "string" :required nil
+                      :description "Resolve names in this package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((syms-array (%json-getf params "symbols"))
+           (names (array-items-of-param syms-array))
+           (pkg-name (%json-getf params "package")))
+      (cond
+        ((null names)
+         (eval '(untrace))
+         (%success-response id (%json-object "untraced_all" t)))
+        (t
+         (let ((untraced '()))
+           (dolist (n names)
+             (when (stringp n)
+               (when (%untrace-symbol n pkg-name :server server)
+                 (push n untraced))))
+           (%success-response
+            id
+            (%json-object "untraced" (%json-array (nreverse untraced)))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "list-traced"
+  :summary "Return the names of currently-traced functions."
+  :doc "No parameters."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server params ctx))
+    (let ((entries
+            (mapcar (lambda (sym) (%safe-prin1 sym))
+                    (handler-case (eval '(trace))
+                      (error () nil)))))
+      (%success-response id
+                         (%json-object "entries" (%json-array entries)))))))
+
+(%register-method
+ (make-method-spec
+  :name "time-eval"
+  :summary "Evaluate FORM and return real / cpu time plus bytes consed."
+  :doc "Required: `form'. Returns `{value, timing: {real_ms, run_ms,
+gc_real_ms, bytes_consed, ...}}'."
+  :params (list (list :name "form" :type "string" :required t
+                      :description "Form to evaluate.")
+                (list :name "package" :type "string" :required nil
+                      :description "Reader package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((form-text (%json-getf params "form"))
+           (pkg-name (%json-getf params "package"))
+           (pkg (or (and pkg-name (%find-package-loose pkg-name))
+                    (and server (server-current-package server))
+                    (find-package "COMMON-LISP-USER"))))
+      (cond
+        ((not (stringp form-text))
+         (%error-response id "protocol-error" "missing `form' param"))
+        (t
+         (handler-case
+             (let* ((parsed (let ((*package* pkg)) (%read-form form-text)))
+                    (start-real (get-internal-real-time))
+                    (start-run (get-internal-run-time))
+                    (start-cons #+sbcl (sb-ext:get-bytes-consed)
+                                #-sbcl 0)
+                    (start-gc-real
+                      #+sbcl sb-ext:*gc-real-time*
+                      #-sbcl 0)
+                    (values (let ((*package* pkg))
+                              (multiple-value-list (eval parsed))))
+                    (end-real (get-internal-real-time))
+                    (end-run (get-internal-run-time))
+                    (end-cons #+sbcl (sb-ext:get-bytes-consed)
+                              #-sbcl 0)
+                    (end-gc-real
+                      #+sbcl sb-ext:*gc-real-time*
+                      #-sbcl 0)
+                    (units internal-time-units-per-second))
+               (%success-response
+                id
+                (%json-object
+                 "value" (%safe-prin1 (first values))
+                 "values" (%json-array (mapcar #'%safe-prin1 values))
+                 "timing"
+                 (%json-object
+                  "real_ms" (round (* 1000 (- end-real start-real)) units)
+                  "run_ms" (round (* 1000 (- end-run start-run)) units)
+                  "gc_real_ms" (- end-gc-real start-gc-real)
+                  "bytes_consed" (- end-cons start-cons)))))
+           (error (c)
+             (%error-response id "eval-error" (princ-to-string c))))))))))
+
+#+sbcl
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (require :sb-sprof))
+
+#+sbcl
+(defun %sprof-entries (top)
+  "Pull the top-N entries from the SB-SPROF profile buffer as JSON."
+  (let ((entries '())
+        (out (make-string-output-stream)))
+    (handler-case
+        (let ((*standard-output* out))
+          (funcall (find-symbol "REPORT" :sb-sprof) :type :flat :max top))
+      (error () nil))
+    (push (%json-object "raw_report" (get-output-stream-string out))
+          entries)
+    entries))
+
+#-sbcl
+(defun %sprof-entries (top)
+  (declare (ignore top))
+  (list (%json-object "raw_report" "sprof is SBCL-only")))
+
+(%register-method
+ (make-method-spec
+  :name "profile-eval"
+  :summary "Profile a form with sb-sprof and return the flat report."
+  :doc "Required: `form'. Optional: `top' (default 20), `mode'
+(\"cpu\" default | \"alloc\"). Returns `{value, profile: {raw_report:
+string}}'."
+  :params (list (list :name "form" :type "string" :required t
+                      :description "Form to profile.")
+                (list :name "top" :type "integer" :required nil
+                      :description "Number of top entries (default 20).")
+                (list :name "mode" :type "string" :required nil
+                      :description "cpu (default) or alloc.")
+                (list :name "package" :type "string" :required nil
+                      :description "Reader package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((form-text (%json-getf params "form"))
+           (top (or (%json-getf params "top") 20))
+           (mode-str (or (%json-getf params "mode") "cpu"))
+           (mode (intern (string-upcase mode-str) :keyword))
+           (pkg-name (%json-getf params "package"))
+           (pkg (or (and pkg-name (%find-package-loose pkg-name))
+                    (and server (server-current-package server))
+                    (find-package "COMMON-LISP-USER"))))
+      (cond
+        ((not (stringp form-text))
+         (%error-response id "protocol-error" "missing `form' param"))
+        (t
+         (handler-case
+             (let* ((parsed (let ((*package* pkg)) (%read-form form-text)))
+                    (values
+                      #+sbcl
+                      (funcall
+                       (compile nil
+                                `(lambda ()
+                                   (,(find-symbol "WITH-PROFILING" :sb-sprof)
+                                    (:mode ,mode :report nil
+                                     :max-samples 10000)
+                                    (multiple-value-list
+                                     (let ((*package* ,pkg)) (eval ',parsed)))))))
+                      #-sbcl
+                      (multiple-value-list
+                       (let ((*package* pkg)) (eval parsed)))))
+               (%success-response
+                id
+                (%json-object
+                 "value" (%safe-prin1 (first values))
+                 "profile"
+                 (%json-object
+                  "entries" (%json-array (%sprof-entries top))))))
+           (error (c)
+             (%error-response id "eval-error" (princ-to-string c))))))))))
+
 (%register-method
  (make-method-spec
   :name "inspect"
