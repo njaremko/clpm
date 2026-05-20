@@ -3399,7 +3399,16 @@ slices [offset, offset+page-size)."
        #-sbcl
        (values nil "struct" 0))
       (t
-       (values nil (string-downcase (string (type-of value))) 0)))))))
+       ;; For atoms (numbers, characters, ...), `type-of' may return a
+       ;; compound type specifier like `(INTEGER 0 4611686018427387903)'.
+       ;; `string' chokes on that, so use the head symbol when it's a
+       ;; cons and only stringify when we actually have a symbol.
+       (let* ((ty (type-of value))
+              (head (if (consp ty) (car ty) ty))
+              (label (if (symbolp head)
+                         (string-downcase (symbol-name head))
+                         (princ-to-string head))))
+         (values nil label 0))))))))
 
 (defun %inspector-into (sess i)
   "Push the i-th part of the current focus onto the stack. Returns the

@@ -203,6 +203,30 @@
                  (assert-contains stdout "depth: 2"))
                (format t "  inspect --path OK~%")
 
+               (format t "Test: inspect handles atomic values~%")
+               ;; Used to fail because (type-of 42) returns the *list*
+               ;; (INTEGER 0 ...) and the inspector's fallthrough called
+               ;; STRING on that list, signalling a TYPE-ERROR.
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "inspect" "42"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "value: 42"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "inspect"
+                                       "(list 10 20 30)" "--path" "0"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "value: 10"))
+               (format t "  inspect atomic OK~%")
+
+               (format t "Test: macroexpand non-macro flags it~%")
+               (multiple-value-bind (rc stdout stderr)
+                   (run-cli-captured '("repl-bridge" "macroexpand"
+                                       "(+ 1 2)"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "(+ 1 2)")
+                 (assert-contains stderr "not a macro"))
+               (format t "  macroexpand non-macro OK~%")
+
                (format t "Test: debug returns rc=3 + frames~%")
                (multiple-value-bind (rc stdout stderr)
                    (run-cli-captured '("repl-bridge" "debug"

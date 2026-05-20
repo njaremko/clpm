@@ -2904,13 +2904,19 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
                                        (list (cons "form" form)
                                              (cons "recursive" (and (getf opts :full) t))
                                              (cons "package" (getf opts :package)))))
-        (format t "~A~%" (or (%bridge-field obj "form")
-                             (%bridge-field obj "expansion")
-                             ""))
-        (let ((ep (%bridge-field obj "expanded_p")))
-          (when (and (not (eq ep nil)) (not (eq ep t)))
-            ;; explicit boolean
-            (format *error-output* "expanded_p: ~A~%" ep)))))))
+        (let* ((expansion (or (%bridge-field obj "form")
+                              (%bridge-field obj "expansion")
+                              ""))
+               (ep (%bridge-field obj "expanded_p")))
+          (format t "~A~%" expansion)
+          (cond
+            ((eq ep t))                          ; expanded -- the form
+                                                 ; speaks for itself.
+            ((null ep)
+             (format *error-output* "(not a macro)~%"))
+            ((not (eq ep t))
+             ;; surface unexpected boolean shapes for debugging
+             (format *error-output* "expanded_p: ~A~%" ep))))))))
 
 (defun %bridge-cmd-compile-file (args)
   "`clpm repl-bridge compile-file PATH'."
