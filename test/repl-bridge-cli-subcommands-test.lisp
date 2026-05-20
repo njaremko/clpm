@@ -58,15 +58,29 @@
 
     (uiop:with-current-directory (proj)
       (let ((srv (sb-thread:make-thread
-                  (lambda () (run-cli-captured '("repl-bridge" "serve")))
+                  (lambda ()
+                    ;; serve runs the daemon loop; surface any startup
+                    ;; failure so the test thread doesn't silently wait
+                    ;; out the socket-poll timeout.
+                    (handler-case (run-cli-captured '("repl-bridge" "serve"))
+                      (error (c)
+                        (format *error-output* "serve thread died: ~A~%" c)
+                        (force-output *error-output*))))
                   :name "test-cli-sub-serve"))
             (sock (namestring (merge-pathnames ".clpm/repl-bridge.sock" proj))))
+        (declare (ignorable srv))
+        ;; Yield once so the daemon thread gets scheduled before we
+        ;; start polling. sbcl --script otherwise sometimes lets the
+        ;; polling loop hog the cpu long enough to time out before the
+        ;; serve thread reaches accept().
+        (sleep 0.05)
         (unwind-protect
              (progn
-               (loop for i from 0 below 50
+               (loop for i from 0 below 100
                      while (not (probe-file sock))
                      do (sleep 0.1))
-               (assert-true (probe-file sock) "daemon socket did not appear")
+               (assert-true (probe-file sock)
+                            "daemon socket did not appear: ~A" sock)
                (format t "  daemon up~%")
 
                (format t "Test: image-info~%")
@@ -434,6 +448,23 @@
                  (assert-eql 0 rc)
                  (assert-contains stdout "=> :WENT-ON"))
                (format t "  eval --handler (no args) OK~%")
+
+               (format t "Test: eval --handler exposes matched-but-no-restart~%")
+               ;; `(/ 1 0)` raises DIVISION-BY-ZERO but has no surrounding
+               ;; `restart-case', so USE-VALUE isn't bound. The handler
+               ;; should still record an attempt so the failure mode is
+               ;; visible -- without this the call looks indistinguishable
+               ;; from "no --handler matched".
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured
+                    '("repl-bridge" "eval" "(/ 1 0)"
+                      "--handler" "division-by-zero=use-value:42"))
+                 (assert-eql 1 rc)
+                 (assert-contains stdout "handlers tried")
+                 (assert-contains stdout "DIVISION-BY-ZERO")
+                 (assert-contains stdout "USE-VALUE")
+                 (assert-contains stdout "no such restart"))
+               (format t "  eval --handler matched-no-restart OK~%")
 
                (format t "Test: diff --worker scopes per worker~%")
                ;; Define different things in two distinct named workers.

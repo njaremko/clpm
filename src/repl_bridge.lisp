@@ -667,7 +667,11 @@ recent call (closest to the error)."
   truncated?
   redefined
   history                ; alist (("*" . val-string) ("**" . ...) ("/" . arr) ...)
-  )
+  ;; Records of declarative --handler specs that matched the condition's
+  ;; type but whose restart wasn't available. Without this, "no handler
+  ;; matched" and "handler matched but its restart isn't bound here" are
+  ;; observationally identical, which makes --handler impossible to debug.
+  handler-attempts)
 
 (defun %list-restarts ()
   "Bare list of restart names (string form). Kept for v1 compatibility."
@@ -1058,17 +1062,47 @@ time so the handler doesn't have to do work when a condition arrives."
                                        :restart parsed-restart
                                        :args parsed-args)))))
 
-(defun %try-declarative-handler (condition specs)
+(defun %try-declarative-handler (condition specs attempts-cell)
   "Walk SPECS; for the first one whose type matches CONDITION, invoke
 its restart with its args. Returns T if a handler was invoked (which
-transfers control and doesn't actually return), else NIL."
+transfers control and doesn't actually return), else NIL.
+
+ATTEMPTS-CELL is a one-element list whose CAR accumulates a record for
+each spec that matched by type but couldn't fire because its restart
+wasn't bound for this condition. Without this observation, a misspelled
+restart name and a non-matching type are indistinguishable from the
+caller's seat."
   (dolist (spec specs nil)
     (when (typep condition (handler-spec-type spec))
       (let ((r (find-restart (handler-spec-restart spec) condition)))
-        (when r
-          (apply #'invoke-restart r (handler-spec-args spec))
-          ;; invoke-restart unwinds; we never reach here.
-          (return t))))))
+        (cond
+          (r
+           (apply #'invoke-restart r (handler-spec-args spec))
+           ;; invoke-restart unwinds; we never reach here.
+           (return t))
+          (t
+           (push (%handler-attempt-json spec condition)
+                 (car attempts-cell))))))))
+
+(defun %handler-attempt-json (spec condition)
+  "Build the JSON record for a `--handler' spec that matched CONDITION
+by type but whose restart wasn't available. Lists the alternatives the
+user *could* have invoked so the next attempt is informed."
+  (let* ((type-name (handler-case (string (handler-spec-type spec))
+                      (error () "?")))
+         (restart-name (handler-case (string (handler-spec-restart spec))
+                         (error () "?")))
+         (available (handler-case
+                        (mapcar (lambda (r)
+                                  (let ((rn (restart-name r)))
+                                    (if rn (string rn) "")))
+                                (compute-restarts condition))
+                      (error () nil))))
+    (list :object
+          (list (cons "type" type-name)
+                (cons "restart" restart-name)
+                (cons "outcome" "matched-no-restart")
+                (cons "available_restarts" (%json-array available))))))
 
 (defun %capture-error-snapshot (condition)
   "Snapshot CONDITION as JSON while the stack is still in place. If
@@ -1332,6 +1366,7 @@ sessions."
          (conditions '())
          (signaled '())
          (redefined nil)
+         (handler-attempts-cell (list nil))
          ;; Live snapshot of the failing condition's restarts + backtrace,
          ;; captured by the handler-bind below *before* the stack unwinds
          ;; into the handler-case error handler. Without this, %condition-json
@@ -1387,7 +1422,8 @@ sessions."
                   :signaled-conditions (nreverse signaled)
                   :truncated? (bounded-sink-truncated? sink)
                   :redefined redefined
-                  :history history-snap))))
+                  :history history-snap
+                  :handler-attempts (nreverse (car handler-attempts-cell))))))
       (handler-case
           (setf form (%read-form form-text))
         (error (c)
@@ -1431,8 +1467,12 @@ sessions."
                          ;; --handlers: non-interactive recovery. The
                          ;; first matching spec invokes its restart and
                          ;; transfers control; non-matching specs fall
-                         ;; through.
-                         ((%try-declarative-handler c handler-specs))
+                         ;; through. A spec that matches by type but
+                         ;; has no such restart available records an
+                         ;; attempt in handler-attempts-cell so the
+                         ;; caller can see *why* recovery didn't fire.
+                         ((%try-declarative-handler
+                           c handler-specs handler-attempts-cell))
                          ((typep c 'error)
                           (unless error-snapshot
                             (setf error-snapshot
@@ -1908,6 +1948,13 @@ ERROR that unwound the form), `signaled_conditions' (non-errors, when
 `record_signals' is set), `history' (a snapshot of the REPL bindings
 *, **, ***, +, ++, +++, /, //, ///), and -- when a top-level form
 redefines something tracked -- `redefined'.
+
+When `--handler' specs were supplied and one matched the condition's
+type but its named restart wasn't available, `handler_attempts' lists
+each failed match: `{type, restart, outcome: \"matched-no-restart\",
+available_restarts}'. This makes a misspelled restart name (and a form
+lacking the expected `restart-case') distinguishable from a plain
+no-handler-matched outcome.
 
 After an unexpected worker death, the next eval's response carries
 `warning: \"worker-restarted\"' so the client knows in-image state was
@@ -4234,6 +4281,9 @@ as a prin1 string, or NIL for `(values)')."
            (when (eval-result-signaled-conditions result)
              (list (cons "signaled_conditions"
                          (%json-array (eval-result-signaled-conditions result)))))
+           (when (eval-result-handler-attempts result)
+             (list (cons "handler_attempts"
+                         (%json-array (eval-result-handler-attempts result)))))
            (when (eval-result-history result)
              (list (cons "history" (%history-payload (eval-result-history result)))))
            (when (eval-result-redefined result)
@@ -4347,7 +4397,11 @@ as a prin1 string, or NIL for `(values)')."
                              (when (eval-result-signaled-conditions result)
                                (list (cons "signaled_conditions"
                                            (%json-array
-                                            (eval-result-signaled-conditions result)))))))))
+                                            (eval-result-signaled-conditions result)))))
+                             (when (eval-result-handler-attempts result)
+                               (list (cons "handler_attempts"
+                                           (%json-array
+                                            (eval-result-handler-attempts result)))))))))
                 (%error-response id (eval-result-code result)
                                  (or (let ((c0 (first (eval-result-conditions result))))
                                        (when c0

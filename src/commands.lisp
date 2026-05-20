@@ -1928,7 +1928,8 @@ backtrace. Long internal `vars' dumps are dropped."
          (details (%bridge-unwrap (%bridge-field err-obj "details")))
          (output (%bridge-field details "output"))
          (eo (%bridge-field details "error_output"))
-         (conds (%bridge-array-items (%bridge-field details "conditions"))))
+         (conds (%bridge-array-items (%bridge-field details "conditions")))
+         (attempts (%bridge-array-items (%bridge-field details "handler_attempts"))))
     (format stream "error: [~A] ~A~%" (or code "?") (or msg ""))
     (when (and output (stringp output) (plusp (length output)))
       (format stream "stdout:~%~A~%" output))
@@ -1948,7 +1949,29 @@ backtrace. Long internal `vars' dumps are dropped."
           (format stream "  -> rerun with: clpm repl-bridge debug FORM --restart NAME [--arg V]~%"))
         (let ((user (%bridge-user-frames (list :array frames))))
           (when user
-            (%bridge-print-frames stream user)))))))
+            (%bridge-print-frames stream user)))))
+    (%bridge-render-handler-attempts stream attempts)))
+
+(defun %bridge-render-handler-attempts (stream attempts)
+  "Surface --handler specs that matched by type but couldn't fire.
+Without this, the eval looks indistinguishable from `no --handler given',
+which makes the flag impossible to debug from the CLI."
+  (when attempts
+    (format stream "handlers tried (~D):~%" (length attempts))
+    (dolist (a attempts)
+      (let* ((ao (cadr a))
+             (type (%bridge-field ao "type"))
+             (restart (%bridge-field ao "restart"))
+             (avail (%bridge-array-items (%bridge-field ao "available_restarts"))))
+        (format stream "  ~A => ~A: no such restart~@[ (available: ~{~A~^, ~})~]~%"
+                (or type "?") (or restart "?")
+                (when avail (mapcar (lambda (x) (if (stringp x) x "?"))
+                                    avail)))))
+    (format stream "  -> wrap the form in `(restart-case FORM (~A (...) ...))' or pick a restart that is established.~%"
+            (or (let* ((a0 (cadr (first attempts)))
+                       (r (and a0 (%bridge-field a0 "restart"))))
+                  (and (stringp r) (string-upcase r)))
+                "USE-VALUE"))))
 
 (defun %bridge-pretty-print (response stream)
   "Render RESPONSE (a parsed JSON object) as a human summary.

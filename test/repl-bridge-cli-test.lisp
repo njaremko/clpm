@@ -63,11 +63,22 @@
       (format t "Test: serve (no --detach) blocks; we run it in a thread~%")
       (let ((srv (sb-thread:make-thread
                   (lambda ()
-                    (run-cli-captured '("repl-bridge" "serve")))
+                    ;; Surface daemon-startup failures instead of letting
+                    ;; them disappear behind a captured *error-output*.
+                    (handler-case
+                        (run-cli-captured '("repl-bridge" "serve"))
+                      (error (c)
+                        (format *error-output* "serve thread died: ~A~%" c)
+                        (force-output *error-output*))))
                   :name "test-serve")))
+        (declare (ignorable srv))
+        ;; Yield once so the serve thread reaches accept() before we
+        ;; start polling. Without this, sbcl --script can hand the
+        ;; polling loop most of the cpu and time us out.
+        (sleep 0.05)
         ;; Wait for the socket to appear.
         (let ((sock (namestring (merge-pathnames ".clpm/repl-bridge.sock" proj))))
-          (loop for i from 0 below 50
+          (loop for i from 0 below 100
                 while (not (probe-file sock))
                 do (sleep 0.1))
           (assert-true (probe-file sock) "daemon socket did not appear: ~A" sock)
