@@ -2173,12 +2173,15 @@ prints the long-form doc plus its parameters."
              ((eq resp :no-daemon) (log-error "No daemon running") 2)
              ((eq resp :io-error) (log-error "I/O error talking to daemon") 2)
              ((assoc "error" (cadr resp) :test #'string=)
+              (when *bridge-cli-json* (%bridge-emit-json resp))
               (let ((err (cdr (assoc "error" (cadr resp) :test #'string=))))
-                (format *error-output* "~A~%"
-                        (or (cdr (assoc "message" (cadr err)
-                                         :test #'string=))
-                            "unknown method"))
-                1))
+                (unless *bridge-cli-json*
+                  (format *error-output* "~A~%"
+                          (or (cdr (assoc "message" (cadr err)
+                                           :test #'string=))
+                              "unknown method"))))
+              1)
+             (*bridge-cli-json* (%bridge-emit-json resp) 0)
              (t
               (let* ((result (cdr (assoc "result" (cadr resp) :test #'string=)))
                      (outer (and result (cadr result)))
@@ -2208,6 +2211,7 @@ prints the long-form doc plus its parameters."
            (cond
              ((eq resp :no-daemon) (log-error "No daemon running") 2)
              ((eq resp :io-error) (log-error "I/O error talking to daemon") 2)
+             (*bridge-cli-json* (%bridge-emit-json resp) 0)
              (t
               (let* ((result (cdr (assoc "result" (cadr resp) :test #'string=)))
                      (obj (and result (cadr result)))
@@ -2231,40 +2235,73 @@ prints the long-form doc plus its parameters."
   (multiple-value-bind (project-root sock pid log)
       (%bridge-resolve-project)
     (unless project-root (return-from %bridge-status 1))
-    (let ((existing (%bridge-read-pidfile pid)))
-      (cond
-        ((null existing)
-         (format t "not running~%")
-         0)
-        ((not (%bridge-pid-alive-p existing))
-         (ignore-errors (delete-file pid))
-         (ignore-errors (delete-file sock))
-         (format t "stale pidfile (cleaned)~%")
-         0)
-        (t
-         (let ((ping (clpm.repl-bridge:send-request sock "ping"
-                                                   :connect-timeout 1)))
-           (cond
-             ((consp ping)
-              (let* ((result (cdr (assoc "result" (cadr ping)
-                                         :test #'string=)))
-                     (obj (and result (cadr result)))
-                     (uptime (and obj (cdr (assoc "uptime_ms" obj
-                                                    :test #'string=))))
-                     (lisp (and obj (cdr (assoc "lisp" obj :test #'string=))))
-                     (evals (and obj (cdr (assoc "eval_count" obj
-                                                  :test #'string=)))))
-                (format t "running (pid ~D)~%" existing)
-                (format t "  socket: ~A~%" sock)
-                (format t "  log:    ~A~%" log)
-                (when uptime (format t "  uptime: ~,1Fs~%" (/ uptime 1000.0)))
-                (when lisp (format t "  lisp:   ~A~%" lisp))
-                (when evals (format t "  evals:  ~D~%" evals)))
-              0)
-             (t
-              (format t "running but unresponsive (pid ~D)~%" existing)
-              (format t "  try: clpm repl-bridge stop~%")
-              0))))))))
+    (flet ((emit-json (state &rest extras)
+             (%bridge-emit-json
+              (%json-object*
+               (list* "state" state
+                      "socket" (namestring sock)
+                      "log" (namestring log)
+                      extras)))))
+      (let ((existing (%bridge-read-pidfile pid)))
+        (cond
+          ((null existing)
+           (if *bridge-cli-json*
+               (emit-json "not-running")
+               (format t "not running~%"))
+           0)
+          ((not (%bridge-pid-alive-p existing))
+           (ignore-errors (delete-file pid))
+           (ignore-errors (delete-file sock))
+           (if *bridge-cli-json*
+               (emit-json "stale")
+               (format t "stale pidfile (cleaned)~%"))
+           0)
+          (t
+           (let ((ping (clpm.repl-bridge:send-request sock "ping"
+                                                     :connect-timeout 1)))
+             (cond
+               ((consp ping)
+                (let* ((result (cdr (assoc "result" (cadr ping)
+                                           :test #'string=)))
+                       (obj (and result (cadr result)))
+                       (uptime (and obj (cdr (assoc "uptime_ms" obj
+                                                      :test #'string=))))
+                       (lisp (and obj (cdr (assoc "lisp" obj :test #'string=))))
+                       (evals (and obj (cdr (assoc "eval_count" obj
+                                                    :test #'string=)))))
+                  (cond
+                    (*bridge-cli-json*
+                     (emit-json "running"
+                                "pid" existing
+                                "uptime_ms" uptime
+                                "lisp" lisp
+                                "eval_count" evals))
+                    (t
+                     (format t "running (pid ~D)~%" existing)
+                     (format t "  socket: ~A~%" sock)
+                     (format t "  log:    ~A~%" log)
+                     (when uptime (format t "  uptime: ~,1Fs~%" (/ uptime 1000.0)))
+                     (when lisp (format t "  lisp:   ~A~%" lisp))
+                     (when evals (format t "  evals:  ~D~%" evals)))))
+                0)
+               (t
+                (cond
+                  (*bridge-cli-json*
+                   (emit-json "unresponsive" "pid" existing))
+                  (t
+                   (format t "running but unresponsive (pid ~D)~%" existing)
+                   (format t "  try: clpm repl-bridge stop~%")))
+                0)))))))))
+
+(defun %json-object* (kv-list)
+  "Build a JSON object from a flat property-list KV-LIST. Nil values
+are dropped, matching `%bridge-make-params'."
+  (let ((cells '()))
+    (loop while kv-list do
+      (let ((k (pop kv-list))
+            (v (pop kv-list)))
+        (when v (push (cons k v) cells))))
+    (list :object (nreverse cells))))
 
 (defun %bridge-stop (args)
   (declare (ignore args))
