@@ -271,6 +271,38 @@
                  (assert-contains stdout "=> 42"))
                (format t "  debug --restart with arg OK~%")
 
+               (format t "Test: debug --keep then fresh frame eval and abort~%")
+               (multiple-value-bind (rc stdout stderr)
+                   (run-cli-captured
+                    '("repl-bridge" "debug"
+                      "(progn
+                         (declaim (optimize (debug 3) (safety 3) (speed 0)))
+                         (defun rb-cli-debug-keep-target (x)
+                           (error \"x=~A\" x))
+                         (rb-cli-debug-keep-target 7))"
+                      "--keep"))
+                 (declare (ignore stdout))
+                 (assert-eql 3 rc)
+                 (assert-contains stderr "session:")
+                 (assert-contains stderr "RB-CLI-DEBUG-KEEP-TARGET"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge"
+                                       "list-debug-sessions"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "debug session"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge"
+                                       "debug-eval-in-frame"
+                                       "4"
+                                       "(* x 2)"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "frame 4 => 14"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "debug-abort"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "aborted"))
+               (format t "  debug --keep flow OK~%")
+
                (format t "Test: --json on a leaf command~%")
                (multiple-value-bind (rc stdout)
                    (run-cli-captured '("repl-bridge" "current-package" "--json"))

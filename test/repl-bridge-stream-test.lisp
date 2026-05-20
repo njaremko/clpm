@@ -98,6 +98,46 @@
 (format t "  streaming OK~%")
 
 ;;; ----------------------------------------------------------------------------
+;;; Streaming and terminal capture are observations of the same bounded prefix.
+
+(format t "Test: --stream events obey the output cap~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((limit clpm.repl-bridge::+max-output-bytes+)
+           (chunks '())
+           (resp (clpm.repl-bridge:send-request
+                  sock "eval"
+                  :params (list :object
+                                (list
+                                 (cons "form"
+                                       (format nil
+                                               "(progn
+                                                  (write-string
+                                                   (make-string ~D
+                                                                :initial-element #\\x))
+                                                  :done)"
+                                               (+ limit 128)))
+                                 (cons "stream" t)))
+                  :on-event
+                  (lambda (frame)
+                    (when (string= "stdout" (lookup frame "event"))
+                      (push (lookup frame "data") chunks))
+                    nil)))
+           (result (lookup resp "result"))
+           (streamed (apply #'concatenate 'string (nreverse chunks)))
+           (output (lookup result "output")))
+      (assert-true result "no terminal result frame: ~S" resp)
+      (assert-true (<= (length streamed) limit)
+                   "streamed ~D bytes, limit is ~D"
+                   (length streamed) limit)
+      (assert-true (string= streamed output)
+                   "streamed output and terminal output diverged: ~D vs ~D"
+                   (length streamed) (length output))
+      (assert-true (lookup result "truncated")
+                   "expected truncated flag in ~S" result))))
+(format t "  streaming output cap OK~%")
+
+;;; ----------------------------------------------------------------------------
 ;;; Without --stream, no events are emitted (v1 contract preserved).
 
 (format t "Test: without --stream, exactly one terminal frame arrives~%")

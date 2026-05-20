@@ -110,36 +110,126 @@ streams (stdout + stderr combined). Once the combined cap is reached, further
 writes are silently dropped and `truncated?' flips to T."
   (limit +max-output-bytes+ :type fixnum)
   (used 0 :type fixnum)
-  (truncated? nil :type boolean))
+  (truncated? nil :type boolean)
+  (mutex (clpm.repl-bridge.compat:make-mutex
+          :name "clpm.repl-bridge.bounded-sink")))
+
+(defun %bounded-sink-accept-string (sink string start end)
+  "Return the prefix of STRING[start,end) still admitted by SINK.
+Charges the accepted characters immediately so capture is bounded while
+the user code writes, not after evaluation unwinds."
+  (let* ((end (or end (length string)))
+         (len (- end start)))
+    (cond
+      ((<= len 0) "")
+      (t
+       (clpm.repl-bridge.compat:with-mutex ((bounded-sink-mutex sink))
+         (let ((remaining (- (bounded-sink-limit sink)
+                             (bounded-sink-used sink))))
+           (cond
+             ((<= remaining 0)
+              (setf (bounded-sink-truncated? sink) t)
+              "")
+             ((<= len remaining)
+              (incf (bounded-sink-used sink) len)
+              (subseq string start end))
+             (t
+              (setf (bounded-sink-used sink) (bounded-sink-limit sink)
+                    (bounded-sink-truncated? sink) t)
+              (subseq string start (+ start remaining))))))))))
+
+#+sbcl
+(defclass bounded-output-stream (sb-gray:fundamental-character-output-stream)
+  ((sink :initarg :sink :reader bounded-output-stream-sink)
+   (full :initform (make-string-output-stream)
+         :reader bounded-output-stream-full)
+   (mutex :initform (clpm.repl-bridge.compat:make-mutex
+                     :name "clpm.repl-bridge.bounded-output")
+          :reader bounded-output-stream-mutex)))
+
+#+sbcl
+(defmethod sb-gray:stream-write-char ((s bounded-output-stream) ch)
+  (let ((accepted (%bounded-sink-accept-string
+                   (bounded-output-stream-sink s)
+                   (string ch)
+                   0
+                   1)))
+    (when (plusp (length accepted))
+      (clpm.repl-bridge.compat:with-mutex
+          ((bounded-output-stream-mutex s))
+        (write-string accepted (bounded-output-stream-full s)))))
+  ch)
+
+#+sbcl
+(defmethod sb-gray:stream-write-string ((s bounded-output-stream) string
+                                         &optional (start 0) end)
+  (let ((accepted (%bounded-sink-accept-string
+                   (bounded-output-stream-sink s)
+                   string
+                   start
+                   (or end (length string)))))
+    (when (plusp (length accepted))
+      (clpm.repl-bridge.compat:with-mutex
+          ((bounded-output-stream-mutex s))
+        (write-string accepted (bounded-output-stream-full s)))))
+  string)
+
+#+sbcl
+(defmethod sb-gray:stream-line-column ((s bounded-output-stream))
+  (declare (ignore s))
+  nil)
+
+#+sbcl
+(defmethod sb-gray:stream-finish-output ((s bounded-output-stream))
+  (declare (ignore s))
+  nil)
+
+#+sbcl
+(defmethod sb-gray:stream-force-output ((s bounded-output-stream))
+  (declare (ignore s))
+  nil)
+
+#+sbcl
+(defun bounded-output-stream-final-text (s)
+  (clpm.repl-bridge.compat:with-mutex
+      ((bounded-output-stream-mutex s))
+    (get-output-stream-string (bounded-output-stream-full s))))
 
 (defun %make-capture-stream (sink)
   "Return a gray stream proxy that writes into SINK until its cap is hit."
-  ;; We avoid pulling in gray streams by using a string-output-stream wrapped
-  ;; in a custom :around method. Simpler: hand out a string stream and check
-  ;; lengths after eval. The check below is best-effort and lets one
-  ;; format-call go over by up to one form's worth, which is fine.
-  (declare (ignore sink))
-  (make-string-output-stream))
+  #+sbcl
+  (make-instance 'bounded-output-stream :sink sink)
+  #-sbcl
+  (progn
+    (declare (ignore sink))
+    (make-string-output-stream)))
 
-(defun %capture-text (stream sink)
-  "Read STREAM's accumulated string, charge it to SINK, and return the
-possibly-truncated text."
-  (let ((text (cond
-                ((typep stream 'streaming-output-stream)
-                 (streaming-output-stream-final-text stream))
-                (t (get-output-stream-string stream)))))
-    (cond
-      ((bounded-sink-truncated? sink) "")
-      ((>= (+ (bounded-sink-used sink) (length text))
-           (bounded-sink-limit sink))
-       (setf (bounded-sink-truncated? sink) t)
-       (let ((remaining (max 0 (- (bounded-sink-limit sink)
-                                  (bounded-sink-used sink)))))
-         (setf (bounded-sink-used sink) (bounded-sink-limit sink))
-         (subseq text 0 (min (length text) remaining))))
-      (t
-       (incf (bounded-sink-used sink) (length text))
-       text))))
+	(defun %capture-text (stream sink)
+	  "Read STREAM's accumulated string, charge it to SINK, and return the
+	possibly-truncated text."
+	  (cond
+	    #+sbcl
+	    ((typep stream 'bounded-output-stream)
+	     (bounded-output-stream-final-text stream))
+	    #+sbcl
+	    ((typep stream 'streaming-output-stream)
+	     (streaming-output-stream-final-text stream))
+	    (t
+     ;; Portable fallback: implementations without Gray streams still get
+     ;; bounded terminal output, though not bounded during the write itself.
+     (let ((text (get-output-stream-string stream)))
+       (cond
+         ((bounded-sink-truncated? sink) "")
+         ((> (+ (bounded-sink-used sink) (length text))
+             (bounded-sink-limit sink))
+          (setf (bounded-sink-truncated? sink) t)
+          (let ((remaining (max 0 (- (bounded-sink-limit sink)
+                                     (bounded-sink-used sink)))))
+            (setf (bounded-sink-used sink) (bounded-sink-limit sink))
+            (subseq text 0 (min (length text) remaining))))
+         (t
+          (incf (bounded-sink-used sink) (length text))
+          text))))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Streaming output: a Gray stream that mirrors writes into an
@@ -152,6 +242,7 @@ possibly-truncated text."
 (defclass streaming-output-stream (sb-gray:fundamental-character-output-stream)
   ((ctx :initarg :ctx :reader streaming-output-stream-ctx)
    (channel :initarg :channel :reader streaming-output-stream-channel)
+   (sink :initarg :sink :reader streaming-output-stream-sink)
    (buffer :initform (make-array 0 :element-type 'character
                                    :fill-pointer 0 :adjustable t)
            :reader streaming-output-stream-buffer)
@@ -166,6 +257,7 @@ possibly-truncated text."
 #+sbcl
 (defparameter +stream-flush-min-bytes+ 4096)
 
+#+sbcl
 (defun %streaming-flush (s)
   "Drain S's buffer and emit a single `event' frame with that chunk.
 Called holding the stream's mutex."
@@ -179,31 +271,43 @@ Called holding the stream's mutex."
 
 #+sbcl
 (defmethod sb-gray:stream-write-char ((s streaming-output-stream) ch)
-  (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
-    (vector-push-extend ch (streaming-output-stream-buffer s))
-    (write-char ch (streaming-output-stream-full s))
-    (when (>= (length (streaming-output-stream-buffer s))
-              (streaming-output-stream-flush-bytes s))
-      (%streaming-flush s))
-    (when (char= ch #\Newline)
-      (%streaming-flush s)))
+  (let ((accepted (%bounded-sink-accept-string
+                   (streaming-output-stream-sink s)
+                   (string ch)
+                   0
+                   1)))
+    (when (plusp (length accepted))
+      (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+        (let ((accepted-char (schar accepted 0)))
+          (vector-push-extend accepted-char (streaming-output-stream-buffer s))
+          (write-char accepted-char (streaming-output-stream-full s))
+          (when (>= (length (streaming-output-stream-buffer s))
+                    (streaming-output-stream-flush-bytes s))
+            (%streaming-flush s))
+          (when (char= accepted-char #\Newline)
+            (%streaming-flush s))))))
   ch)
 
 #+sbcl
 (defmethod sb-gray:stream-write-string ((s streaming-output-stream) string
                                          &optional (start 0) end)
-  (let ((end (or end (length string))))
-    (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
-      (loop for i from start below end
-            do (vector-push-extend (schar string i)
-                                   (streaming-output-stream-buffer s)))
-      (write-string string (streaming-output-stream-full s) :start start :end end)
-      (when (>= (length (streaming-output-stream-buffer s))
-                (streaming-output-stream-flush-bytes s))
-        (%streaming-flush s))
-      ;; Flush after any newline lands.
-      (when (find #\Newline string :start start :end end)
-        (%streaming-flush s))))
+  (let ((accepted (%bounded-sink-accept-string
+                   (streaming-output-stream-sink s)
+                   string
+                   start
+                   (or end (length string)))))
+    (when (plusp (length accepted))
+      (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+        (loop for i from 0 below (length accepted)
+              do (vector-push-extend (schar accepted i)
+                                     (streaming-output-stream-buffer s)))
+        (write-string accepted (streaming-output-stream-full s))
+        (when (>= (length (streaming-output-stream-buffer s))
+                  (streaming-output-stream-flush-bytes s))
+          (%streaming-flush s))
+        ;; Flush after any newline lands.
+        (when (find #\Newline accepted)
+          (%streaming-flush s)))))
   string)
 
 #+sbcl
@@ -221,6 +325,7 @@ Called holding the stream's mutex."
   (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
     (%streaming-flush s)))
 
+#+sbcl
 (defun streaming-output-stream-final-text (s)
   "Drain S's residual buffer and return the full captured text. Idempotent
 once called; subsequent reads return the empty string."
@@ -472,6 +577,12 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
                              :name "clpm.repl-bridge.watches")
                   :reader server-watches-mutex)
    (watch-counter :initform 0 :accessor server-watch-counter)
+   (debug-sessions :initform (make-hash-table :test 'eql)
+                   :reader server-debug-sessions)
+   (debug-sessions-mutex :initform (clpm.repl-bridge.compat:make-mutex
+                                    :name "clpm.repl-bridge.debug-sessions")
+                         :reader server-debug-sessions-mutex)
+   (debug-session-counter :initform 0 :accessor server-debug-session-counter)
    (shutdown-requested? :initform nil :accessor server-shutdown-requested?)
    (event-log :initform nil :accessor server-event-log)))
 
@@ -642,6 +753,10 @@ lands in the right bucket.")
 inside the handler-bind so invoke-restart still has a valid target.
 FRAMES is a snapshot of the call stack at entry; index 0 is the most
 recent call (closest to the error)."
+  ;; Server-owned identity. NIL until the session is registered.
+  id
+  worker-name
+  (entered-at (get-universal-time) :type integer)
   condition
   restarts
   ;; A vector of frame objects -- sb-di:frame on SBCL, or NIL on impls
@@ -652,6 +767,54 @@ recent call (closest to the error)."
   json-condition
   ;; The eval-job this session belongs to; the action mailbox lives there.
   job)
+
+(defun %register-debug-session (server session)
+  "Give SESSION a server-owned id and make it addressable by later RPCs."
+  (clpm.repl-bridge.compat:with-mutex ((server-debug-sessions-mutex server))
+    (let ((id (incf (server-debug-session-counter server))))
+      (setf (debug-session-id session) id
+            (gethash id (server-debug-sessions server)) session)
+      id)))
+
+(defun %unregister-debug-session (server session)
+  "Remove SESSION from the server-owned debug-session table."
+  (let ((id (and session (debug-session-id session))))
+    (when id
+      (clpm.repl-bridge.compat:with-mutex
+          ((server-debug-sessions-mutex server))
+        (remhash id (server-debug-sessions server))))))
+
+(defun %find-debug-session (server id)
+  "Return the active debug session named by integer ID, or NIL."
+  (when (integerp id)
+    (clpm.repl-bridge.compat:with-mutex
+        ((server-debug-sessions-mutex server))
+      (gethash id (server-debug-sessions server)))))
+
+(defun %all-debug-sessions (server)
+  "Snapshot every active server-owned debug session."
+  (clpm.repl-bridge.compat:with-mutex
+      ((server-debug-sessions-mutex server))
+    (loop for session being the hash-values of (server-debug-sessions server)
+          collect session)))
+
+(defun %abort-debug-session (server session reason)
+  "Ask SESSION to unwind if it is still parked in the debugger loop."
+  (let* ((job (and session (debug-session-job session)))
+         (mailbox (and job (eval-job-debug-mailbox job))))
+    (when mailbox
+      (%log-event (server-event-log server) "debug-session-abort"
+                  "session" (debug-session-id session)
+                  "worker" (debug-session-worker-name session)
+                  "reason" reason)
+      (clpm.repl-bridge.compat:send-message mailbox (list :abort nil)))))
+
+(defun %debug-session-json (session)
+  (%json-object
+   "session" (debug-session-id session)
+   "worker" (debug-session-worker-name session)
+   "entered_at_unix" (debug-session-entered-at session)
+   "condition" (debug-session-json-condition session)))
 
 (defstruct eval-result
   code                  ; nil on success; "eval-error" / "reader-error" / "interrupted"
@@ -1214,11 +1377,40 @@ implementation-supported debug environment instead of a guessed LET wrapper."
   (declare (ignore session frame-index form-text))
   (list (cons "error_output" "eval-in-frame is SBCL-only")))
 
+(defun %send-debug-action-result (mailbox payload)
+  (when mailbox
+    (clpm.repl-bridge.compat:send-message mailbox (list :result payload))))
+
+(defun %send-debug-action-error (mailbox code message)
+  (when mailbox
+    (clpm.repl-bridge.compat:send-message mailbox
+                                          (list :error code message))))
+
+(defun %debug-action-result (session outcome)
+  (%json-object "session" (debug-session-id session)
+                "worker" (debug-session-worker-name session)
+                "outcome" outcome))
+
+(defun %eval-debug-restart-args (args-forms package)
+  "Read and evaluate restart argument forms without consuming the debug stop.
+Returns (values ARGS NIL) on success, or (values NIL MESSAGE) on failure."
+  (handler-case
+      (let ((*package* (or package *package*)))
+        (values
+         (loop for form-text in args-forms
+               collect (eval (%read-debug-form form-text *package*)))
+         nil))
+    (error (c)
+      (values nil (format nil "arg eval failed: ~A" c)))))
+
 (defun %enter-debugger (condition job)
   "Build a debug session for CONDITION + the current restart chain and
 loop processing debug-* actions until one of them either invokes a
 restart (unwinds) or returns NIL (we let the error propagate)."
   (let* ((ctx (eval-job-ctx job))
+         (worker-name (or (and *current-worker*
+                               (worker-name *current-worker*))
+                          +default-worker-name+))
          (frames (%capture-frames))
          (restarts (compute-restarts condition))
          (json-condition (handler-case
@@ -1227,63 +1419,104 @@ restart (unwinds) or returns NIL (we let the error propagate)."
                                              :frames frames)
                            (error () (%capture-error-snapshot condition))))
          (session (make-debug-session
+                   :worker-name worker-name
                    :condition condition
                    :restarts restarts
                    :frames frames
                    :json-condition json-condition
                    :job job)))
+    (when *server*
+      (%register-debug-session *server* session))
     (setf (eval-job-debug-session job) session)
-    (when ctx
-      (%emit-event ctx "debugger-entered"
-                   "condition" json-condition))
-    (loop
-      (let ((action (clpm.repl-bridge.compat:receive-message
-                     (eval-job-debug-mailbox job))))
-        (case (first action)
-          (:invoke-restart
-           (destructuring-bind (name args-forms) (rest action)
-             (let ((restart (%restart-by-name session name)))
-               (cond
-                 ((null restart)
-                  (when ctx
-                    (%emit-event ctx "debug-error"
-                                 "message"
-                                 (format nil "no restart named ~A" name))))
-                 (t
-                  (let ((args (handler-case
-                                  (loop for f in args-forms
-                                        collect (eval (%read-debug-form
-                                                       f
-                                                       (and *server*
-                                                            (server-current-package *server*)))))
-                                (error (c)
-                                  (when ctx
-                                    (%emit-event ctx "debug-error"
-                                                 "message"
-                                                 (format nil "arg eval failed: ~A" c)))
-                                  (return-from %enter-debugger nil)))))
-                    (apply #'invoke-restart restart args)
-                    ;; invoke-restart unwinds; we never get here.
-                    (return-from %enter-debugger nil)))))))
-          (:eval-in-frame
-           (destructuring-bind (index form) (rest action)
-             (let ((result (%eval-in-frame session index form)))
-               (when ctx
-                 (apply #'%emit-event ctx "frame-eval-result"
-                        (loop for (k . v) in result
-                              append (list k v)))))))
-          (:abort
-           ;; Let the original condition unwind through the outer
-           ;; handler-case so finish(:err-condition) takes over.
-           (return-from %enter-debugger nil))
-          (:continue
-           (let ((r (find-restart 'continue condition)))
-             (when r (invoke-restart r))
-             ;; If there's no CONTINUE restart, fall through and keep
-             ;; waiting for further actions.
-             (when ctx
-               (%emit-event ctx "debug-error"
-                            "message" "no CONTINUE restart available")))))))))
+    (unwind-protect
+         (progn
+           (when ctx
+             (%emit-event ctx "debugger-entered"
+                          "session" (debug-session-id session)
+                          "worker" worker-name
+                          "condition" json-condition))
+           (loop
+             (let ((action (clpm.repl-bridge.compat:receive-message
+                            (eval-job-debug-mailbox job))))
+               (case (first action)
+                 (:invoke-restart
+                  (destructuring-bind (name args-forms &optional reply-box)
+                      (rest action)
+                    (let ((restart (%restart-by-name session name)))
+                      (cond
+                        ((null restart)
+                         (let ((message (format nil "no restart named ~A"
+                                                name)))
+                           (%send-debug-action-error reply-box
+                                                     "eval-error"
+                                                     message)
+                           (when ctx
+                             (%emit-event ctx "debug-error"
+                                          "message" message))))
+                        (t
+                         (multiple-value-bind (args arg-error)
+                             (%eval-debug-restart-args
+                              args-forms
+                              (and *server* (server-current-package *server*)))
+                           (cond
+                             (arg-error
+                              (%send-debug-action-error reply-box
+                                                        "eval-error"
+                                                        arg-error)
+                              (when ctx
+                                (%emit-event ctx "debug-error"
+                                             "message" arg-error)))
+                             (t
+                              (%send-debug-action-result
+                               reply-box
+                               (%debug-action-result
+                                session "restart-invoked"))
+                              (apply #'invoke-restart restart args)
+                              ;; invoke-restart unwinds; we never get here.
+                              (return-from %enter-debugger nil)))))))))
+                 (:eval-in-frame
+                  (destructuring-bind (index form &optional reply-box)
+                      (rest action)
+                    (let ((result (%eval-in-frame session index form)))
+                      (cond
+                        (reply-box
+                         (%send-debug-action-result
+                          reply-box
+                          (list :object result)))
+                        (ctx
+                         (apply #'%emit-event ctx "frame-eval-result"
+                                (loop for (k . v) in result
+                                      append (list k v))))))))
+                 (:abort
+                  (%send-debug-action-result
+                   (second action)
+                   (%debug-action-result session "aborted"))
+                  ;; Let the original condition unwind through the outer
+                  ;; handler-case so finish(:err-condition) takes over.
+                  (return-from %enter-debugger nil))
+                 (:continue
+                  (let ((reply-box (second action))
+                        (r (find-restart 'continue condition)))
+                    (cond
+                      (r
+                       (%send-debug-action-result
+                        reply-box
+                        (%debug-action-result session "continued"))
+                       (invoke-restart r))
+                      (t
+                       (%send-debug-action-error
+                        reply-box "eval-error"
+                        "no CONTINUE restart available")
+                       ;; If there's no CONTINUE restart, fall through and keep
+                       ;; waiting for further actions.
+                       (when ctx
+                         (%emit-event
+                          ctx "debug-error"
+                          "message"
+                          "no CONTINUE restart available"))))))))))
+      (setf (eval-job-debug-session job) nil)
+      (when *server*
+        (%unregister-debug-session *server* session)))))
 
 (defun %eval-one (form-text &key package-override options job)
   "Evaluate FORM-TEXT inside the worker. Returns an eval-result struct.
@@ -1308,6 +1541,7 @@ sessions."
              (stream?
               #+sbcl (make-instance 'streaming-output-stream
                                     :ctx ctx :channel "stdout"
+                                    :sink sink
                                     :flush-bytes +stream-flush-min-bytes+)
               #-sbcl (%make-capture-stream sink))
              (t (%make-capture-stream sink))))
@@ -1316,6 +1550,7 @@ sessions."
              (stream?
               #+sbcl (make-instance 'streaming-output-stream
                                     :ctx ctx :channel "stderr"
+                                    :sink sink
                                     :flush-bytes +stream-flush-min-bytes+)
               #-sbcl (%make-capture-stream sink))
              (t (%make-capture-stream sink))))
@@ -2539,6 +2774,25 @@ terminal frame -- the originating eval's terminal frame is the response."
 ;;; %route-debug-action; we register them here so `methods' and `help'
 ;;; document the protocol.
 
+(%register-method
+ (make-method-spec
+  :name "list-debug-sessions"
+  :summary "Return every active server-owned debug session."
+  :doc "No parameters. Returns `{sessions:[{session, worker,
+entered_at_unix, condition}, ...]}'. A session exists from
+`debugger-entered' until a restart, continue, or abort resolves it."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore params ctx))
+    (%success-response
+     id
+     (%json-object
+      "sessions"
+      (%json-array
+       (mapcar #'%debug-session-json
+               (%all-debug-sessions server))))))))
+
 (defun %debug-orphan-error (id)
   (%error-response id "protocol-error"
                    "no in-flight debug session on this id"))
@@ -2547,15 +2801,19 @@ terminal frame -- the originating eval's terminal frame is the response."
  (make-method-spec
   :name "debug-invoke-restart"
   :summary "Pick a restart in the active debug session."
-  :doc "Continuation: sent on the same id as an `eval' that is currently
-paused in the debugger. Required: `name' (case-insensitive). Optional:
-`args' (an array of Lisp source forms, evaluated in the worker's package
-before being passed to the restart). Has no terminal frame -- the eval's
-result/error frame is the response after the restart unwinds."
+  :doc "Continuation: either send on the same id as an `eval' that is
+currently paused in the debugger, or pass `session' to address a
+server-owned debug session from a fresh connection. Required: `name'
+(case-insensitive). Optional: `args' (an array of Lisp source forms,
+evaluated in the worker's package before being passed to the restart).
+Same-id continuations have no terminal frame; fresh session-addressed
+requests return `{session, worker, outcome}'."
   :params (list (list :name "name" :type "string" :required t
                       :description "Restart name, e.g. ABORT, CONTINUE, USE-VALUE.")
                 (list :name "args" :type "array" :required nil
-                      :description "Forms to evaluate as restart arguments."))
+                      :description "Forms to evaluate as restart arguments.")
+                (list :name "session" :type "integer" :required nil
+                      :description "Server-owned debug session id."))
   :handler
   (lambda (server params id ctx)
     (declare (ignore server params ctx))
@@ -2566,13 +2824,16 @@ result/error frame is the response after the restart unwinds."
   :name "debug-eval-in-frame"
   :summary "Evaluate a form in the lexenv of a stack frame."
   :doc "Continuation. Required: `frame' (integer index into the captured
-backtrace, 0 = innermost), `form' (Lisp source). Emits an
-`event:frame-eval-result' with `values'/`output'/`error_output'. The
-debugger session remains active afterwards."
+backtrace, 0 = innermost), `form' (Lisp source). Same-id continuations
+emit `event:frame-eval-result' with `values'/`output'/`error_output'.
+Fresh requests may pass `session' and receive those fields as their
+terminal result. The debugger session remains active afterwards."
   :params (list (list :name "frame" :type "integer" :required t
                       :description "Frame index; 0 is the innermost.")
                 (list :name "form" :type "string" :required t
-                      :description "Form to evaluate."))
+                      :description "Form to evaluate.")
+                (list :name "session" :type "integer" :required nil
+                      :description "Server-owned debug session id."))
   :handler
   (lambda (server params id ctx)
     (declare (ignore server params ctx))
@@ -2583,8 +2844,10 @@ debugger session remains active afterwards."
   :name "debug-continue"
   :summary "Invoke the CONTINUE restart in the active debug session."
   :doc "Sugar over debug-invoke-restart for the CONTINUE restart
-established by `cerror' / `break'."
-  :params nil
+established by `cerror' / `break'. Pass `session' to drive a
+server-owned debug session from a fresh connection."
+  :params (list (list :name "session" :type "integer" :required nil
+                      :description "Server-owned debug session id."))
   :handler
   (lambda (server params id ctx)
     (declare (ignore server params ctx))
@@ -2595,8 +2858,10 @@ established by `cerror' / `break'."
   :name "debug-abort"
   :summary "Abort the active debug session and unwind the eval."
   :doc "Lets the original condition propagate; the eval's terminal frame
-becomes the v1-shape `eval-error' response."
-  :params nil
+becomes the v1-shape `eval-error' response. Pass `session' to drive a
+server-owned debug session from a fresh connection."
+  :params (list (list :name "session" :type "integer" :required nil
+                      :description "Server-owned debug session id."))
   :handler
   (lambda (server params id ctx)
     (declare (ignore server params ctx))
@@ -4530,19 +4795,26 @@ thread sees the same instance; only one daemon may run per process."
                (error ()
                  (when (server-shutdown-requested? server)
                    (loop-finish))))))
-      ;; Stop every watcher first so its polling threads tear down
-      ;; before the workers it might be loading code into.
-      (dolist (w (%all-watches server))
-        (handler-case (%stop-watch w) (error () nil))
-        (when (clpm.repl-bridge.compat:thread-alive-p (watch-thread w))
-          (handler-case
-              (clpm.repl-bridge.compat:join-thread (watch-thread w))
-            (error () nil))))
-      ;; Stop every worker we spawned. Best-effort: the daemon is going
-      ;; away, so failure to join is acceptable.
-      (dolist (w (%all-workers server))
-        (when (clpm.repl-bridge.compat:thread-alive-p (worker-thread w))
-          (clpm.repl-bridge.compat:send-message (worker-mailbox w) :stop)
+	      ;; Stop every watcher first so its polling threads tear down
+	      ;; before the workers it might be loading code into.
+	      (dolist (w (%all-watches server))
+	        (handler-case (%stop-watch w) (error () nil))
+	        (when (clpm.repl-bridge.compat:thread-alive-p (watch-thread w))
+	          (handler-case
+	              (clpm.repl-bridge.compat:join-thread (watch-thread w))
+	            (error () nil))))
+	      ;; A worker in the debugger is blocked on its debug mailbox, not on
+	      ;; the worker mailbox. Resolve those stops first so ordinary worker
+	      ;; shutdown can drain below.
+	      (dolist (session (%all-debug-sessions server))
+	        (handler-case
+	            (%abort-debug-session server session "shutdown")
+	          (error () nil)))
+	      ;; Stop every worker we spawned. Best-effort: the daemon is going
+	      ;; away, so failure to join is acceptable.
+	      (dolist (w (%all-workers server))
+	        (when (clpm.repl-bridge.compat:thread-alive-p (worker-thread w))
+	          (clpm.repl-bridge.compat:send-message (worker-mailbox w) :stop)
           (handler-case
               (clpm.repl-bridge.compat:join-thread (worker-thread w))
             (error () nil))))
@@ -4684,40 +4956,104 @@ the connection thread stays free to read those continuations."
                           (%error-response id code message))
       (error () nil))))
 
-(defun %route-debug-action (server cstate id method params)
-  "Continuation: a `debug-*' message arrives on the same id as an
-in-flight eval. Convert it to an action tuple and post to the eval-job's
-debug-mailbox. Returns no terminal frame -- the eval's original terminal
-frame is the response."
-  (let ((job (%lookup-in-flight cstate id)))
+(defun %write-success-inline (cstate id payload)
+  (clpm.repl-bridge.compat:with-mutex ((connection-state-stream-mutex cstate))
+    (handler-case
+        (%write-line-json (connection-state-stream cstate)
+                          (%success-response id payload))
+      (error () nil))))
+
+(defun %write-debug-action-reply (cstate id reply)
+  (case (first reply)
+    (:result
+     (%write-success-inline cstate id (second reply)))
+    (:error
+     (%write-error-inline cstate id (second reply) (third reply)))
+    (t
+     (%write-error-inline cstate id "protocol-error"
+                          "invalid debug action reply"))))
+
+(defun %debug-session-param (params)
+  (let ((raw (%json-getf params "session")))
+    (and (integerp raw) raw)))
+
+(defun %debug-action-for-method (method params &optional reply-box)
+  (cond
+    ((string= method "debug-invoke-restart")
+     (let* ((name (%json-getf params "name"))
+            (args (array-items-of-param (%json-getf params "args"))))
+       (list :invoke-restart
+             (and (stringp name) (string-upcase name))
+             (or args '())
+             reply-box)))
+    ((string= method "debug-eval-in-frame")
+     (let ((index (%json-getf params "frame" 0))
+           (form (%json-getf params "form")))
+       (list :eval-in-frame (or index 0) form reply-box)))
+    ((string= method "debug-continue")
+     (list :continue reply-box))
+    ((string= method "debug-abort")
+     (list :abort reply-box))))
+
+(defun %debug-target-for-action (server cstate id params)
+  "Return (values JOB FRESH-REQUEST-P ERROR-MESSAGE) for a debug action.
+
+Old continuation clients address the eval by matching request ID on the same
+connection and expect no terminal response. Fresh clients address a server
+session via `session' and do expect a terminal response."
+  (let* ((session-id (%debug-session-param params))
+         (explicit-session (and session-id
+                                (%find-debug-session server session-id)))
+         (job-by-id (%lookup-in-flight cstate id))
+         (implicit-sessions (and (null job-by-id)
+                                 (null session-id)
+                                 (%all-debug-sessions server)))
+         (session (or explicit-session
+                      (and (= 1 (length implicit-sessions))
+                           (first implicit-sessions))))
+         (job (or (and session (debug-session-job session))
+                  job-by-id))
+         (fresh? (or session-id (null job-by-id))))
     (cond
+      ((and session-id (null explicit-session))
+       (values nil fresh?
+               (format nil "no active debug session ~A" session-id)))
+      ((and (null job-by-id)
+            (null session-id)
+            (null implicit-sessions))
+       (values nil fresh? "no active debug session"))
+      ((and (null job-by-id)
+            (null session-id)
+            (> (length implicit-sessions) 1))
+       (values nil fresh?
+               "multiple active debug sessions; pass `session'"))
       ((or (null job) (null (eval-job-debug-mailbox job)))
+       (values nil fresh? "no in-flight debug session on this id"))
+      (t
+       (values job fresh? nil)))))
+
+(defun %route-debug-action (server cstate id method params)
+  "Route a debug action to either an in-flight eval or a server-owned session."
+  (multiple-value-bind (job fresh? error-message)
+      (%debug-target-for-action server cstate id params)
+    (cond
+      (error-message
        (%log-event (server-event-log server) "debug-action-unmatched"
                    "id" id "method" method)
-       (%write-error-inline cstate id "protocol-error"
-                            "no in-flight debug session on this id"))
+       (%write-error-inline cstate id "protocol-error" error-message))
       (t
-       (let ((action
-               (cond
-                 ((string= method "debug-invoke-restart")
-                  (let* ((name (%json-getf params "name"))
-                         (args (array-items-of-param
-                                (%json-getf params "args"))))
-                    (list :invoke-restart
-                          (and (stringp name) (string-upcase name))
-                          (or args '()))))
-                 ((string= method "debug-eval-in-frame")
-                  (let ((index (%json-getf params "frame" 0))
-                        (form (%json-getf params "form")))
-                    (list :eval-in-frame (or index 0) form)))
-                 ((string= method "debug-continue")
-                  (list :continue))
-                 ((string= method "debug-abort")
-                  (list :abort)))))
+       (let* ((reply-box (and fresh?
+                              (clpm.repl-bridge.compat:make-mailbox)))
+              (action (%debug-action-for-method method params reply-box)))
          (clpm.repl-bridge.compat:send-message
           (eval-job-debug-mailbox job) action)
          (%log-event (server-event-log server) "debug-action"
-                     "id" id "action" method))))))
+                     "id" id "action" method
+                     "fresh" (and fresh? t))
+         (when reply-box
+           (%write-debug-action-reply
+            cstate id
+            (clpm.repl-bridge.compat:receive-message reply-box))))))))
 
 (defun array-items-of-param (a)
   "Extract elements from a JSON array param, or NIL if not an array."

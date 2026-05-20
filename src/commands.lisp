@@ -3460,7 +3460,7 @@ slots does this object expose?\")."
 
 (defun %bridge-cmd-debug (args)
   "`clpm repl-bridge debug FORM [--restart NAME] [--frame N] [--frame-eval F]
-                          [--abort] [--package P] [--break-on K]'.
+                          [--keep] [--abort] [--package P] [--break-on K]'.
 
 Default action: run the form with `debug: true'. If a stop frame is
 reported, list it (frames + restarts) and abort the session, then
@@ -3468,24 +3468,24 @@ exit non-zero with a parseable summary.
 
 `--restart NAME' immediately picks the named restart on the first
 stop. `--frame N --frame-eval FORM' evaluates FORM in frame N before
-acting. `--abort' explicitly aborts. Without any selector the session
-is aborted at the end -- the LLM gets the frame/restart list and can
-re-run with `--restart' picked.
-
-Always closes the debug session, no held state."
+acting. `--keep' leaves the debugger session registered in the daemon so
+follow-up one-shot commands can use its session id. `--abort' explicitly
+aborts. Without any selector the session is aborted at the end -- the LLM gets
+the frame/restart list and can re-run with `--restart' picked."
   (multiple-value-bind (opts pos)
       (%bridge-parse-flags args '(("restart" . :string)
                                    ("arg" . :list-string)
                                    ("frame" . :integer)
                                    ("frame-eval" . :string)
                                    ("abort" . :flag)
+                                   ("keep" . :flag)
                                    ("package" . :string)
                                    ("break-on" . :string)
                                    ("worker" . :string)
                                    ("timeout-ms" . :integer)))
     (let ((form (first pos)))
       (unless form
-        (log-error "Usage: clpm repl-bridge debug FORM [--restart NAME [--arg V...]] [--frame N --frame-eval F] [--package P] [--break-on K]")
+        (log-error "Usage: clpm repl-bridge debug FORM [--restart NAME [--arg V...]] [--frame N --frame-eval F] [--keep] [--package P] [--break-on K]")
         (return-from %bridge-cmd-debug 1))
       (multiple-value-bind (project-root sock pid)
           (%bridge-resolve-project)
@@ -3508,6 +3508,7 @@ Always closes the debug session, no held state."
   "The continuation-aware debugger loop, run on an open CONNECTION."
   (let* ((eval-id 1001)
          (resolved nil)
+         (kept nil)
          (params (%bridge-make-params
                   (list (cons "form" form)
                         (cons "package" (getf opts :package))
@@ -3517,6 +3518,7 @@ Always closes the debug session, no held state."
                         (cons "max_real_ms" (getf opts :timeout-ms))))))
     (flet ((handle-stop (event)
              (let* ((cobj (%bridge-unwrap (%bridge-frame-field event "condition")))
+                    (session (%bridge-frame-field event "session"))
                     (restarts (%bridge-array-items
                                (%bridge-field cobj "restarts")))
                     (frames (%bridge-array-items
@@ -3546,6 +3548,8 @@ Always closes the debug session, no held state."
                              (or (%bridge-field cobj "message")
                                  (%bridge-field cobj "report")
                                  "(no condition)"))
+                     (when session
+                       (format *error-output* "session: ~A~%" session))
                      (when restarts
                        (format *error-output* "restarts (~D):~%" (length restarts))
                        (dolist (r restarts)
@@ -3553,9 +3557,15 @@ Always closes the debug session, no held state."
                      (let ((user (%bridge-user-frames (list :array frames))))
                        (when user
                          (%bridge-print-frames *error-output* user)))))
-                  (clpm.repl-bridge:send-continuation-on-connection
-                   conn eval-id "debug-abort")
-                  (setf resolved :aborted))))))
+                  (cond
+                    ((getf opts :keep)
+                     (setf kept t
+                           resolved :kept)
+                     :stop)
+                    (t
+                     (clpm.repl-bridge:send-continuation-on-connection
+                      conn eval-id "debug-abort")
+                     (setf resolved :aborted))))))))
       (let ((resp
               (clpm.repl-bridge:send-on-connection
                conn "eval"
@@ -3563,10 +3573,11 @@ Always closes the debug session, no held state."
                :params params
                :on-event
                (lambda (event)
-                 (let ((ename (%bridge-frame-field event "event")))
+                 (let ((ename (%bridge-frame-field event "event"))
+                       (action nil))
                    (cond
                      ((and ename (string= ename "debugger-entered"))
-                      (handle-stop event))
+                      (setf action (handle-stop event)))
                      ((and ename (string= ename "frame-eval-result"))
                       (cond
                         (*bridge-cli-json* (%bridge-emit-json event))
@@ -3581,11 +3592,14 @@ Always closes the debug session, no held state."
                       (clpm.repl-bridge:send-continuation-on-connection
                        conn eval-id "debug-abort")
                       (setf resolved t)))
-                   nil)))))
+                   action)))))
         (cond
           ((eq resp :no-daemon) 2)
           ((eq resp :io-error)
-           (log-error "I/O error during debug session") 2)
+           (cond
+             (kept 3)
+             (t
+              (log-error "I/O error during debug session") 2)))
           (*bridge-cli-json*
            (%bridge-emit-json resp)
            (if (%bridge-err resp)
@@ -3604,7 +3618,108 @@ Always closes the debug session, no held state."
               (let* ((obj (%bridge-obj resp))
                      (value (%bridge-field obj "value")))
                 (when value (format t "=> ~A~%" value))
-                0)))))))))
+              0)))))))))
+
+;;; ----------------------------------------------------------------------------
+;;; Server-owned debugger sessions.
+
+(defun %bridge-parse-integer-arg (text label)
+  (handler-case
+      (parse-integer text :junk-allowed nil)
+    (error ()
+      (log-error "Invalid ~A: ~A" label text)
+      nil)))
+
+(defun %bridge-cmd-list-debug-sessions (args)
+  "`clpm repl-bridge list-debug-sessions'."
+  (declare (ignore args))
+  (%bridge-with-call (obj "list-debug-sessions")
+    (let ((sessions (%bridge-array-items (%bridge-field obj "sessions"))))
+      (cond
+        ((null sessions)
+         (format t "no active debug sessions~%"))
+        (t
+         (format t "~D debug session~:P:~%" (length sessions))
+         (dolist (entry sessions)
+           (let* ((e (cadr entry))
+                  (condition (%bridge-unwrap (%bridge-field e "condition"))))
+             (format t "  #~A worker=~A ~A~%"
+                     (or (%bridge-field e "session") "?")
+                     (or (%bridge-field e "worker") "?")
+                     (or (%bridge-field condition "message")
+                         (%bridge-field condition "report")
+                         "")))))))))
+
+(defun %bridge-cmd-debug-eval-in-frame (args)
+  "`clpm repl-bridge debug-eval-in-frame FRAME FORM [--session N]'."
+  (multiple-value-bind (opts pos)
+      (%bridge-parse-flags args '(("session" . :integer)))
+    (let* ((frame-text (first pos))
+           (form (second pos))
+           (frame (and frame-text
+                       (%bridge-parse-integer-arg frame-text "frame"))))
+      (unless (and frame form)
+        (log-error "Usage: clpm repl-bridge debug-eval-in-frame FRAME FORM [--session N]")
+        (return-from %bridge-cmd-debug-eval-in-frame 1))
+      (%bridge-with-call
+          (obj "debug-eval-in-frame"
+               :params (%bridge-make-params
+                        (list (cons "session" (getf opts :session))
+                              (cons "frame" frame)
+                              (cons "form" form))))
+        (format t "frame ~D => ~A~%"
+                frame
+                (or (%bridge-field obj "value")
+                    (%bridge-field obj "error_output")
+                    "?"))))))
+
+(defun %bridge-cmd-debug-abort (args)
+  "`clpm repl-bridge debug-abort [--session N]'."
+  (multiple-value-bind (opts pos)
+      (%bridge-parse-flags args '(("session" . :integer)))
+    (declare (ignore pos))
+    (%bridge-with-call
+        (obj "debug-abort"
+             :params (%bridge-make-params
+                      (list (cons "session" (getf opts :session)))))
+      (format t "~A session #~A~%"
+              (or (%bridge-field obj "outcome") "aborted")
+              (or (%bridge-field obj "session") "?")))))
+
+(defun %bridge-cmd-debug-continue (args)
+  "`clpm repl-bridge debug-continue [--session N]'."
+  (multiple-value-bind (opts pos)
+      (%bridge-parse-flags args '(("session" . :integer)))
+    (declare (ignore pos))
+    (%bridge-with-call
+        (obj "debug-continue"
+             :params (%bridge-make-params
+                      (list (cons "session" (getf opts :session)))))
+      (format t "~A session #~A~%"
+              (or (%bridge-field obj "outcome") "continued")
+              (or (%bridge-field obj "session") "?")))))
+
+(defun %bridge-cmd-debug-invoke-restart (args)
+  "`clpm repl-bridge debug-invoke-restart NAME [--arg FORM]... [--session N]'."
+  (multiple-value-bind (opts pos)
+      (%bridge-parse-flags args '(("session" . :integer)
+                                   ("arg" . :list-string)))
+    (let ((name (first pos)))
+      (unless name
+        (log-error "Usage: clpm repl-bridge debug-invoke-restart NAME [--arg FORM]... [--session N]")
+        (return-from %bridge-cmd-debug-invoke-restart 1))
+      (%bridge-with-call
+          (obj "debug-invoke-restart"
+               :params (%bridge-make-params
+                        (list (cons "session" (getf opts :session))
+                              (cons "name" name)
+                              (cons "args"
+                                    (and (getf opts :arg)
+                                         (%bridge-string-list
+                                          (getf opts :arg)))))))
+        (format t "~A session #~A~%"
+                (or (%bridge-field obj "outcome") "restart-invoked")
+                (or (%bridge-field obj "session") "?"))))))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Dispatcher (with JSON flag support, alias normalization, and help).
@@ -3624,7 +3739,8 @@ Always closes the debug session, no held state."
     ("status"  . "Show whether the project's daemon is up and its pid/uptime.")
     ("stop"    . "Send shutdown, wait for the socket to disappear, clean up.")
     ("ping"    . "Liveness check with per-method counters.")
-    ("debug"   . "Run FORM with debug:true and either: print frames + restarts (rc=3), invoke a restart with --restart NAME [--arg V]..., or evaluate inside a frame with --frame N --frame-eval FORM.")
+    ("debug"   . "Run FORM with debug:true; use --keep to leave a server-owned session for debug-* follow-ups.")
+    ("list-debug-sessions" . "List active server-owned debugger sessions.")
     ("inspect" . "Open an inspector on FORM, walk --path 0,1,2 if given, print the view, and close the session (unless --keep).")
     ("diff"    . "Alias for list-redefinitions. Shows top-level forms redefined since the daemon started (or since the last `reset').")
     ("help"    . "Show the cheat sheet. Pass a SUBCOMMAND to drill into one.")))
@@ -3674,7 +3790,12 @@ served from a small CLI-only table for the rest."
   (format t "  list-traced~%~%")
   (format t "single-shot interactive features:~%")
   (format t "  inspect FORM [--path 0,1,..]   Open inspector, walk path, close.~%")
-  (format t "  debug FORM [--restart NAME]    Run with debug; pick restart inline.~%~%")
+  (format t "  debug FORM [--restart NAME]    Run with debug; pick restart inline.~%")
+  (format t "  debug FORM --keep              Leave stopped session in daemon.~%")
+  (format t "  list-debug-sessions            Show stopped debugger sessions.~%")
+  (format t "  debug-eval-in-frame N FORM     Eval in stopped frame (use --session S).~%")
+  (format t "  debug-invoke-restart NAME      Invoke restart (use --arg FORM).~%")
+  (format t "  debug-continue | debug-abort   Resolve stopped session.~%~%")
   (format t "discovery:~%")
   (format t "  methods [METHOD]                List RPCs (or detail one).~%")
   (format t "  diff                            Show top-level redefinitions seen.~%~%")
@@ -3776,6 +3897,16 @@ See `clpm repl-bridge help' for the full surface."
         ((string= sub "watch") (%bridge-cmd-watch args))
         ((string= sub "inspect") (%bridge-cmd-inspect args))
         ((string= sub "debug") (%bridge-cmd-debug args))
+        ((string= sub "list-debug-sessions")
+         (%bridge-cmd-list-debug-sessions args))
+        ((string= sub "debug-eval-in-frame")
+         (%bridge-cmd-debug-eval-in-frame args))
+        ((string= sub "debug-invoke-restart")
+         (%bridge-cmd-debug-invoke-restart args))
+        ((string= sub "debug-continue")
+         (%bridge-cmd-debug-continue args))
+        ((string= sub "debug-abort")
+         (%bridge-cmd-debug-abort args))
         (t
          (log-error "Unknown subcommand: ~A (try `clpm repl-bridge help')" sub)
          1)))))

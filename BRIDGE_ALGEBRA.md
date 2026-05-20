@@ -207,3 +207,29 @@ The bridge should be simplified in this order:
 Each step should move code toward `step : BridgeState x ClientAction ->
 BridgeState x [ServerFrame]` and delete compatibility shims that preserve the
 old bag-of-handlers model.
+
+## Current State
+
+Implemented:
+
+1. `eval/read-package`: forms are now read in the worker package, with
+   per-request package overrides scoped to that eval.
+2. `frame-eval`: stopped frames are captured as live SBCL frame objects and
+   `debug-eval-in-frame` uses `sb-di:eval-in-frame`.
+3. `connection-not-owner`: debugger stops have server-owned session ids. A
+   later connection can list sessions, evaluate in frames, invoke restarts,
+   continue, or abort.
+4. `restart-preserves-continuation`: fresh session-addressed restart actions
+   resume the original eval. Bad restart argument forms report an error without
+   consuming the debug session.
+5. `output-prefix`: streaming and terminal output share a bounded sink, so both
+   observations expose the same prefix and large writes are bounded as they
+   occur.
+6. Shutdown now resolves active debug sessions before stopping workers, so a
+   kept debugger stop cannot wedge daemon teardown.
+
+Still open:
+
+1. Turn method specs into decoders so handlers consume typed request values
+   rather than ad hoc JSON lookups.
+2. Separate internal terminal outcomes from the JSON compatibility renderer.
