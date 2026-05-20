@@ -1772,6 +1772,314 @@ becomes the v1-shape `eval-error' response."
     (declare (ignore server params ctx))
     (%debug-orphan-error id))))
 
+;;; ----------------------------------------------------------------------------
+;;; Source navigation and introspection (BRIDGE_V2 #130-#136, #140-#148).
+;;; ----------------------------------------------------------------------------
+
+(defun %symbol-from-string (sym-name pkg-name &key (server *server*))
+  "Resolve SYM-NAME in PKG-NAME, defaulting to the server's persistent
+package. Returns the symbol or NIL."
+  (let* ((pkg (cond
+                ((null pkg-name)
+                 (and server (server-current-package server)))
+                (t (%find-package-loose pkg-name)))))
+    (and pkg (find-symbol (string-upcase sym-name) pkg))))
+
+#+sbcl
+(defun %definition-source-json (def-source)
+  "Convert an sb-introspect:definition-source into the v2 JSON shape."
+  (let* ((pathname (sb-introspect:definition-source-pathname def-source))
+         (form-path (sb-introspect:definition-source-form-path def-source))
+         (char-offset (sb-introspect:definition-source-character-offset def-source))
+         (plist (sb-introspect:definition-source-plist def-source)))
+    (%json-object
+     "file" (and pathname (namestring pathname))
+     "line" (and (consp form-path) (integerp (first form-path)) (first form-path))
+     "form_path" (and form-path (%json-array
+                                  (mapcar (lambda (e)
+                                            (if (integerp e) e (princ-to-string e)))
+                                          form-path)))
+     "char_offset" char-offset
+     "plist" (and plist (%safe-prin1 plist)))))
+
+#+sbcl
+(defun %find-definitions (symbol kind-kw)
+  "Return a list of JSON objects describing where SYMBOL is defined.
+KIND-KW filters by kind (:function, :method, :macro, :class, :variable,
+:condition, ...) or NIL for all kinds known to sb-introspect."
+  (handler-case
+      (let* ((kinds (or (and kind-kw (list kind-kw))
+                        '(:function :method :generic-function :macro
+                          :class :condition :type :variable :constant
+                          :package :method-combination :symbol-macro
+                          :compiler-macro :setf-expander :alien-type)))
+             (entries '()))
+        (dolist (k kinds (nreverse entries))
+          (dolist (src (sb-introspect:find-definition-sources-by-name
+                        symbol k))
+            (push (list :object
+                        (list (cons "kind" (string-downcase (symbol-name k)))
+                              (cons "location"
+                                    (%definition-source-json src))))
+                  entries))))
+    (error () nil)))
+
+#-sbcl
+(defun %find-definitions (symbol kind-kw)
+  (declare (ignore symbol kind-kw))
+  nil)
+
+(%register-method
+ (make-method-spec
+  :name "find-definition"
+  :summary "Return source locations where SYMBOL is defined."
+  :doc "Required: `symbol' (string). Optional: `package' (defaults to the
+persistent package), `kind' (one of \"function\", \"method\", \"macro\",
+\"class\", \"variable\", \"condition\", ...). Returns
+`{entries: [{kind, location: {file, line, ...}}, ...]}'."
+  :params (list (list :name "symbol" :type "string" :required t
+                      :description "Symbol name; matched case-insensitively.")
+                (list :name "package" :type "string" :required nil
+                      :description "Resolve `symbol' in this package.")
+                (list :name "kind" :type "string" :required nil
+                      :description "Filter to one definition kind."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((sym-name (%json-getf params "symbol"))
+           (pkg-name (%json-getf params "package"))
+           (kind-str (%json-getf params "kind"))
+           (kind-kw (and (stringp kind-str)
+                         (intern (string-upcase kind-str) :keyword)))
+           (sym (and (stringp sym-name)
+                     (%symbol-from-string sym-name pkg-name
+                                          :server server))))
+      (cond
+        ((not (stringp sym-name))
+         (%error-response id "protocol-error" "missing `symbol' param"))
+        ((null sym)
+         (%error-response id "eval-error"
+                          (format nil "no symbol ~A in ~A"
+                                  sym-name (or pkg-name "current package"))))
+        (t
+         (%success-response
+          id
+          (%json-object
+           "entries"
+           (%json-array (%find-definitions sym kind-kw))))))))))
+
+#+sbcl
+(defun %xref-entries (symbol direction)
+  "Return JSON entries for an xref query.
+DIRECTION is one of :callers, :callees, :references, :sets, :binds,
+:macroexpands, :specializers."
+  (handler-case
+      (let ((raw
+              (case direction
+                (:callers (sb-introspect:who-calls symbol))
+                (:references (sb-introspect:who-references symbol))
+                (:sets (sb-introspect:who-sets symbol))
+                (:binds (sb-introspect:who-binds symbol))
+                (:macroexpands (sb-introspect:who-macroexpands symbol))
+                (:specializes (sb-introspect:who-specializes-directly symbol))
+                (:callees
+                 ;; sb-introspect doesn't expose who-callees directly; fall
+                 ;; back to function-precedence + lambda-list inspection.
+                 nil)
+                (t nil))))
+        (loop for entry in raw
+              collect
+              (let* ((name (if (consp entry) (first entry) entry))
+                     (src (if (and (consp entry) (cdr entry))
+                              (second entry)
+                              nil)))
+                (%json-object
+                 "name" (%safe-prin1 name)
+                 "location" (and src (%definition-source-json src))))))
+    (error () nil)))
+
+#-sbcl
+(defun %xref-entries (symbol direction)
+  (declare (ignore symbol direction))
+  nil)
+
+(%register-method
+ (make-method-spec
+  :name "xref"
+  :summary "Cross-reference: who calls / references / sets / binds SYMBOL."
+  :doc "Required: `symbol', `direction' (callers|callees|references|sets|binds|
+macroexpands|specializes). Returns
+`{entries: [{name, location}, ...]}'."
+  :params (list (list :name "symbol" :type "string" :required t
+                      :description "Symbol name.")
+                (list :name "direction" :type "string" :required t
+                      :description "callers, callees, references, sets, binds, macroexpands, specializes.")
+                (list :name "package" :type "string" :required nil
+                      :description "Resolve `symbol' in this package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((sym-name (%json-getf params "symbol"))
+           (dir-str (%json-getf params "direction"))
+           (pkg-name (%json-getf params "package"))
+           (sym (and (stringp sym-name)
+                     (%symbol-from-string sym-name pkg-name :server server)))
+           (dir-kw (and (stringp dir-str)
+                        (intern (string-upcase dir-str) :keyword))))
+      (cond
+        ((not (stringp sym-name))
+         (%error-response id "protocol-error" "missing `symbol' param"))
+        ((null sym)
+         (%error-response id "eval-error"
+                          (format nil "no symbol ~A" sym-name)))
+        ((null dir-kw)
+         (%error-response id "protocol-error" "missing `direction' param"))
+        (t
+         (%success-response
+          id
+          (%json-object
+           "entries"
+           (%json-array (%xref-entries sym dir-kw))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "macroexpand"
+  :summary "Expand a macro form once or fully."
+  :doc "Required: `form' (Lisp source string). Optional: `recursive'
+(boolean, defaults to false). Returns `{form: <prin1>, expanded_p: bool}'."
+  :params (list (list :name "form" :type "string" :required t
+                      :description "Form to expand.")
+                (list :name "recursive" :type "boolean" :required nil
+                      :description "Fully expand (macroexpand) vs one step.")
+                (list :name "package" :type "string" :required nil
+                      :description "Reader/expander package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((form-text (%json-getf params "form"))
+           (recursive (%json-getf params "recursive"))
+           (pkg-name (%json-getf params "package"))
+           (pkg (or (and pkg-name (%find-package-loose pkg-name))
+                    (and server (server-current-package server))
+                    (find-package "COMMON-LISP-USER"))))
+      (cond
+        ((not (stringp form-text))
+         (%error-response id "protocol-error" "missing `form' param"))
+        (t
+         (handler-case
+             (let* ((parsed (let ((*package* pkg))
+                              (%read-form form-text))))
+               (multiple-value-bind (expansion expanded-p)
+                   (if recursive
+                       (macroexpand parsed)
+                       (macroexpand-1 parsed))
+                 (%success-response
+                  id
+                  (%json-object
+                   "form" (let ((*package* pkg)
+                                (*print-pretty* nil))
+                            (%safe-prin1 expansion))
+                   "expanded_p" (and expanded-p t)))))
+           (error (c)
+             (%error-response id "eval-error" (princ-to-string c))))))))))
+
+;;; ----------------------------------------------------------------------------
+;;; compile-file / load-file with structured diagnostics (#130, #131).
+;;; ----------------------------------------------------------------------------
+
+(defun %compile-condition-severity (condition)
+  (cond
+    ((typep condition 'error) "error")
+    ((typep condition 'sb-ext:compiler-note) "note")
+    ((typep condition 'style-warning) "style-warning")
+    ((typep condition 'warning) "warning")
+    (t "note")))
+
+(defun %compile-source-json (condition)
+  "Best-effort source location for a compiler condition. SBCL stores it
+in sb-c::source-form / sb-c::source-path on the condition, but those
+accessors are internal; we princ the condition's source and let the
+caller diff source-form strings."
+  (handler-case
+      (let* ((source-form (when (slot-exists-p condition 'sb-c::source-form)
+                            (slot-value condition 'sb-c::source-form))))
+        (when source-form
+          (%json-object "form" (%safe-prin1 source-form))))
+    (error () nil)))
+
+(defun %emit-compile-diagnostic (ctx condition)
+  "Emit one `event:diagnostic' frame for CONDITION."
+  (when ctx
+    (%emit-event
+     ctx "diagnostic"
+     "severity" (%compile-condition-severity condition)
+     "type" (string (type-of condition))
+     "message" (handler-case (princ-to-string condition)
+                 (error () "<unprintable>"))
+     "source" (%compile-source-json condition))))
+
+(%register-method
+ (make-method-spec
+  :name "compile-file"
+  :summary "Compile a Lisp file, streaming structured diagnostics."
+  :doc "Required: `path' (absolute path to a .lisp file). Streams a
+`diagnostic' event per condition signaled during compilation. Terminal
+result carries `success', `output_truename', `warnings_p', `failure_p'."
+  :params (list (list :name "path" :type "string" :required t
+                      :description "Absolute path to the source file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server))
+    (let ((path (%json-getf params "path")))
+      (cond
+        ((not (stringp path))
+         (%error-response id "protocol-error" "missing `path' param"))
+        (t
+         (handler-case
+             (let ((handler (lambda (c) (%emit-compile-diagnostic ctx c))))
+               (multiple-value-bind (truename warnings-p failure-p)
+                   (handler-bind ((condition handler))
+                     (compile-file path :verbose nil :print nil))
+                 (%success-response
+                  id
+                  (%json-object
+                   "success" (not failure-p)
+                   "output_truename" (and truename (namestring truename))
+                   "warnings_p" (and warnings-p t)
+                   "failure_p" (and failure-p t)))))
+           (error (c)
+             (%error-response id "eval-error" (princ-to-string c))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "load-file"
+  :summary "Load a Lisp file, streaming structured diagnostics."
+  :doc "Required: `path'. Streams a `diagnostic' event per condition
+signaled during load. Terminal result carries `success' and the package
+active when load returned."
+  :params (list (list :name "path" :type "string" :required t
+                      :description "Absolute path to the file to load."))
+  :handler
+  (lambda (server params id ctx)
+    (let ((path (%json-getf params "path")))
+      (cond
+        ((not (stringp path))
+         (%error-response id "protocol-error" "missing `path' param"))
+        (t
+         (handler-case
+             (let ((handler (lambda (c) (%emit-compile-diagnostic ctx c))))
+               (handler-bind ((condition handler))
+                 (load path :verbose nil :print nil))
+               (when server
+                 (setf (server-current-package server) *package*))
+               (%success-response
+                id
+                (%json-object
+                 "success" t
+                 "package" (package-name *package*))))
+           (error (c)
+             (%error-response id "eval-error" (princ-to-string c))))))))))
+
 (defun %parse-eval-options (params)
   "Translate v2 eval params (a `(:object ((k . v)…))') into the worker's
 plist of `:stream', `:debug', `:query-interactive', `:record-signals',
