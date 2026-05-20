@@ -300,6 +300,48 @@
                    (assert-contains stdout "hi")))
                (format t "  compile-file/load-file flow OK~%")
 
+               (format t "Test: eval default is human-readable~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "eval" "(+ 1 2)"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "=> 3")
+                 ;; Should not contain raw JSON envelope by default.
+                 (assert-true (not (search "\"result\"" stdout))
+                              "default eval should not be JSON: ~A" stdout))
+               (format t "  eval default OK~%")
+
+               (format t "Test: eval error shows restarts + user frames~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "eval"
+                                       "(unknown-function-xyz 1)"))
+                 (declare (ignore rc))
+                 (assert-contains stdout "error:")
+                 (assert-contains stdout "restarts")
+                 ;; Daemon scaffolding should be stripped.
+                 (assert-true (not (search "%WORKER-LOOP" stdout))
+                              "should not show daemon frames: ~A" stdout)
+                 (assert-true (not (search "%EVAL-ONE" stdout))
+                              "should not show daemon frames: ~A" stdout))
+               (format t "  eval error layout OK~%")
+
+               (format t "Test: ping renders human-readable~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "ping"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "pid:")
+                 (assert-contains stdout "uptime:"))
+               (format t "  ping renderer OK~%")
+
+               (format t "Test: diff renders kind+name~%")
+               (run-cli-captured '("repl-bridge" "eval"
+                                   "(defun diff-fn-x () 1)"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "diff"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "defun")
+                 (assert-contains stdout "DIFF-FN-X"))
+               (format t "  diff renderer OK~%")
+
                (format t "Test: help text~%")
                (multiple-value-bind (rc stdout)
                    (run-cli-captured '("repl-bridge" "help"))

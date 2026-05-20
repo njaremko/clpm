@@ -44,28 +44,76 @@ makes the protocol self-documenting.
 
 ## Cheat sheet
 
+The CLI is the LLM-friendly entry point — every interactive feature
+(debugger, inspector, watcher, ...) has a single-shot wrapper so you
+never need to script raw JSON-RPC over a socket. Each subcommand
+auto-starts the daemon on first contact.
+
 ```sh
-# start the daemon for the current project (loads .clpm/asdf-config.lisp)
-clpm repl-bridge serve --detach
+# lifecycle
+clpm repl-bridge serve --detach        # explicit daemon launch
+clpm repl-bridge status                # is it up?
+clpm repl-bridge stop                  # clean shutdown
+clpm repl-bridge ping                  # liveness + per-method counters
 
-# evaluate one form (auto-starts the daemon if none is running)
+# evaluation (auto-starts daemon)
 clpm repl-bridge eval '(+ 1 2)'
+clpm repl-bridge eval '(read-from-string "FOO")' --package my-app
+clpm repl-bridge time-eval '(some-fn)'             # wall + cpu + cons
+clpm repl-bridge profile-eval '(big-fn)' --top 10  # sb-sprof flat report
+clpm repl-bridge gc [--full]                       # trigger a GC
+clpm repl-bridge interrupt                         # unwind current eval
 
-# evaluate inside a specific package, just for this call
-clpm repl-bridge eval '(symbol-package (read-from-string "FOO"))' --package my-app
+# introspection
+clpm repl-bridge apropos PATTERN [--package P]
+clpm repl-bridge arglist SYMBOL
+clpm repl-bridge doc SYMBOL [--type function|variable|type]
+clpm repl-bridge describe SYMBOL
+clpm repl-bridge find-definition SYMBOL [--kind function|class|...]
+clpm repl-bridge xref SYMBOL --direction calls|references|sets|binds
+clpm repl-bridge who-calls SYMBOL                  # alias for --direction calls
+clpm repl-bridge complete-symbol PREFIX [--limit N]
+clpm repl-bridge disassemble SYMBOL
+clpm repl-bridge function-info SYMBOL
+clpm repl-bridge class-info CLASS-NAME
+clpm repl-bridge package-info PKG-NAME
+clpm repl-bridge describe-system SYS-NAME
+clpm repl-bridge macroexpand FORM [--full]
+clpm repl-bridge list-packages
+clpm repl-bridge loaded-systems
+clpm repl-bridge image-info                        # pid, lisp, mem, ...
+clpm repl-bridge current-package [--worker W]
+clpm repl-bridge set-package NAME [--worker W]
 
-# is the daemon up?
-clpm repl-bridge status
+# load / compile / watch
+clpm repl-bridge compile-file PATH                 # streams diagnostics
+clpm repl-bridge load-file PATH
+clpm repl-bridge watch DIR [--glob G] [--auto-revert]   # streams events
+clpm repl-bridge list-watches
+clpm repl-bridge unwatch ID
 
-# break out of a hung eval; daemon stays up
-clpm repl-bridge interrupt
+# workers and tracing
+clpm repl-bridge workers                           # alias: list-workers
+clpm repl-bridge kill-worker NAME
+clpm repl-bridge reset [--worker W]
+clpm repl-bridge trace SYMBOL...
+clpm repl-bridge untrace [SYMBOL...]
+clpm repl-bridge list-traced
 
-# clean shutdown
-clpm repl-bridge stop
+# single-shot interactive features (no held session)
+clpm repl-bridge inspect FORM [--path 0,1,2]       # walks the path, closes
+clpm repl-bridge debug FORM                        # prints frames+restarts, exits rc=3
+clpm repl-bridge debug FORM --restart NAME [--arg V...]
+clpm repl-bridge debug FORM --frame N --frame-eval '(local-form)'
 
-# list every RPC the daemon exposes
-clpm repl-bridge methods
-clpm repl-bridge methods eval          # long-form help for one method
+# discovery
+clpm repl-bridge methods                           # one-line summary per RPC
+clpm repl-bridge methods eval                      # full doc + params
+clpm repl-bridge diff                              # top-level redefinitions seen
+clpm repl-bridge help                              # this command listing
+
+# global flag: append `--json` for raw JSON-on-a-line responses
+clpm repl-bridge image-info --json
 ```
 
 ## Response shape
@@ -108,12 +156,33 @@ backtrace is debugger-grade (live restarts, frame locals, source positions).
 
 ## Recipe: interactive debugger
 
-Pass `debug: true` and the daemon pauses on the first unhandled condition,
-emitting a `debugger-entered` event with the live restart chain. Reply with
-a `debug-*` continuation on the same request id:
+The CLI hides the continuation dance behind `clpm repl-bridge debug`:
+
+```sh
+# default: print frames+restarts, abort cleanly, exit rc=3
+clpm repl-bridge debug '(error "boom")'
+
+# pick a restart immediately
+clpm repl-bridge debug '(restart-case (/ 1 0) (use-value (v) v))' \
+    --restart USE-VALUE --arg 0
+# → "=> 0", rc=0
+
+# evaluate a form in a stack frame, then abort
+clpm repl-bridge debug '(let ((x 7)) (error "x=~A" x))' \
+    --frame 0 --frame-eval '(* x 2)'
+
+# CONTINUE on a cerror
+clpm repl-bridge debug '(cerror "skip" "oops")' --restart CONTINUE
+```
+
+`--break-on K` binds `*break-on-signals*` for the eval. `--package P`
+chooses the reader package. The session is always closed when the
+command exits — no held debugger state between invocations.
+
+Raw JSON-RPC form (only needed when scripting outside the CLI):
 
 ```jsonc
-// 1) issue the eval; client must stream events
+// 1) issue the eval; client must stream events on a held connection
 {"id":7,"method":"eval","params":{"form":"(/ 1 0)","debug":true}}
 
 // 2) daemon emits:
@@ -130,15 +199,25 @@ invokes a named restart on a matching condition.
 
 ## Recipe: inspector
 
-`inspect FORM` returns a session id and the focus's parts. Continue with
-`inspect-into`, `inspect-pop`, `inspect-eval` (binds `*` to the current focus),
-`inspect-mutate`, `inspect-page` (100 per page), and `inspect-close`.
+CLI form (single-shot, session opened/closed automatically):
+
+```sh
+clpm repl-bridge inspect '(list :a :b :c)'             # show parts at depth 1
+clpm repl-bridge inspect '(list 100 200 300)' --path 1 # walk parts[1], depth 2
+clpm repl-bridge inspect '(make-hash-table)' --keep    # leave session open
+```
+
+Raw JSON-RPC for held sessions (chained traversal, mutation, eval-in-focus):
 
 ```jsonc
 {"id":10,"method":"inspect","params":{"form":"(make-hash-table)"}}
 // → {result:{session:1,parts:[…],total:0,…}}
 {"id":11,"method":"inspect-eval","params":{"session":1,"form":"(hash-table-count *)"}}
 ```
+
+Continuation methods: `inspect-into`, `inspect-pop`, `inspect-eval`
+(binds `*` to the current focus), `inspect-mutate`, `inspect-page`
+(100 per page), and `inspect-close`.
 
 ## Recipe: source navigation and compile diagnostics
 

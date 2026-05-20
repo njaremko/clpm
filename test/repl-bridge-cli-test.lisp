@@ -73,30 +73,40 @@
           (assert-true (probe-file sock) "daemon socket did not appear: ~A" sock)
           (format t "  daemon up~%")
 
-          (format t "Test: clpm repl-bridge eval~%")
+          (format t "Test: clpm repl-bridge eval (default human output)~%")
           (multiple-value-bind (rc stdout stderr)
               (run-cli-captured '("repl-bridge" "eval" "(+ 1 2)" "--no-autostart"))
             (declare (ignore stderr))
             (assert-eql 0 rc)
-            ;; JSON one-line with value:"3"
-            (assert-contains stdout "\"value\":\"3\"")
-            (assert-contains stdout "\"result\""))
+            ;; Default rendering is "=> 3"; no raw JSON.
+            (assert-contains stdout "=> 3"))
           (format t "  eval OK~%")
 
-          (format t "Test: state persists across eval calls~%")
-          (run-cli-captured '("repl-bridge" "eval" "(defparameter *cli-x* 41)" "--no-autostart"))
+          (format t "Test: eval --json prints raw JSON~%")
           (multiple-value-bind (rc stdout)
-              (run-cli-captured '("repl-bridge" "eval" "*cli-x*" "--no-autostart"))
+              (run-cli-captured '("repl-bridge" "eval" "(+ 1 2)"
+                                  "--no-autostart" "--json"))
+            (assert-eql 0 rc)
+            (assert-contains stdout "\"value\":\"3\"")
+            (assert-contains stdout "\"result\""))
+          (format t "  eval --json OK~%")
+
+          (format t "Test: state persists across eval calls~%")
+          (run-cli-captured '("repl-bridge" "eval"
+                              "(defparameter *cli-x* 41)" "--no-autostart"))
+          (multiple-value-bind (rc stdout)
+              (run-cli-captured '("repl-bridge" "eval" "*cli-x*"
+                                  "--no-autostart"))
             (declare (ignore rc))
-            (assert-contains stdout "\"value\":\"41\""))
+            (assert-contains stdout "=> 41"))
           (format t "  state persistence OK~%")
 
           (format t "Test: ping returns daemon info~%")
           (multiple-value-bind (rc stdout)
               (run-cli-captured '("repl-bridge" "ping"))
             (assert-eql 0 rc)
-            (assert-contains stdout "\"pid\":")
-            (assert-contains stdout "\"uptime_ms\":"))
+            (assert-contains stdout "pid:")
+            (assert-contains stdout "uptime:"))
           (format t "  ping OK~%")
 
           (format t "Test: status reports running~%")
