@@ -25,6 +25,14 @@
   "Hard cap on request-line length. Excess bytes are read-and-discarded and
 the daemon replies `protocol-error'.")
 
+(defparameter +slow-eval-threshold-ms+ 1000
+  "Evals taking longer than this in real time get a `slow-eval' entry
+in the event log so a future operator can find pathological forms.")
+
+(defparameter +heartbeat-interval-seconds+ 30
+  "How often a long-running streaming eval emits an `event:heartbeat'
+frame.  Lets a client tell `still running' from `daemon dead'.")
+
 (defparameter +max-output-bytes+ (* 1024 1024)
   "Hard cap on captured stdout+stderr per eval. Excess is silently dropped
 and the response carries `code: output-truncated'.")
@@ -444,6 +452,14 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
    (concurrent-counter :initform 0 :accessor server-concurrent-counter)
    (started-at :initform (get-universal-time) :reader server-started-at)
    (eval-count :initform 0 :accessor server-eval-count)
+   ;; method-name -> (cons total-count error-count). Used by `ping' to
+   ;; surface a per-method histogram, and by request logging.
+   (method-counts :initform (make-hash-table :test 'equal)
+                  :reader server-method-counts)
+   (method-counts-mutex :initform (clpm.repl-bridge.compat:make-mutex
+                                   :name "clpm.repl-bridge.counts")
+                        :reader server-method-counts-mutex)
+   (recent-error-count :initform 0 :accessor server-recent-error-count)
    (inspectors :initform (make-hash-table :test 'equal)
                :reader server-inspectors)
    (inspectors-mutex :initform (clpm.repl-bridge.compat:make-mutex
@@ -550,6 +566,14 @@ reach it.")
   (:documentation "Signaled inside the worker thread when the client closes
 its connection or sends an explicit `interrupt' request."))
 
+(define-condition resource-exhausted ()
+  ((kind :initarg :kind :reader resource-exhausted-kind)
+   (limit :initarg :limit :reader resource-exhausted-limit)
+   (observed :initarg :observed :reader resource-exhausted-observed))
+  (:documentation "Signaled inside the worker by the cap-watcher timer
+when an eval crosses its `max-real-ms' or `max-cons-bytes' budget.
+KIND is one of :real-ms or :cons-bytes."))
+
 ;;; --------------------------------------------------------------------------
 ;;; Worker thread
 ;;; --------------------------------------------------------------------------
@@ -563,7 +587,12 @@ session's package, history, or redefinition log.
 STATE transitions are advisory (lock-free): the worker thread writes,
 the connection threads read for `list-workers'. The default worker is
 created on first eval and never removed; concurrent workers (one-shot)
-are destroyed automatically when their eval completes."
+are destroyed automatically when their eval completes.
+
+RESTARTED? is set by `%ensure-worker' when reviving a worker whose
+thread died unexpectedly. The next eval response surfaces this as a
+`worker_restarted: true' field so clients can see that history,
+package, and redefinition state may have been lost."
   (name "default" :type string)
   mailbox
   thread
@@ -574,7 +603,8 @@ are destroyed automatically when their eval completes."
   (last-active-at (get-universal-time) :type integer)
   (redefinitions (make-hash-table :test 'equal))
   current-job
-  (concurrent? nil :type boolean))
+  (concurrent? nil :type boolean)
+  (restarted? nil :type boolean))
 
 (defvar *current-worker* nil
   "Worker struct of the currently-executing eval, bound by `%worker-loop'.
@@ -1317,14 +1347,24 @@ sessions."
                    (handler-specs (%parse-handler-specs
                                    (getf options :handlers)
                                    package))
-                   (break-on-type (and (getf options :break-on)
-                                       (handler-case
-                                           (read-from-string
-                                            (getf options :break-on))
-                                         (error () nil)))))
+                   (break-on-spec (getf options :break-on))
+                   (break-on-none? (eq break-on-spec :none))
+                   (break-on-type
+                     (cond
+                       (break-on-none? nil)
+                       ((stringp break-on-spec)
+                        (handler-case (read-from-string break-on-spec)
+                          (error () nil)))
+                       (t nil))))
               (flet ((on-condition (c)
                        (cond
                          ((typep c 'user-interrupt) nil)
+                         ;; Resource-exhausted is fielded by the outer
+                         ;; handler-case which converts it into the
+                         ;; "resource-exhausted" eval-result code. Keep
+                         ;; it out of the declarative / record-signals
+                         ;; paths.
+                         ((typep c 'resource-exhausted) nil)
                          ;; --handlers: non-interactive recovery. The
                          ;; first matching spec invokes its restart and
                          ;; transfers control; non-matching specs fall
@@ -1344,7 +1384,10 @@ sessions."
                           (push (%condition-json c) signaled)))))
                 (handler-bind ((condition #'on-condition))
                   (let ((*break-on-signals*
-                          (or break-on-type *break-on-signals*))
+                          (cond
+                            (break-on-none? nil)
+                            (break-on-type)
+                            (t *break-on-signals*)))
                         ;; --debug also intercepts `(break ...)`, which
                         ;; calls invoke-debugger directly without going
                         ;; through `signal'. ANSI says break nulls
@@ -1359,9 +1402,32 @@ sessions."
                               (lambda (c hook)
                                 (declare (ignore hook))
                                 (%enter-debugger c job))
-                              sb-ext:*invoke-debugger-hook*)))
-                    (setf returned-values
-                          (multiple-value-list (eval form)))))))
+                              sb-ext:*invoke-debugger-hook*))
+                        #+sbcl
+                        (heartbeat-timer
+                         (and stream? ctx
+                              (%start-heartbeat-timer ctx start)))
+                        #+sbcl
+                        (cap-timer
+                         (%start-cap-timer
+                          sb-thread:*current-thread*
+                          options
+                          start
+                          (sb-ext:get-bytes-consed))))
+                    (declare (ignorable
+                              #+sbcl heartbeat-timer
+                              #+sbcl cap-timer))
+                    (unwind-protect
+                         (setf returned-values
+                               (multiple-value-list (eval form)))
+                      #+sbcl
+                      (when heartbeat-timer
+                        (ignore-errors
+                         (sb-ext:unschedule-timer heartbeat-timer)))
+                      #+sbcl
+                      (when cap-timer
+                        (ignore-errors
+                         (sb-ext:unschedule-timer cap-timer))))))))
             (setf package *package*)
             ;; History is updated *only* when no override was specified --
             ;; the override is per-call scoped. Persistent package state
@@ -1375,9 +1441,91 @@ sessions."
         (user-interrupt ()
           (setf code "interrupted")
           (return-from %eval-one (finish)))
+        (resource-exhausted (c)
+          (setf code "resource-exhausted")
+          (push (%json-object
+                 "kind" (string-downcase
+                         (symbol-name (resource-exhausted-kind c)))
+                 "limit" (resource-exhausted-limit c)
+                 "observed" (resource-exhausted-observed c))
+                conditions)
+          (return-from %eval-one (finish)))
         (error (c)
           (return-from %eval-one (finish :err-condition c))))
       (finish))))
+
+#+sbcl
+(defun %start-cap-timer (worker-thread options start-real-time start-cons-bytes)
+  "If OPTIONS sets `:max-real-ms' or `:max-cons-bytes', schedule a
+periodic timer that interrupts WORKER-THREAD with a `resource-exhausted'
+signal once the cap is crossed. Returns the timer (or NIL when no cap
+was requested). SBCL-only.
+
+Polling interval is 250 ms -- granular enough to catch runaway loops
+while keeping the timer fired count small."
+  (let ((max-ms (getf options :max-real-ms))
+        (max-bytes (getf options :max-cons-bytes)))
+    (when (or (and max-ms (plusp max-ms))
+              (and max-bytes (plusp max-bytes)))
+      (let ((timer
+              (sb-ext:make-timer
+               (lambda ()
+                 (handler-case
+                     (let* ((elapsed (round
+                                      (* 1000.0
+                                         (/ (- (get-internal-real-time)
+                                               start-real-time)
+                                            internal-time-units-per-second))))
+                            (consumed (and max-bytes
+                                           (- (sb-ext:get-bytes-consed)
+                                              start-cons-bytes)))
+                            (kind (cond
+                                    ((and max-ms (>= elapsed max-ms))
+                                     :real-ms)
+                                    ((and consumed (>= consumed max-bytes))
+                                     :cons-bytes))))
+                       (when kind
+                         (sb-thread:interrupt-thread
+                          worker-thread
+                          (lambda ()
+                            (signal 'resource-exhausted
+                                    :kind kind
+                                    :limit (if (eq kind :real-ms)
+                                               max-ms max-bytes)
+                                    :observed (if (eq kind :real-ms)
+                                                  elapsed consumed))))))
+                   (error () nil)))
+               :name "clpm.repl-bridge.cap"
+               :thread t)))
+        (sb-ext:schedule-timer timer 1/4 :repeat-interval 1/4)
+        timer))))
+
+#+sbcl
+(defun %start-heartbeat-timer (ctx start-real-time)
+  "Schedule a periodic timer that emits `event:heartbeat' to CTX every
+`+heartbeat-interval-seconds+'. Returns the timer so the caller can
+`unschedule-timer' it after the eval completes. SBCL-only."
+  (let ((timer (sb-ext:make-timer
+                (lambda ()
+                  (let ((elapsed (round
+                                  (* 1000.0
+                                     (/ (- (get-internal-real-time)
+                                           start-real-time)
+                                        internal-time-units-per-second)))))
+                    (handler-case
+                        (%emit-event ctx "heartbeat"
+                                     "elapsed_ms" elapsed
+                                     "bytes_consed"
+                                     (sb-ext:get-bytes-consed)
+                                     "gc_run_time"
+                                     sb-ext:*gc-real-time*)
+                      (error () nil))))
+                :name "clpm.repl-bridge.heartbeat"
+                :thread t)))
+    (sb-ext:schedule-timer timer
+                           +heartbeat-interval-seconds+
+                           :repeat-interval +heartbeat-interval-seconds+)
+    timer))
 
 (defun %worker-loop (worker)
   "Pull jobs from WORKER's mailbox, eval each, post the result to the job's
@@ -1435,7 +1583,12 @@ SERVER-WORKERS-MUTEX."
   "Return the worker named NAME, spawning it if absent or dead. With
 CONCURRENT?, NAME is a freshly-minted one-shot identifier; the caller
 should pass an existing concurrent name back as NAME to address it
-again."
+again.
+
+When NAME existed but its thread is dead (unexpected crash, not a
+clean `:stop'), the replacement worker is marked RESTARTED? so the
+next eval response can surface `worker_restarted: true' to the
+client. An event-log entry records the death."
   (clpm.repl-bridge.compat:with-mutex ((server-workers-mutex server))
     (let ((existing (gethash name (server-workers server))))
       (cond
@@ -1444,7 +1597,11 @@ again."
          existing)
         (existing
          (remhash name (server-workers server))
-         (%make-worker server name :concurrent? concurrent?))
+         (%log-event (server-event-log server) "worker-died"
+                     "worker" name)
+         (let ((fresh (%make-worker server name :concurrent? concurrent?)))
+           (setf (worker-restarted? fresh) t)
+           fresh))
         (t
          (%make-worker server name :concurrent? concurrent?))))))
 
@@ -1570,13 +1727,28 @@ NIL means the handler has already emitted its terminal frame."
 ;;; ----------------------------------------------------------------------------
 ;;; Registered methods
 
+(defun %method-counts-json (server)
+  "Snapshot of `{method: {total, errors}}' for ping's observability
+payload."
+  (clpm.repl-bridge.compat:with-mutex ((server-method-counts-mutex server))
+    (let* ((tbl (server-method-counts server))
+           (pairs (loop for m being the hash-keys of tbl using (hash-value v)
+                        collect (cons m (list :object
+                                              (list (cons "total" (car v))
+                                                    (cons "errors" (cdr v))))))))
+      (list :object pairs))))
+
 (%register-method
  (make-method-spec
   :name "ping"
   :summary "Liveness probe; returns the daemon pid, uptime, and lisp version."
   :doc "Returns a small JSON object describing the daemon. No parameters.
 Useful for confirming the connection works and for detecting daemon restarts
-via the `pid' and `eval_count' fields."
+via the `pid' and `eval_count' fields.
+
+The response includes per-method counters (`method_counts': method name ->
+{total, errors}) and a `recent_error_count' running total since startup,
+so clients can spot a misbehaving RPC without scraping the event log."
   :params nil
   :handler
   (lambda (server params id ctx)
@@ -1590,7 +1762,9 @@ via the `pid' and `eval_count' fields."
       "lisp" (format nil "~A ~A"
                      (lisp-implementation-type)
                      (lisp-implementation-version))
-      "eval_count" (server-eval-count server))))))
+      "eval_count" (server-eval-count server)
+      "method_counts" (%method-counts-json server)
+      "recent_error_count" (server-recent-error-count server))))))
 
 (%register-method
  (make-method-spec
@@ -1643,10 +1817,26 @@ worker is changed."
  (make-method-spec
   :name "eval"
   :summary "Evaluate a Lisp form and return its values, output, and condition signals."
-  :doc "Required: `form'. Optional: `package' (per-call package override,
-non-persistent), and the v2 toggles `stream' / `debug' / `query_interactive'
-/ `record_signals' / `print_length' / `print_level' / `print_circle' /
-`print_radix' / `print_base' / `print_pretty'.
+  :doc "Required: `form'. Optional toggles:
+
+  `package'            -- per-call reader package override, non-persistent.
+  `stream'             -- emit incremental `event:stdout' / `event:stderr'
+                          frames; long evals also get `event:heartbeat'
+                          every 30 s with bytes-consed + gc time.
+  `query_interactive'  -- bind *standard-input* to a stream that emits
+                          `event:query'; client replies via `query-response'.
+  `debug'              -- pause on errors in the interactive debugger.
+  `record_signals'     -- collect non-error signaled conditions.
+  `worker' / `concurrent' -- route to a named or one-shot worker.
+  `handlers'           -- declarative restart auto-invocation.
+  `break_on'           -- bind *break-on-signals*; \"none\" / false / nil
+                          disables the global default for this eval.
+  `max_real_ms' / `max_cons_bytes'
+                       -- per-eval resource caps; crossing one aborts the
+                          eval with code `resource-exhausted'.
+  `print_length' / `print_level' / `print_circle' / `print_radix' /
+  `print_base' / `print_pretty' -- printer bindings for the values'
+                                   prin1 output.
 
 The response includes `values' (a JSON array of prin1'd values),
 `value' (the primary value, retained for v1 clients), `output' /
@@ -1656,13 +1846,9 @@ ERROR that unwound the form), `signaled_conditions' (non-errors, when
 *, **, ***, +, ++, +++, /, //, ///), and -- when a top-level form
 redefines something tracked -- `redefined'.
 
-With `stream: true', the daemon emits `event:stdout' / `event:stderr'
-frames as the form runs, in addition to the full `output' string in
-the terminal frame.
-
-With `query_interactive: true', any read from *standard-input* /
-*query-io* emits `event:query'; the client replies with a
-`query-response' message on the same id."
+After an unexpected worker death, the next eval's response carries
+`warning: \"worker-restarted\"' so the client knows in-image state was
+lost."
   :params (list (list :name "form" :type "string" :required t
                       :description "Lisp source for exactly one form.")
                 (list :name "package" :type "string" :required nil
@@ -1677,6 +1863,12 @@ With `query_interactive: true', any read from *standard-input* /
                       :description "Run on a named worker; spawned if absent.")
                 (list :name "concurrent" :type "boolean" :required nil
                       :description "Run on a fresh disposable worker that's destroyed after the eval.")
+                (list :name "break_on" :type "string" :required nil
+                      :description "Type name to bind *break-on-signals* to; \"none\" / false / nil disables.")
+                (list :name "max_real_ms" :type "integer" :required nil
+                      :description "Abort with code resource-exhausted if real time exceeds this.")
+                (list :name "max_cons_bytes" :type "integer" :required nil
+                      :description "Abort with code resource-exhausted if bytes-consed exceeds this.")
                 (list :name "print_length" :type "integer" :required nil
                       :description "Bind *print-length* during prin1 of values.")
                 (list :name "print_level" :type "integer" :required nil
@@ -3906,12 +4098,28 @@ keeps the worker fast-path identical to v1."
       (maybe-bool "record_signals" :record-signals)
       (maybe-bool "concurrent" :concurrent)
       (maybe-string "worker" :worker)
-      (maybe-string "break_on" :break-on)
+      ;; #211: `break_on' accepts a type name ("error"), the special
+      ;; string "none" (or "nil"), or boolean false -- the latter two
+      ;; explicitly disable *break-on-signals* for the eval, overriding
+      ;; any global default the daemon was started with.
+      (let ((b (%json-getf params "break_on" 'unset)))
+        (cond
+          ((eq b 'unset))
+          ((or (eq b :false) (eq b nil))
+           (setf options (list* :break-on :none options)))
+          ((and (stringp b)
+                (member (string-downcase b) '("none" "nil" "false")
+                        :test #'string=))
+           (setf options (list* :break-on :none options)))
+          ((and (stringp b) (plusp (length b)))
+           (setf options (list* :break-on b options)))))
       ;; "handlers" is an array of {type, restart, args} objects. We pass
       ;; the raw array form through; the eval path translates it.
       (let ((h (%json-getf params "handlers")))
         (when (and (consp h) (eq (car h) :array))
           (setf options (list* :handlers (cadr h) options))))
+      (maybe-int "max_real_ms" :max-real-ms)
+      (maybe-int "max_cons_bytes" :max-cons-bytes)
       (maybe-int "print_length" :print-length)
       (maybe-int "print_level"  :print-level)
       (maybe-bool "print_circle" :print-circle)
@@ -3980,26 +4188,68 @@ as a prin1 string, or NIL for `(values)')."
          (when ctx
            (setf (request-context-options ctx) options))
          (setf (worker-last-eval-id worker) id)
-         ;; Register *before* posting to the worker so a continuation
-         ;; message racing with `event:query' still finds the job.
-         (when (and ctx (request-context-cstate ctx))
-           (%register-in-flight (request-context-cstate ctx) id job))
-         (incf (server-eval-count server))
-         (clpm.repl-bridge.compat:send-message mailbox job)
-         (let ((result (clpm.repl-bridge.compat:receive-message reply-box)))
-           (when (worker-concurrent? worker)
-             ;; One-shot: teardown after the eval completes (success or
-             ;; failure). Best-effort; if the worker is wedged the
-             ;; supervisor can still see it via `list-workers'.
-             (clpm.repl-bridge.compat:send-message mailbox :stop)
-             (%remove-worker server (worker-name worker)))
-           (cond
-             ((null (eval-result-code result))
-              (let ((payload (%eval-success-payload result)))
-                (if (eval-result-truncated? result)
-                    (%json-object "id" id "result" payload
-                                  "warning" "output-truncated")
-                    (%success-response id payload))))
+         (let ((restarted? (worker-restarted? worker)))
+           ;; Consume the restart flag: the warning ships only with the
+           ;; first eval after a respawn, not every subsequent one.
+           (when restarted? (setf (worker-restarted? worker) nil))
+           ;; Register *before* posting to the worker so a continuation
+           ;; message racing with `event:query' still finds the job.
+           (when (and ctx (request-context-cstate ctx))
+             (%register-in-flight (request-context-cstate ctx) id job))
+           (incf (server-eval-count server))
+           (clpm.repl-bridge.compat:send-message mailbox job)
+           (let ((result
+                   ;; #212: poll the reply mailbox so we can notice a
+                   ;; worker thread that died mid-eval (and never gets
+                   ;; to send us a result).
+                   (loop
+                     (let ((msg (clpm.repl-bridge.compat:receive-message-no-hang
+                                 reply-box)))
+                       (when (cdr msg) (return (car msg))))
+                     (unless (clpm.repl-bridge.compat:thread-alive-p
+                              (worker-thread worker))
+                       (%log-event (server-event-log server) "worker-died"
+                                   "worker" (worker-name worker)
+                                   "id" id)
+                       (setf (worker-state worker) :dead
+                             (worker-current-job worker) nil)
+                       (return (make-eval-result
+                                :code "worker-died"
+                                :values nil
+                                :output ""
+                                :error-output ""
+                                :package (package-name
+                                          (worker-package worker))
+                                :elapsed-ms 0
+                                :conditions
+                                (list (%json-object
+                                       "type" "WORKER-DIED"
+                                       "message"
+                                       (format nil
+                                               "worker '~A' died mid-eval"
+                                               (worker-name worker))))
+                                :signaled-conditions nil
+                                :truncated? nil
+                                :redefined nil
+                                :history nil)))
+                     (sleep 0.1))))
+             (when (worker-concurrent? worker)
+               ;; One-shot: teardown after the eval completes (success or
+               ;; failure). Best-effort; if the worker is wedged the
+               ;; supervisor can still see it via `list-workers'.
+               (clpm.repl-bridge.compat:send-message mailbox :stop)
+               (%remove-worker server (worker-name worker)))
+             (cond
+               ((null (eval-result-code result))
+                (let ((payload (%eval-success-payload result)))
+                  (cond
+                    ((eval-result-truncated? result)
+                     (%json-object "id" id "result" payload
+                                   "warning" "output-truncated"))
+                    (restarted?
+                     (%json-object "id" id "result" payload
+                                   "warning" "worker-restarted"))
+                    (t (%success-response id payload)))))
              (t
               (let ((details
                       (list :object
@@ -4022,7 +4272,7 @@ as a prin1 string, or NIL for `(values)')."
                                                      (cadr c0)
                                                      :test #'string=))))
                                      (eval-result-code result))
-                                 :details details))))))))))
+                                 :details details)))))))))))
 
 (defun %dispatch-describe (server params id)
   (let* ((sym-name (%json-getf params "symbol"))
@@ -4342,6 +4592,17 @@ blocked on its query-mailbox."
          (%log-event (server-event-log server) "query-response"
                      "id" id))))))
 
+(defun %bump-method-count (server method err?)
+  "Increment SERVER's per-method counter (total, errored) for METHOD."
+  (clpm.repl-bridge.compat:with-mutex ((server-method-counts-mutex server))
+    (let* ((tbl (server-method-counts server))
+           (cell (or (gethash method tbl)
+                     (setf (gethash method tbl) (cons 0 0)))))
+      (incf (car cell))
+      (when err?
+        (incf (cdr cell))
+        (incf (server-recent-error-count server))))))
+
 (defun %dispatch-and-finalize (server cstate id method params)
   "Run %dispatch-method, log the response, and emit the terminal frame.
 Used by both the inline path and the threaded path."
@@ -4374,12 +4635,24 @@ Used by both the inline path and the threaded path."
                    (eq (car response) :object)
                    (cdr (assoc "error" (cadr response)
                                :test #'string=)))))
+    (%bump-method-count server method (not (null err)))
     (%log-event (server-event-log server) "response"
                 "id" id "method" method
                 "elapsed_ms" elapsed
                 "error" (and err
                              (cdr (assoc "code" (cadr err)
                                          :test #'string=))))
+    ;; Slowlog (#214): any eval over the threshold gets a dedicated
+    ;; log entry so a future operator can find pathological forms.
+    (when (and (string= method "eval")
+               (>= elapsed +slow-eval-threshold-ms+))
+      (let* ((form (and params (%json-getf params "form")))
+             (preview (and (stringp form)
+                           (if (> (length form) 200)
+                               (concatenate 'string (subseq form 0 200) "...")
+                               form))))
+        (%log-event (server-event-log server) "slow-eval"
+                    "id" id "elapsed_ms" elapsed "form" preview)))
     ;; Dispatchers that pump their own events return NIL after emitting
     ;; their terminal frame directly. Otherwise we emit it.
     (when response
