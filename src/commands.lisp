@@ -3125,12 +3125,15 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
         ((null entries) (format t "(no active watchers)~%"))
         (t
          (dolist (e entries)
-           (let ((o (cadr e)))
-             (format t "id=~A dir=~A glob=~A active=~A~%"
+           (let* ((o (cadr e))
+                  (auto-revert (%bridge-field o "auto_revert"))
+                  (alive (%bridge-field o "alive")))
+             (format t "id=~A dir=~A glob=~A alive=~A~@[ auto-revert=t~]~%"
                      (%bridge-field o "id")
                      (%bridge-field o "dir")
                      (or (%bridge-field o "glob") "*")
-                     (%bridge-field o "active")))))))))
+                     (if alive "yes" "no")
+                     auto-revert))))))))
 
 (defun %bridge-cmd-unwatch (args)
   (let ((id (and (first args)
@@ -3144,12 +3147,39 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
       (declare (ignore obj))
       (format t "unwatched ~A~%" id))))
 
+(defun %bridge-render-watch-event (event)
+  "Render one watch-event JSON object as a single human-readable line.
+Falls back to dumping the raw event when the shape is unrecognized."
+  (let* ((eo (%bridge-unwrap event))
+         (kind (%bridge-field eo "event"))
+         (file (%bridge-field eo "file"))
+         (diags (%bridge-array-items (%bridge-field eo "diagnostics"))))
+    (cond
+      ((string= kind "watch-acknowledged")
+       (format t "watching ~A (glob=~A~@[ auto-revert~])~%"
+               (%bridge-field eo "dir")
+               (or (%bridge-field eo "glob") "*")
+               (%bridge-field eo "auto_revert")))
+      ((string= kind "watch-started"))   ; redundant with -acknowledged
+      ((string= kind "file-reloaded")
+       (format t "reloaded ~A~@[ (~A diag~:P)~]~%"
+               file (and diags (length diags))))
+      ((string= kind "reload-failed")
+       (format *error-output* "FAILED to reload ~A: ~A~%"
+               file (or (%bridge-field eo "message") "")))
+      ((string= kind "file-removed")
+       (format t "removed ~A~%" file))
+      ((string= kind "revert-applied")
+       (format t "reverted definitions from ~A~%" file))
+      (t (%bridge-emit-json event)))))
+
 (defun %bridge-cmd-watch (args)
   "`clpm repl-bridge watch DIR [--glob G] [--auto-revert]'.
 
-Streams watch events to stdout (one JSON line per event) until SIGINT
-or the daemon closes the stream. The event payload format is identical
-to the JSON-RPC `event:watch' frame's `result' object."
+Streams watch events to stdout until SIGINT or the daemon closes the
+stream. Default rendering is human-readable, one line per event;
+`--json' emits the raw event frames instead (one JSON object per
+line) for programmatic consumption."
   (multiple-value-bind (opts pos)
       (%bridge-parse-flags args '(("glob" . :string)
                                    ("auto-revert" . :flag)))
@@ -3169,7 +3199,11 @@ to the JSON-RPC `event:watch' frame's `result' object."
                                     (cons "auto_revert"
                                           (and (getf opts :auto-revert) t))))
                      :on-event (lambda (event)
-                                 (%bridge-emit-json event)
+                                 (cond
+                                   (*bridge-cli-json*
+                                    (%bridge-emit-json event))
+                                   (t
+                                    (%bridge-render-watch-event event)))
                                  (force-output))
                      :connect-timeout 5)))
           (cond
@@ -3433,9 +3467,31 @@ Always closes the debug session, no held state."
                    (t (push a out))))
     (values j (nreverse out))))
 
+(defparameter +bridge-cli-only-help+
+  ;; CLI-only verbs (no underlying daemon method) and their one-liners.
+  ;; Anything not listed here is delegated to `methods <name>'.
+  '(("serve"   . "Run the daemon in this directory. Use --detach to background; --no-load to skip preload.")
+    ("status"  . "Show whether the project's daemon is up and its pid/uptime.")
+    ("stop"    . "Send shutdown, wait for the socket to disappear, clean up.")
+    ("ping"    . "Liveness check with per-method counters.")
+    ("debug"   . "Run FORM with debug:true and either: print frames + restarts (rc=3), invoke a restart with --restart NAME [--arg V]..., or evaluate inside a frame with --frame N --frame-eval FORM.")
+    ("inspect" . "Open an inspector on FORM, walk --path 0,1,2 if given, print the view, and close the session (unless --keep).")
+    ("diff"    . "Alias for list-redefinitions. Shows top-level forms redefined since the daemon started (or since the last `reset').")
+    ("help"    . "Show the cheat sheet. Pass a SUBCOMMAND to drill into one.")))
+
 (defun %bridge-cmd-help (args)
-  "`clpm repl-bridge help [SUBCOMMAND]'."
-  (declare (ignore args))
+  "`clpm repl-bridge help [SUBCOMMAND]'.
+
+Without an arg, prints the cheat sheet. With an arg, prints a long-form
+description -- delegated to `methods NAME' for daemon-backed verbs and
+served from a small CLI-only table for the rest."
+  (let ((sub (first args)))
+    (when sub
+      ;; CLI-only first; fall through to `methods' for anything else.
+      (let ((cell (assoc sub +bridge-cli-only-help+ :test #'string=)))
+        (cond
+          (cell (format t "~A -- ~A~%" sub (cdr cell)) (return-from %bridge-cmd-help 0))
+          (t (return-from %bridge-cmd-help (%bridge-methods (list sub)))))))
   (format t "clpm repl-bridge -- persistent Lisp image for LLM-driven dev~%~%")
   (format t "lifecycle:~%")
   (format t "  serve [--detach] [--no-load]   Run the daemon in this directory.~%")
@@ -3473,7 +3529,7 @@ Always closes the debug session, no held state."
   (format t "  methods [METHOD]                List RPCs (or detail one).~%")
   (format t "  diff                            Show top-level redefinitions seen.~%~%")
   (format t "global flags: --json (raw JSON line(s)), -h/--help~%")
-  0)
+  0))
 
 (defun cmd-repl-bridge (&rest args)
   "Dispatcher for `clpm repl-bridge <subcommand>'.
