@@ -345,6 +345,7 @@
            #:make-mailbox
            #:send-message
            #:receive-message
+           #:receive-message-no-hang
            #:getpid
            #:list-backtrace))
 

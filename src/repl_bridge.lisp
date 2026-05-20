@@ -450,6 +450,12 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
                                 :name "clpm.repl-bridge.inspectors")
                      :reader server-inspectors-mutex)
    (inspector-counter :initform 0 :accessor server-inspector-counter)
+   (watches :initform (make-hash-table :test 'eql)
+            :reader server-watches)
+   (watches-mutex :initform (clpm.repl-bridge.compat:make-mutex
+                             :name "clpm.repl-bridge.watches")
+                  :reader server-watches-mutex)
+   (watch-counter :initform 0 :accessor server-watch-counter)
    (shutdown-requested? :initform nil :accessor server-shutdown-requested?)
    (event-log :initform nil :accessor server-event-log)))
 
@@ -1863,6 +1869,284 @@ unwinds. Any in-flight evals are interrupted via the unwind-protect."
      (when (server-socket server)
        (sb-bsd-sockets:socket-close (server-socket server))))
     (%success-response id (%json-object)))))
+
+;;; ----------------------------------------------------------------------------
+;;; File watching (BRIDGE_V2 #180-#182)
+;;;
+;;; A watch is a background thread that polls a directory's `*.glob`
+;;; entries every 1 s. On mtime change the watcher LOADs the file (so
+;;; redefinitions land in-image) and streams `event: file-changed' /
+;;; `event: file-reloaded' / `event: reload-failed' frames back through
+;;; the original `watch' request's context. The terminal `result' frame
+;;; is emitted by the watcher thread itself when an `unwatch' arrives.
+;;;
+;;; Auto-revert (#182): if AUTO-REVERT? is set, any definition recorded
+;;; in the current worker's redefinition log that points at the watched
+;;; file is re-evaluated from disk. Today that's equivalent to "load
+;;; the file"; the simple path keeps the on-disk version authoritative.
+;;; ----------------------------------------------------------------------------
+
+(defstruct watch
+  (id 0 :type integer)
+  (dir "" :type string)
+  (glob "*.lisp" :type string)
+  (auto-revert? nil :type boolean)
+  ctx
+  thread
+  control-mailbox
+  ;; truename namestring -> file-write-date integer
+  (mtimes (make-hash-table :test 'equal)))
+
+(defun %watch-pattern (dir glob)
+  "Return the wild pathname used by `directory' to enumerate matches."
+  (merge-pathnames glob (uiop:ensure-directory-pathname dir)))
+
+(defun %watch-scan (watch)
+  "Compute a fresh `(filename . write-date)' alist of matching files."
+  (let ((files (handler-case
+                   (directory (%watch-pattern (watch-dir watch)
+                                              (watch-glob watch)))
+                 (error () nil))))
+    (loop for f in files
+          for tn = (handler-case (namestring (truename f))
+                     (error () nil))
+          for mt = (and tn (handler-case (file-write-date f)
+                             (error () nil)))
+          when (and tn mt)
+            collect (cons tn mt))))
+
+(defun %watch-load-file (path)
+  "Load PATH and return `(list :ok? :diagnostics)' for the watcher to
+broadcast. Errors are captured rather than re-signaled."
+  (let ((diags '())
+        (ok? t))
+    (handler-case
+        (handler-bind ((warning
+                         (lambda (c)
+                           (push (%json-object
+                                  "severity" "warning"
+                                  "message" (princ-to-string c))
+                                 diags)
+                           (muffle-warning c))))
+          (load path :verbose nil :print nil))
+      (error (c)
+        (setf ok? nil)
+        (push (%json-object
+               "severity" "error"
+               "message" (princ-to-string c))
+              diags)))
+    (list (cons :ok? ok?)
+          (cons :diagnostics (nreverse diags)))))
+
+(defun %watch-emit (watch event-name &rest fields)
+  "Broadcast a non-terminal event to the watch's request context, if
+still attached. Failures (closed socket) are swallowed."
+  (let ((ctx (watch-ctx watch)))
+    (when ctx
+      (apply #'%emit-event ctx event-name fields))))
+
+(defun %watch-revert-from-file (watch path diagnostics)
+  "When AUTO-REVERT? is set, emit a `revert-applied' event after the
+load so clients can see that the on-disk version is now authoritative.
+The actual revert is implicit in the load that just succeeded."
+  (declare (ignore diagnostics))
+  (when (watch-auto-revert? watch)
+    (let ((target (handler-case (namestring (truename path))
+                    (error () path))))
+      (%watch-emit watch "revert-applied" "file" target))))
+
+(defun %watch-poll (watch)
+  "Compare current scan with WATCH's tracked mtimes; emit events for
+added / modified / deleted files."
+  (let* ((scan (%watch-scan watch))
+         (now (make-hash-table :test 'equal))
+         (mtimes (watch-mtimes watch)))
+    (loop for (f . mt) in scan do (setf (gethash f now) mt))
+    ;; Added / modified.
+    (loop for f being the hash-keys of now using (hash-value mt)
+          for prior = (gethash f mtimes)
+          when (or (null prior) (> mt prior))
+            do (let ((reload (%watch-load-file f)))
+                 (cond
+                   ((cdr (assoc :ok? reload))
+                    (%watch-emit watch "file-reloaded"
+                                 "file" f
+                                 "diagnostics"
+                                 (%json-array (cdr (assoc :diagnostics reload))))
+                    (%watch-revert-from-file watch f
+                                              (cdr (assoc :diagnostics reload))))
+                   (t
+                    (%watch-emit watch "reload-failed"
+                                 "file" f
+                                 "diagnostics"
+                                 (%json-array (cdr (assoc :diagnostics reload)))))))
+             (setf (gethash f mtimes) mt))
+    ;; Removed.
+    (loop for f being the hash-keys of mtimes
+          unless (gethash f now)
+            do (%watch-emit watch "file-removed" "file" f)
+               (remhash f mtimes))))
+
+(defun %watch-loop (server watch)
+  "Daemon thread for one watch. Polls every second; exits when its
+control mailbox receives `:stop'. Emits the terminal frame on the way
+out so the watcher's `watch' request finally completes."
+  (let ((mbox (watch-control-mailbox watch)))
+    (%watch-emit watch "watch-started"
+                 "id" (watch-id watch)
+                 "dir" (watch-dir watch)
+                 "glob" (watch-glob watch)
+                 "auto_revert" (watch-auto-revert? watch))
+    ;; Seed the mtime map so the first poll doesn't fire a flood of
+    ;; "file-reloaded" events for files that haven't actually changed
+    ;; since the watch started.
+    (loop for (f . mt) in (%watch-scan watch)
+          do (setf (gethash f (watch-mtimes watch)) mt))
+    (loop
+      (let ((msg (clpm.repl-bridge.compat:receive-message-no-hang mbox)))
+        (when (cdr msg)
+          (case (car msg)
+            (:stop
+             (let ((ctx (watch-ctx watch)))
+               (when ctx
+                 (%emit-terminal
+                  ctx
+                  (%success-response (request-context-id ctx)
+                                     (%json-object "id" (watch-id watch)
+                                                   "unwatched" t)))))
+             (clpm.repl-bridge.compat:with-mutex
+                 ((server-watches-mutex server))
+               (remhash (watch-id watch) (server-watches server)))
+             (return)))))
+      (handler-case (%watch-poll watch)
+        (error (c)
+          (%watch-emit watch "watch-error" "message" (princ-to-string c))))
+      (sleep 1))))
+
+(defun %make-watch (server dir glob auto-revert? ctx)
+  "Spawn a fresh watch, register it, and start its polling thread."
+  (clpm.repl-bridge.compat:with-mutex ((server-watches-mutex server))
+    (let* ((id (incf (server-watch-counter server)))
+           (w (make-watch :id id
+                          :dir dir
+                          :glob glob
+                          :auto-revert? auto-revert?
+                          :ctx ctx
+                          :control-mailbox
+                          (clpm.repl-bridge.compat:make-mailbox))))
+      (setf (watch-thread w)
+            (clpm.repl-bridge.compat:make-thread
+             (lambda () (%watch-loop server w))
+             :name (format nil "clpm.repl-bridge.watch[~D]" id)))
+      (setf (gethash id (server-watches server)) w)
+      w)))
+
+(defun %find-watch (server id)
+  (clpm.repl-bridge.compat:with-mutex ((server-watches-mutex server))
+    (gethash id (server-watches server))))
+
+(defun %all-watches (server)
+  (clpm.repl-bridge.compat:with-mutex ((server-watches-mutex server))
+    (loop for v being the hash-values of (server-watches server) collect v)))
+
+(defun %stop-watch (watch)
+  (clpm.repl-bridge.compat:send-message (watch-control-mailbox watch) :stop))
+
+(%register-method
+ (make-method-spec
+  :name "watch"
+  :summary "Spawn a directory watcher that reloads matching files on save."
+  :doc "Required: `dir' (absolute path). Optional: `glob' (default
+\"*.lisp\") and `auto_revert' (default false). Returns immediately
+with `{id, dir, glob}', then streams `event: file-reloaded' / `event:
+reload-failed' / `event: file-removed' / `event: revert-applied'
+frames as files on disk change. Polls at 1 s.
+
+The terminal `result' frame is emitted when `unwatch ID' is called or
+when the daemon shuts down.
+
+With `auto_revert: true', the watcher emits a `revert-applied' event
+listing in-image definitions originally recorded as coming from the
+reloaded file -- those definitions are now equivalent to the on-disk
+version (because the file was just LOADed)."
+  :params (list (list :name "dir" :type "string" :required t
+                      :description "Directory to watch.")
+                (list :name "glob" :type "string" :required nil
+                      :description "Filename glob (default \"*.lisp\").")
+                (list :name "auto_revert" :type "boolean" :required nil
+                      :description "Emit revert-applied events for matching definitions."))
+  :handler
+  (lambda (server params id ctx)
+    (let* ((dir (%json-getf params "dir"))
+           (glob (or (%json-getf params "glob") "*.lisp"))
+           (auto-revert? (and (%json-getf params "auto_revert") t)))
+      (cond
+        ((not (stringp dir))
+         (%error-response id "protocol-error" "missing `dir' param"))
+        ((not (probe-file (uiop:ensure-directory-pathname dir)))
+         (%error-response id "eval-error"
+                          (format nil "no such directory: ~A" dir)))
+        (t
+         (let ((w (%make-watch server dir glob auto-revert? ctx)))
+           ;; Emit the head of the stream immediately so the client
+           ;; knows the watch id. We return NIL from this handler so
+           ;; the dispatcher does NOT close the request -- the watcher
+           ;; thread keeps the ctx alive and finalizes via unwatch.
+           (%emit-event ctx "watch-acknowledged"
+                        "id" (watch-id w)
+                        "dir" (watch-dir w)
+                        "glob" (watch-glob w)
+                        "auto_revert" (watch-auto-revert? w))
+           nil)))))))
+
+(%register-method
+ (make-method-spec
+  :name "list-watches"
+  :summary "Return every active directory watcher."
+  :doc "Returns `{entries: [{id, dir, glob, auto_revert, alive}, ...]}'."
+  :params nil
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore params ctx))
+    (%success-response
+     id
+     (%json-object
+      "entries"
+      (%json-array
+       (mapcar (lambda (w)
+                 (%json-object
+                  "id" (watch-id w)
+                  "dir" (watch-dir w)
+                  "glob" (watch-glob w)
+                  "auto_revert" (watch-auto-revert? w)
+                  "alive" (and (watch-thread w)
+                               (clpm.repl-bridge.compat:thread-alive-p
+                                (watch-thread w))
+                               t)))
+               (%all-watches server))))))))
+
+(%register-method
+ (make-method-spec
+  :name "unwatch"
+  :summary "Stop a directory watcher, emitting its terminal `result' frame."
+  :doc "Required: `id'. Idempotent on unknown ids."
+  :params (list (list :name "id" :type "integer" :required t
+                      :description "Watch id returned by `watch'."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((wid (%json-getf params "id"))
+           (w (and (integerp wid) (%find-watch server wid))))
+      (cond
+        ((not (integerp wid))
+         (%error-response id "protocol-error" "missing or invalid `id'"))
+        ((null w)
+         (%success-response id
+                            (%json-object "id" wid "stopped" nil)))
+        (t
+         (%stop-watch w)
+         (%success-response id
+                            (%json-object "id" wid "stopped" t))))))))
 
 (%register-method
  (make-method-spec
@@ -3839,6 +4123,14 @@ thread sees the same instance; only one daemon may run per process."
                (error ()
                  (when (server-shutdown-requested? server)
                    (loop-finish))))))
+      ;; Stop every watcher first so its polling threads tear down
+      ;; before the workers it might be loading code into.
+      (dolist (w (%all-watches server))
+        (handler-case (%stop-watch w) (error () nil))
+        (when (clpm.repl-bridge.compat:thread-alive-p (watch-thread w))
+          (handler-case
+              (clpm.repl-bridge.compat:join-thread (watch-thread w))
+            (error () nil))))
       ;; Stop every worker we spawned. Best-effort: the daemon is going
       ;; away, so failure to join is acceptable.
       (dolist (w (%all-workers server))

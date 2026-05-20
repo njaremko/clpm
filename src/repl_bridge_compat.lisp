@@ -109,7 +109,14 @@ ignored otherwise."
   (defun send-message (mailbox value)
     (sb-concurrency:send-message mailbox value))
   (defun receive-message (mailbox)
-    (sb-concurrency:receive-message mailbox)))
+    (sb-concurrency:receive-message mailbox))
+  (defun receive-message-no-hang (mailbox)
+    "Return `(VALUE . T)' if a message was waiting; `(NIL . NIL)' if the
+mailbox was empty. Used by long-running pollers that need to check for
+a control signal without blocking."
+    (multiple-value-bind (val ok)
+        (sb-concurrency:receive-message-no-hang mailbox)
+      (cons val ok))))
 
 ;;; CCL: hand-rolled mailbox on a lock + condition variable.
 #+ccl
@@ -136,7 +143,16 @@ ignored otherwise."
                        (let ((v (first (mailbox-queue mailbox))))
                          (setf (mailbox-queue mailbox) (rest (mailbox-queue mailbox)))
                          v)))))
-        (when value (return value))))))
+        (when value (return value)))))
+
+  (defun receive-message-no-hang (mailbox)
+    (ccl:with-lock-grabbed ((mailbox-lock mailbox))
+      (cond
+        ((mailbox-queue mailbox)
+         (let ((v (first (mailbox-queue mailbox))))
+           (setf (mailbox-queue mailbox) (rest (mailbox-queue mailbox)))
+           (cons v t)))
+        (t (cons nil nil))))))
 
 ;;; ECL: mp:make-queue, but the API varies by ECL version. Use a hand-rolled
 ;;; one for stability.
@@ -164,7 +180,16 @@ ignored otherwise."
             (setf (mailbox-queue mailbox) (rest (mailbox-queue mailbox)))
             (return v)))
         (mp:condition-variable-wait (mailbox-cv mailbox)
-                                    (mailbox-lock mailbox))))))
+                                    (mailbox-lock mailbox)))))
+
+  (defun receive-message-no-hang (mailbox)
+    (mp:with-lock ((mailbox-lock mailbox))
+      (cond
+        ((mailbox-queue mailbox)
+         (let ((v (first (mailbox-queue mailbox))))
+           (setf (mailbox-queue mailbox) (rest (mailbox-queue mailbox)))
+           (cons v t)))
+        (t (cons nil nil))))))
 
 #-(or sbcl ccl ecl)
 (progn
@@ -175,7 +200,10 @@ ignored otherwise."
     (error "send-message not implemented"))
   (defun receive-message (mailbox)
     (declare (ignore mailbox))
-    (error "receive-message not implemented")))
+    (error "receive-message not implemented"))
+  (defun receive-message-no-hang (mailbox)
+    (declare (ignore mailbox))
+    (error "receive-message-no-hang not implemented")))
 
 ;;; --------------------------------------------------------------------------
 ;;; POSIX bits + backtrace
