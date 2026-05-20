@@ -1982,18 +1982,56 @@ own renderer so this fallback is rarely hit."
                                            :connect-timeout 5)))))
       (t resp))))
 
+(defun %bridge-split-on (char string)
+  "Split STRING on every occurrence of CHAR (a character). Empty fields
+between adjacent separators are preserved; an empty string returns NIL."
+  (when (and (stringp string) (plusp (length string)))
+    (loop with parts = '()
+          with start = 0
+          for i from 0 below (length string)
+          when (char= (char string i) char) do
+            (push (subseq string start i) parts)
+            (setf start (1+ i))
+          finally (push (subseq string start) parts)
+                  (return (nreverse parts)))))
+
+(defun %bridge-parse-handler-spec (spec)
+  "Parse one `--handler TYPE=RESTART[:ARG1[,ARG2[,...]]]' string into a
+JSON object `{type, restart, args}'. Returns NIL on a malformed spec."
+  (let ((eq-pos (position #\= spec)))
+    (unless (and eq-pos (plusp eq-pos))
+      (log-error "Bad --handler spec ~S (expected TYPE=RESTART[:ARGS])" spec)
+      (return-from %bridge-parse-handler-spec nil))
+    (let* ((type-text (subseq spec 0 eq-pos))
+           (rest-text (subseq spec (1+ eq-pos)))
+           (colon (position #\: rest-text))
+           (restart-text (if colon (subseq rest-text 0 colon) rest-text))
+           (args-text (when colon (subseq rest-text (1+ colon))))
+           (args (%bridge-split-on #\, args-text)))
+      (list :object
+            (list (cons "type" type-text)
+                  (cons "restart" restart-text)
+                  (cons "args" (list :array (or args '()))))))))
+
 (defun %bridge-eval (args)
   "Handle `clpm repl-bridge eval FORM [--package PKG] [--worker W]
-                                 [--no-autostart] [--json] [--pretty]'.
+                                 [--handler TYPE=RESTART[:ARG,...]]...
+                                 [--debug] [--no-autostart] [--json]'.
 
 Default rendering is human-readable; pass `--json' (or rely on the
 global `--json' flag) for the raw JSON line. `--pretty' is accepted as
-a no-op for backward compatibility."
+a no-op for backward compatibility.
+
+`--handler' may appear multiple times -- each spec is applied as a
+declarative restart for any condition matching TYPE. ARGS, if given,
+are read+evaluated daemon-side at recovery time."
   (let ((form nil)
         (package nil)
         (worker nil)
         (autostart t)
-        (json nil))
+        (json nil)
+        (debug nil)
+        (handlers '()))
     (loop while args do
       (let ((arg (pop args)))
         (cond
@@ -2007,15 +2045,24 @@ a no-op for backward compatibility."
            (unless (stringp worker)
              (log-error "Missing value for --worker")
              (return-from %bridge-eval 1)))
+          ((string= arg "--handler")
+           (let ((spec (pop args)))
+             (unless (stringp spec)
+               (log-error "Missing value for --handler")
+               (return-from %bridge-eval 1))
+             (let ((parsed (%bridge-parse-handler-spec spec)))
+               (unless parsed (return-from %bridge-eval 1))
+               (push parsed handlers))))
           ((string= arg "--no-autostart") (setf autostart nil))
           ((string= arg "--json") (setf json t))
+          ((string= arg "--debug") (setf debug t))
           ((string= arg "--pretty"))   ; no-op: human is the default
           ((null form) (setf form arg))
           (t
            (log-error "Unknown eval option: ~A" arg)
            (return-from %bridge-eval 1)))))
     (unless form
-      (log-error "Usage: clpm repl-bridge eval FORM [--package PKG] [--worker W] [--json]")
+      (log-error "Usage: clpm repl-bridge eval FORM [--package PKG] [--worker W] [--handler T=R[:A,...]]... [--debug] [--json]")
       (return-from %bridge-eval 1))
     (multiple-value-bind (project-root sock pid)
         (%bridge-resolve-project)
@@ -2023,7 +2070,11 @@ a no-op for backward compatibility."
       (let* ((params (%bridge-make-params
                       (list (cons "form" form)
                             (cons "package" package)
-                            (cons "worker" worker))))
+                            (cons "worker" worker)
+                            (cons "debug" (when debug t))
+                            (cons "handlers"
+                                  (when handlers
+                                    (list :array (nreverse handlers)))))))
              (resp (%bridge-send-or-autostart sock pid project-root
                                               "eval"
                                               :params params
@@ -2063,15 +2114,19 @@ a no-op for backward compatibility."
           (format t "  ~24A total=~A errors=~A~%"
                   name (or total 0) (or errors 0)))))))
 
-(defun %bridge-simple-method (method &key (renderer nil))
-  "Send a no-param request and print the response. Returns rc.
+(defun %bridge-simple-method (method &key (renderer nil) params)
+  "Send a request and print the response. Returns rc.
 
-RENDERER, when supplied, is called with the parsed result object to
-emit human output (overriding the default JSON dump)."
+PARAMS, when supplied, is a JSON object (`(:object ...)') forwarded as
+the request `params'. RENDERER, when supplied, is called with the
+parsed result object to emit human output (overriding the default JSON
+dump)."
   (multiple-value-bind (project-root sock)
       (%bridge-resolve-project)
     (unless project-root (return-from %bridge-simple-method 1))
-    (let ((resp (clpm.repl-bridge:send-request sock method :connect-timeout 1)))
+    (let ((resp (clpm.repl-bridge:send-request sock method
+                                               :params params
+                                               :connect-timeout 1)))
       (cond
         ((eq resp :no-daemon)
          (log-error "No daemon running")
@@ -3325,7 +3380,8 @@ Always closes the debug session, no held state."
   (format t "  stop                            Graceful shutdown.~%")
   (format t "  ping                            Liveness check + per-method counters.~%~%")
   (format t "evaluation:~%")
-  (format t "  eval FORM [--package P] [--pretty]    Evaluate FORM, print value+output.~%")
+  (format t "  eval FORM [--package P] [--worker W]     Evaluate FORM, print value+output.~%")
+  (format t "       [--handler T=R[:A,...]]... [--debug]  --handler: declarative restart.~%")
   (format t "  time-eval FORM [--package P]          Evaluate with wall/CPU timing.~%")
   (format t "  profile-eval FORM [--top N] [--mode]  Run sb-sprof, print flat report.~%")
   (format t "  gc [--full]                            Trigger a GC.~%")
@@ -3370,10 +3426,16 @@ See `clpm repl-bridge help' for the full surface."
         ((string= sub "serve") (%bridge-serve args))
         ((string= sub "eval") (%bridge-eval args))
         ((string= sub "interrupt")
-         (%bridge-simple-method "interrupt"
-                                :renderer (lambda (obj)
-                                            (declare (ignore obj))
-                                            (format t "interrupted~%"))))
+         (multiple-value-bind (opts pos)
+             (%bridge-parse-flags args '(("worker" . :string)))
+           (declare (ignore pos))
+           (%bridge-simple-method "interrupt"
+                                  :params (%bridge-make-params
+                                           (list (cons "worker"
+                                                       (getf opts :worker))))
+                                  :renderer (lambda (obj)
+                                              (declare (ignore obj))
+                                              (format t "interrupted~%")))))
         ((string= sub "ping")
          (%bridge-simple-method "ping" :renderer #'%bridge-render-ping))
         ((string= sub "status") (%bridge-status args))
@@ -3391,21 +3453,26 @@ See `clpm repl-bridge help' for the full surface."
                                                (list (cons "symbol" sym))))
                 (format t "~A~%" (or (%bridge-field obj "description") "")))))))
         ((string= sub "diff")
-         (%bridge-simple-method
-          "list-redefinitions"
-          :renderer (lambda (obj)
-                      (let ((items (%bridge-array-items
-                                     (%bridge-field obj "entries"))))
-                        (cond
-                          ((null items) (format t "(no redefinitions)~%"))
-                          (t
-                           (format t "~D redefinition~:P:~%" (length items))
-                           (dolist (e items)
-                             (let ((eo (cadr e)))
-                               (format t "  ~A ~A:~A~%"
-                                       (or (%bridge-field eo "kind") "?")
-                                       (or (%bridge-field eo "package") "?")
-                                       (or (%bridge-field eo "name") "?"))))))))))
+         (multiple-value-bind (opts pos)
+             (%bridge-parse-flags args '(("worker" . :string)))
+           (declare (ignore pos))
+           (%bridge-simple-method
+            "list-redefinitions"
+            :params (%bridge-make-params
+                     (list (cons "worker" (getf opts :worker))))
+            :renderer (lambda (obj)
+                        (let ((items (%bridge-array-items
+                                       (%bridge-field obj "entries"))))
+                          (cond
+                            ((null items) (format t "(no redefinitions)~%"))
+                            (t
+                             (format t "~D redefinition~:P:~%" (length items))
+                             (dolist (e items)
+                               (let ((eo (cadr e)))
+                                 (format t "  ~A ~A:~A~%"
+                                         (or (%bridge-field eo "kind") "?")
+                                         (or (%bridge-field eo "package") "?")
+                                         (or (%bridge-field eo "name") "?")))))))))))
         ((string= sub "image-info") (%bridge-cmd-image-info args))
         ((string= sub "list-packages") (%bridge-cmd-list-packages args))
         ((string= sub "loaded-systems") (%bridge-cmd-loaded-systems args))

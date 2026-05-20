@@ -342,6 +342,48 @@
                  (assert-contains stdout "DIFF-FN-X"))
                (format t "  diff renderer OK~%")
 
+               (format t "Test: eval --handler declarative recovery~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured
+                    '("repl-bridge" "eval"
+                      "(restart-case (/ 1 0) (use-value (v) v))"
+                      "--handler" "division-by-zero=use-value:999"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "=> 999"))
+               (format t "  eval --handler OK~%")
+
+               (format t "Test: eval --handler with no args~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured
+                    '("repl-bridge" "eval"
+                      "(restart-case (signal 'simple-error :format-control \"x\") (continue () :went-on))"
+                      "--handler" "simple-error=continue"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "=> :WENT-ON"))
+               (format t "  eval --handler (no args) OK~%")
+
+               (format t "Test: diff --worker scopes per worker~%")
+               ;; Define different things in two distinct named workers.
+               (run-cli-captured '("repl-bridge" "eval"
+                                   "(defun diff-only-in-a () :a)"
+                                   "--worker" "wa"))
+               (run-cli-captured '("repl-bridge" "eval"
+                                   "(defun diff-only-in-b () :b)"
+                                   "--worker" "wb"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "diff" "--worker" "wa"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "DIFF-ONLY-IN-A")
+                 (assert-true (not (search "DIFF-ONLY-IN-B" stdout))
+                              "wa diff leaked wb's redefinition: ~A" stdout))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "diff" "--worker" "wb"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "DIFF-ONLY-IN-B")
+                 (assert-true (not (search "DIFF-ONLY-IN-A" stdout))
+                              "wb diff leaked wa's redefinition: ~A" stdout))
+               (format t "  diff --worker OK~%")
+
                (format t "Test: help text~%")
                (multiple-value-bind (rc stdout)
                    (run-cli-captured '("repl-bridge" "help"))
