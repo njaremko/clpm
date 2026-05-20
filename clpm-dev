@@ -1,0 +1,11 @@
+#!/bin/sh
+# Dev wrapper for clpm: loads source and invokes the CLI without a full build.
+# Slow first start (compiles), fast subsequent (FASL cached).
+set -e
+HERE="$(cd "$(dirname "$0")" && pwd)"
+exec sbcl --noinform --non-interactive --disable-debugger \
+     --eval "(require :asdf)" \
+     --eval "(push #P\"$HERE/\" asdf:*central-registry*)" \
+     --eval "(asdf:load-system :clpm :verbose nil)" \
+     --eval "(clpm:main (uiop:command-line-arguments))" \
+     --end-toplevel-options "$@"

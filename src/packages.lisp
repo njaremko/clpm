@@ -356,6 +356,7 @@
            #:open-connection
            #:close-connection
            #:send-on-connection
+           #:send-continuation-on-connection
            #:user-interrupt))
 
 (defpackage #:clpm.fetch

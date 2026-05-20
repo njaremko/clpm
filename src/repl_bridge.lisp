@@ -4861,3 +4861,27 @@ function from two threads concurrently with the same CONN."
                           (when (eq r :stop)
                             (return :io-error))))))))))))
       (error () :io-error))))
+
+(defun send-continuation-on-connection (conn id method &key params)
+  "Push a continuation message onto an open CONNECTION without waiting.
+
+The current thread is busy reading event frames inside
+`send-on-connection'; this writes the JSON line directly to the
+connection's stream so the daemon can route the continuation while we
+keep reading. Returns T on success, NIL on stream error.
+
+Use this for continuation methods that share an `id' with an
+in-flight request (debug-invoke-restart, debug-eval-in-frame,
+debug-abort, debug-continue, query-response). Do not use it for
+fresh requests -- those should open their own connection or use
+`send-request'."
+  (when (connection-closed? conn)
+    (return-from send-continuation-on-connection nil))
+  (let* ((stream (connection-stream conn))
+         (msg (%json-object
+               "id" id
+               "method" method
+               "params" (%inject-token params (connection-token conn)))))
+    (handler-case
+        (progn (%write-line-json stream msg) t)
+      (error () nil))))
