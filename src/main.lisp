@@ -72,7 +72,7 @@ Examples:
   clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:example-key-id
   clpm new myproject --bin
   clpm init myproject
-  clpm add alexandria@^1.4.0
+  clpm add alexandria bordeaux-threads
   clpm install
   clpm repl
   clpm update alexandria

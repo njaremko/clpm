@@ -229,7 +229,7 @@ despite some legacy comments). The rules a user needs to know:
 | `clpm doctor` | Check environment and configuration |
 | `clpm new <name> --bin\|--lib [--dir <path>]` | Create a new project scaffold |
 | `clpm init [name]` | Initialize new project |
-| `clpm add <dep>[@<constraint>]` | Add a dependency |
+| `clpm add <dep>[@<constraint>]...` | Add one or more dependencies |
 | `clpm remove <dep>` | Remove a dependency |
 | `clpm search <query>` | Search configured registries |
 | `clpm info <system>` | Show system details |

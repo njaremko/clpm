@@ -325,22 +325,6 @@ Returns (values system-id constraint-form-or-nil)."
             (t
              (values system :invalid)))))))
 
-(defun highest-system-version (registries system-id)
-  "Return the highest version string available for SYSTEM-ID across REGISTRIES."
-  (let* ((index (clpm.registry:build-registry-index registries))
-         (entries (clpm.registry:index-lookup-system index system-id))
-         (best nil))
-    (dolist (entry entries)
-      (let ((release-ref (cdr entry)))
-        (when (stringp release-ref)
-          (let ((at (position #\@ release-ref)))
-            (when at
-              (let ((ver (subseq release-ref (1+ at))))
-                (when (or (null best)
-                          (clpm.solver.version:version> ver best))
-                  (setf best ver))))))))
-    best))
-
 (defun sorted-deps (deps)
   (sort (copy-list deps) #'string< :key #'clpm.project:dependency-system))
 
@@ -425,7 +409,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
        (values nil nil nil nil nil)))))
 
 (defun cmd-add (&rest args)
-  "Add a dependency to clpm.project and update clpm.lock."
+  "Add dependencies to clpm.project and update clpm.lock."
   (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
       (find-effective-project-root)
     (declare (ignore lock-path _workspace-path))
@@ -434,7 +418,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
         (log-no-project-found))
       (return-from cmd-add 1))
 
-    (let ((spec nil)
+    (let ((specs '())
           (dev-p nil)
           (test-p nil)
           (install-p nil)
@@ -498,15 +482,14 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
               ((and (plusp (length arg)) (char= (char arg 0) #\-))
                (log-error "Unknown option: ~A" arg)
                (return-from cmd-add 1))
-              ((null spec)
-               (setf spec arg))
               (t
-               (log-error "Unexpected argument: ~A" arg)
-               (return-from cmd-add 1))))
+               (push arg specs))))
           (incf i)))
 
-      (unless spec
-        (log-error "Usage: clpm add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]")
+      (setf specs (nreverse specs))
+
+      (unless specs
+        (log-error "Usage: clpm add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]...")
         (return-from cmd-add 1))
 
       (when (and any-p caret-p)
@@ -519,6 +502,10 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
 
       (when (and path git-url)
         (log-error "Only one of --path or --git may be specified")
+        (return-from cmd-add 1))
+
+      (when (and (or path git-url) (rest specs))
+        (log-error "--path/--git may only be used with one dependency")
         (return-from cmd-add 1))
 
       (when (and registry-name (or path git-url))
@@ -539,72 +526,93 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                         (dev-p :dev-depends)
                         (test-p :test-depends)
                         (t :depends)))
-             (system-id nil)
-             (constraint-form nil)
-             (dep-source nil))
-        (multiple-value-bind (sys parsed-constraint)
-            (parse-dep-spec spec)
-          (setf system-id sys)
-          (when (eq parsed-constraint :invalid)
-            (log-error "Invalid dependency spec: ~A" spec)
-            (return-from cmd-add 1))
-          (when (and parsed-constraint (or path git-url))
-            (log-error "Do not combine @<constraint> with --path/--git")
-            (return-from cmd-add 1))
-          (when (and parsed-constraint (or any-p caret-p))
-            (log-error "Do not combine @<constraint> with --any/--caret")
-            (return-from cmd-add 1))
+             (registry-index nil))
+        (labels ((registry-index ()
+                   (or registry-index
+                       (setf registry-index
+                             (clpm.registry:build-registry-index registries))))
+                 (provider-names (system-id)
+                   (sort (remove-duplicates
+                          (mapcar (lambda (entry)
+                                    (clpm.registry:registry-name (car entry)))
+                                  (or (clpm.registry:index-lookup-system
+                                       (registry-index)
+                                       system-id)
+                                      '()))
+                          :test #'string=)
+                         #'string<))
+                 (highest-version (system-id)
+                   (let ((best nil))
+                     (dolist (entry (clpm.registry:index-lookup-system
+                                     (registry-index)
+                                     system-id))
+                       (when (or (null registry-name)
+                                 (string= registry-name
+                                          (clpm.registry:registry-name (car entry))))
+                         (let ((release-ref (cdr entry)))
+                           (when (stringp release-ref)
+                             (let ((at (position #\@ release-ref)))
+                               (when at
+                                 (let ((version (subseq release-ref (1+ at))))
+                                   (when (or (null best)
+                                             (clpm.solver.version:version> version best))
+                                     (setf best version)))))))))
+                     best))
+                 (add-spec (spec)
+                   (multiple-value-bind (system-id parsed-constraint)
+                       (parse-dep-spec spec)
+                     (unless (plusp (length system-id))
+                       (log-error "Invalid dependency spec: ~A" spec)
+                       (return-from cmd-add 1))
+                     (when (eq parsed-constraint :invalid)
+                       (log-error "Invalid dependency spec: ~A" spec)
+                       (return-from cmd-add 1))
+                     (when (and parsed-constraint (or path git-url))
+                       (log-error "Do not combine @<constraint> with --path/--git")
+                       (return-from cmd-add 1))
+                     (when (and parsed-constraint (or any-p caret-p))
+                       (log-error "Do not combine @<constraint> with --any/--caret")
+                       (return-from cmd-add 1))
+                     (let ((constraint-form nil)
+                           (dep-source nil))
+                       ;; Registry disambiguation for non-pinned sources.
+                       (when (and (null path) (null git-url))
+                         (let ((providers (provider-names system-id)))
+                           (when (null providers)
+                             (log-error "System not found in configured registries: ~A" system-id)
+                             (return-from cmd-add 1))
+                           (when (and (null registry-name) (> (length providers) 1))
+                             (log-error "System ~A is provided by multiple registries; use --registry <name>:" system-id)
+                             (dolist (name providers)
+                               (log-error "  ~A" name))
+                             (return-from cmd-add 1))
+                           (when registry-name
+                             (unless (member registry-name providers :test #'string=)
+                               (log-error "Registry ~A does not provide ~A. Providers:" registry-name system-id)
+                               (dolist (name providers)
+                                 (log-error "  ~A" name))
+                               (return-from cmd-add 1))
+                             (setf dep-source (list :registry registry-name)))))
 
-          ;; Registry disambiguation for non-pinned sources.
-          (when (and (null path) (null git-url))
-            (let* ((index (clpm.registry:build-registry-index registries))
-                   (entries (clpm.registry:index-lookup-system index system-id))
-                   (provider-names
-                     (sort (remove-duplicates
-                            (mapcar (lambda (e)
-                                      (clpm.registry:registry-name (car e)))
-                                    (or entries '()))
-                            :test #'string=)
-                           #'string<)))
-              (when (null provider-names)
-                (log-error "System not found in configured registries: ~A" system-id)
-                (return-from cmd-add 1))
-              (when (and (null registry-name) (> (length provider-names) 1))
-                (log-error "System ~A is provided by multiple registries; use --registry <name>:" system-id)
-                (dolist (n provider-names)
-                  (log-error "  ~A" n))
-                (return-from cmd-add 1))
-              (when registry-name
-                (unless (member registry-name provider-names :test #'string=)
-                  (log-error "Registry ~A does not provide ~A. Providers:" registry-name system-id)
-                  (dolist (n provider-names)
-                    (log-error "  ~A" n))
-                  (return-from cmd-add 1))
-                (setf dep-source (list :registry registry-name)))))
-
-          (cond
-            (path
-             (setf constraint-form (list :path path)))
-            (git-url
-             (setf constraint-form (list :git :url git-url :ref git-ref)))
-            (parsed-constraint
-             (setf constraint-form parsed-constraint))
-            (caret-p
-             (let* ((regs (if registry-name
-                              (let ((r (find registry-name registries
-                                             :key #'clpm.registry:registry-name
-                                             :test #'string=)))
-                                (if r (list r) registries))
-                              registries))
-                    (v-max (highest-system-version regs system-id)))
-               (unless v-max
-                 (log-error "No versions found for ~A in configured registries" system-id)
-                 (return-from cmd-add 1))
-               (setf constraint-form (list :semver (format nil "^~A" v-max)))))
-            (t
-             (setf constraint-form nil))))
-
-        (labels ((deps-slot ()
+                       (cond
+                         (path
+                          (setf constraint-form (list :path path)))
+                         (git-url
+                          (setf constraint-form (list :git :url git-url :ref git-ref)))
+                         (parsed-constraint
+                          (setf constraint-form parsed-constraint))
+                         (caret-p
+                          (let ((v-max (highest-version system-id)))
+                            (unless v-max
+                              (log-error "No versions found for ~A in configured registries" system-id)
+                              (return-from cmd-add 1))
+                            (setf constraint-form (list :semver (format nil "^~A" v-max)))))
+                         (t
+                          (setf constraint-form nil)))
+                       (list :system-id system-id
+                             :constraint constraint-form
+                             :source dep-source))))
+                 (deps-slot ()
                    (ecase section
                      (:depends (clpm.project:project-depends project))
                      (:dev-depends (clpm.project:project-dev-depends project))
@@ -614,28 +622,46 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                      (:depends (setf (clpm.project:project-depends project) new))
                      (:dev-depends (setf (clpm.project:project-dev-depends project) new))
                      (:test-depends (setf (clpm.project:project-test-depends project) new)))))
-          (let* ((deps (deps-slot))
-                 (existing (find system-id deps
-                                 :key #'clpm.project:dependency-system
-                                 :test #'string=)))
-            (if existing
-                (unless (equal (clpm.project:dependency-constraint existing) constraint-form)
-                  (setf (clpm.project:dependency-constraint existing) constraint-form))
-                (push (clpm.project:make-dependency
-                       :system system-id
-                       :constraint constraint-form
-                       :source dep-source)
-                      deps))
-            (when (and existing dep-source)
-              (setf (clpm.project:dependency-source existing) dep-source))
-            (set-deps-slot (sorted-deps deps))
-            (clpm.project:write-project-file project manifest-path)))
+          (let ((updates '())
+                (seen-systems '()))
+            (dolist (spec specs)
+              (let* ((update (add-spec spec))
+                     (system-id (getf update :system-id)))
+                (when (member system-id seen-systems :test #'string=)
+                  (log-error "Duplicate dependency spec: ~A" system-id)
+                  (return-from cmd-add 1))
+                (push system-id seen-systems)
+                (push update updates)))
+            (setf updates (nreverse updates))
+            (let ((deps (deps-slot)))
+              (dolist (update updates)
+                (let* ((system-id (getf update :system-id))
+                       (constraint-form (getf update :constraint))
+                       (dep-source (getf update :source))
+                       (existing (find system-id deps
+                                       :key #'clpm.project:dependency-system
+                                       :test #'string=)))
+                  (if existing
+                      (unless (equal (clpm.project:dependency-constraint existing) constraint-form)
+                        (setf (clpm.project:dependency-constraint existing) constraint-form))
+                      (push (clpm.project:make-dependency
+                             :system system-id
+                             :constraint constraint-form
+                             :source dep-source)
+                            deps))
+                  (when (and existing dep-source)
+                    (setf (clpm.project:dependency-source existing) dep-source))))
+              (set-deps-slot (sorted-deps deps))
+              (clpm.project:write-project-file project manifest-path))
 
-        (log-info "Added ~A to ~A" system-id
-                  (ecase section
-                    (:depends "depends")
-                    (:dev-depends "dev-depends")
-                    (:test-depends "test-depends")))
+            (log-info "Added ~{~A~^, ~} to ~A"
+                      (mapcar (lambda (update)
+                                (getf update :system-id))
+                              updates)
+                      (ecase section
+                        (:depends "depends")
+                        (:dev-depends "dev-depends")
+                        (:test-depends "test-depends")))))
 
         (uiop:with-current-directory (project-root)
           (if install-p
@@ -6303,6 +6329,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     ""
     "```sh"
     "clpm add alexandria"
+    "clpm add alexandria bordeaux-threads"
     "clpm add alexandria@^1.4.0"
     "clpm add --dev fiveam"
     "clpm remove alexandria"
@@ -6453,10 +6480,11 @@ sub-subcommand=\"set\")."
        (p "Creates clpm.project in the current directory.")
        0)
       (:add
-       (p "Usage: clpm add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]")
+       (p "Usage: clpm add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]...")
        (p "")
        (p "Examples:")
        (p "  clpm add alexandria")
+       (p "  clpm add alexandria bordeaux-threads")
        (p "  clpm add --caret alexandria")
        (p "  clpm add alexandria@^1.4.0")
        (p "  clpm add --path ../my-lib my-lib")

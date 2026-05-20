@@ -152,12 +152,14 @@
          (remote (merge-pathnames "remote-registry/" tmp))
          (proj1 (merge-pathnames "proj1/" tmp))
          (proj2 (merge-pathnames "proj2/" tmp))
+         (proj-multi (merge-pathnames "proj-multi/" tmp))
          (ws (merge-pathnames "ws/" tmp))
          (old-home (sb-posix:getenv "CLPM_HOME")))
     (ensure-directories-exist clpm-home)
     (ensure-directories-exist remote)
     (ensure-directories-exist proj1)
     (ensure-directories-exist proj2)
+    (ensure-directories-exist proj-multi)
     (ensure-directories-exist ws)
 
     (unwind-protect
@@ -244,6 +246,39 @@
              (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj1)))
                     (deps (clpm.project:project-depends project)))
                (assert-eql 0 (length deps)))
+
+             ;; Multiple dependency specs in one add invocation.
+             (write-empty-project proj-multi url)
+             (uiop:with-current-directory (proj-multi)
+               (assert-eql 0 (clpm:run-cli '("add" "foo@=1.0.0" "bar@=2.0.0"))))
+             (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj-multi)))
+                    (deps (clpm.project:project-depends project))
+                    (foo (find-dep deps "foo"))
+                    (bar (find-dep deps "bar")))
+               (assert-eql 2 (length deps))
+               (assert-true foo "Expected foo in depends")
+               (assert-true bar "Expected bar in depends")
+               (assert-true (equal '(:exact "1.0.0")
+                                   (clpm.project:dependency-constraint foo))
+                            "Expected exact foo constraint, got ~S"
+                            (clpm.project:dependency-constraint foo))
+               (assert-true (equal '(:exact "2.0.0")
+                                   (clpm.project:dependency-constraint bar))
+                            "Expected exact bar constraint, got ~S"
+                            (clpm.project:dependency-constraint bar)))
+             (let* ((lock (clpm.project:read-lock-file (merge-pathnames "clpm.lock" proj-multi)))
+                    (foo (find-locked lock "foo"))
+                    (bar (find-locked lock "bar")))
+               (assert-true foo "Expected foo in multi-add lockfile")
+               (assert-true bar "Expected bar in multi-add lockfile")
+               (assert-string=
+                "1.0.0"
+                (clpm.project:locked-release-version
+                 (clpm.project:locked-system-release foo)))
+               (assert-string=
+                "2.0.0"
+                (clpm.project:locked-release-version
+                 (clpm.project:locked-system-release bar))))
 
              ;; Project 2: dev/test sections.
              (write-empty-project proj2 url)
