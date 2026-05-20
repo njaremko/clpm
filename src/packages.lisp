@@ -413,6 +413,7 @@
            #:cmd-registry
            #:cmd-repl
            #:cmd-repl-bridge
+           #:cmd-skill
            #:cmd-run
            #:cmd-exec
            #:cmd-test

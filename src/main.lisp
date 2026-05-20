@@ -52,6 +52,7 @@ Commands:
   keys ...         Key management (registry signing)
   publish ...      Publish to a registry
   workspace ...    Workspace management
+  skill            Print an agent SKILL.md for using clpm
   repl-bridge ...  Persistent Lisp image (for LLM-driven dev)
 
 Options:
@@ -330,6 +331,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
 	     (apply #'clpm.commands:cmd-audit command-args))
 	    (:sbom
 	     (apply #'clpm.commands:cmd-sbom command-args))
+            (:skill
+             (apply #'clpm.commands:cmd-skill command-args))
 	    (:repl-bridge
 	     (apply #'clpm.commands:cmd-repl-bridge command-args))
 	    (t

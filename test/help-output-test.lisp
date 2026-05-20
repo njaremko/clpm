@@ -66,6 +66,7 @@
   (assert-contains stdout "keys")
   (assert-contains stdout "publish")
   (assert-contains stdout "workspace")
+  (assert-contains stdout "skill")
   (assert-contains stdout "install"))
 (format t "  `--help` output PASSED~%")
 
@@ -88,6 +89,15 @@
   (assert-contains stdout "--limit")
   (assert-contains stdout "--json"))
 (format t "  `clpm help search` PASSED~%")
+
+(format t "Testing `clpm help skill` output...~%")
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "skill"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm skill")
+  (assert-contains stdout "SKILL.md"))
+(format t "  `clpm help skill` PASSED~%")
 
 (format t "Testing `<cmd> --help` output...~%")
 (multiple-value-bind (code stdout stderr)
