@@ -19,6 +19,11 @@ makes the protocol self-documenting.
 
 ## Operating rules
 
+- **Debug-first default.** When investigating a Common Lisp failure, prefer
+  `clpm repl-bridge debug` over a fresh `sbcl`, `clpm repl`, or plain `eval`.
+  The bridge can show restarts, frame numbers, frame locals, source locations,
+  stdout/stderr, and the live package state that a cold process would lose.
+
 - **One-shot evaluation:** Use `clpm repl-bridge eval` for individual forms.
   State persists — `defparameter`s stick, `defun`s stay redefined, the current
   package carries over.
@@ -33,6 +38,10 @@ makes the protocol self-documenting.
 - **Wedge-recovery is one call.** If the worker is corrupted, send `reset`. It
   terminates the worker thread, spawns a fresh one, and clears the redefinition
   log. The daemon, loaded systems, and persistent current-package survive.
+
+- **Clean up bridge state before handoff.** Abort or continue kept debugger
+  sessions, unwatch file watchers, untrace functions, kill scratch workers, and
+  check `diff` for in-image definitions that still need source edits.
 
 - **Don't restart the daemon casually.** Loaded systems live there. Restart
   only on dependency-graph changes (then: `clpm install` + fresh `serve`).
@@ -61,6 +70,7 @@ clpm repl-bridge eval '(+ 1 2)'
 clpm repl-bridge eval '(read-from-string "FOO")' --package my-app
 clpm repl-bridge eval '(/ 1 0)' --handler division-by-zero=use-value:999
 clpm repl-bridge eval '(error "x")' --debug        # enter debugger on a condition
+clpm repl-bridge debug '(error "x")'               # preferred debug entry point
 clpm repl-bridge time-eval '(some-fn)'             # wall + cpu + cons
 clpm repl-bridge profile-eval '(big-fn)' --top 10  # sb-sprof flat report
 clpm repl-bridge gc [--full]                       # trigger a GC
@@ -114,6 +124,18 @@ clpm repl-bridge methods                           # one-line summary per RPC
 clpm repl-bridge methods eval                      # full doc + params
 clpm repl-bridge diff                              # top-level redefinitions seen
 clpm repl-bridge help                              # this command listing
+
+# cleanup before handoff
+clpm repl-bridge list-debug-sessions
+clpm repl-bridge debug-abort --session N
+clpm repl-bridge list-watches
+clpm repl-bridge unwatch N
+clpm repl-bridge list-traced
+clpm repl-bridge untrace
+clpm repl-bridge workers
+clpm repl-bridge kill-worker scratch
+clpm repl-bridge diff
+clpm repl-bridge stop
 
 # global flag: append `--json` for raw JSON-on-a-line responses
 clpm repl-bridge image-info --json
@@ -199,6 +221,21 @@ Raw JSON-RPC form (only needed when scripting outside the CLI):
 `break-on: "warning"` makes the daemon enter the debugger on signaled warnings;
 `handlers: [{type:"…",restart:"…"}]` is the non-interactive variant that just
 invokes a named restart on a matching condition.
+
+When you need to keep the stop alive across commands, add `--keep`, then drive
+the server-owned session explicitly:
+
+```sh
+clpm repl-bridge debug '(restart-case (error "need value") (use-value (v) v))' --keep
+clpm repl-bridge list-debug-sessions
+clpm repl-bridge debug-eval-in-frame 4 'x'
+clpm repl-bridge debug-invoke-restart USE-VALUE --arg 42
+clpm repl-bridge debug-abort
+```
+
+If more than one session is active, pass `--session N` to
+`debug-eval-in-frame`, `debug-invoke-restart`, `debug-continue`, or
+`debug-abort`.
 
 ## Recipe: declarative recovery (`eval --handler`)
 
@@ -316,6 +353,23 @@ all take an optional `worker` to scope to a non-default slot.
 `image-info`, `loaded-systems`, `list-packages`, and `gc [--full]` answer the
 "what's loaded?" / "what packages exist?" / "how much memory?" questions
 without `eval`-ing your way around.
+
+## Cleanup checklist
+
+Before claiming the bridge is clean:
+
+```sh
+clpm repl-bridge list-debug-sessions    # abort or continue anything kept
+clpm repl-bridge list-watches           # unwatch every watcher you started
+clpm repl-bridge list-traced            # untrace functions you traced
+clpm repl-bridge workers                # kill scratch workers or reset default
+clpm repl-bridge diff                   # source must match in-image definitions
+clpm repl-bridge status                 # confirms daemon state
+```
+
+Use `clpm repl-bridge stop` for normal shutdown. Let `status` or `stop` clean
+stale pid/socket files; do not delete `.clpm/repl-bridge.*` by hand unless the
+CLI cannot recover and the user agrees.
 
 ## Recipe: explain a request before running it
 

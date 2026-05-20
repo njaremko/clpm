@@ -55,8 +55,12 @@
   (assert-contains stdout "name: clpm")
   (assert-contains stdout "# CLPM Agent Skill")
   (assert-contains stdout "clpm install")
-  (assert-contains stdout "Condition-system workflow")
+  (assert-contains stdout "Strongly prefer it")
+  (assert-contains stdout "Debug-first workflow")
   (assert-contains stdout "clpm repl-bridge debug")
+  (assert-contains stdout "clpm repl-bridge list-watches")
+  (assert-contains stdout "clpm repl-bridge debug-abort --session 1")
+  (assert-contains stdout "Do not leave kept debug sessions")
   (assert-contains stdout "clpm skill"))
 (format t "  `clpm skill` output PASSED~%")
 
