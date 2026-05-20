@@ -1740,12 +1740,30 @@ the thread before calling."
   (%remove-worker server (worker-name worker)))
 
 (defun %interrupt-worker (server &optional (name +default-worker-name+))
-  "Signal user-interrupt inside the named worker. NIL means the default."
-  (let ((w (%find-worker server (or name +default-worker-name+))))
-    (when (and w (clpm.repl-bridge.compat:thread-alive-p (worker-thread w)))
-      (clpm.repl-bridge.compat:interrupt-thread
-       (worker-thread w)
-       (lambda () (signal 'user-interrupt))))))
+  "Signal user-interrupt inside the named worker. NIL means the default.
+
+Returns a keyword that distinguishes the real outcomes a caller might
+care about, instead of collapsing them all into a silent T/NIL:
+  :no-such-worker -- the user named a worker that doesn't exist.
+  :idle           -- worker exists but isn't running an eval, OR the
+                     default worker hasn't been spawned yet (the
+                     spawning is lazy and the user shouldn't have to
+                     know that).
+  :interrupted    -- a user-interrupt was queued into the worker."
+  (let* ((wname (or name +default-worker-name+))
+         (default? (string= wname +default-worker-name+))
+         (w (%find-worker server wname)))
+    (cond
+      ((and (null w) default?) :idle)
+      ((null w) :no-such-worker)
+      ((not (clpm.repl-bridge.compat:thread-alive-p (worker-thread w)))
+       :no-such-worker)
+      ((null (worker-current-job w)) :idle)
+      (t
+       (clpm.repl-bridge.compat:interrupt-thread
+        (worker-thread w)
+        (lambda () (signal 'user-interrupt)))
+       :interrupted))))
 
 (defun server-current-package (server)
   "The persistent eval `*package*' for the default worker. Other named
@@ -1991,18 +2009,29 @@ lost."
  (make-method-spec
   :name "interrupt"
   :summary "Signal a user-interrupt inside the worker, unwinding its current eval."
-  :doc "Async: returns immediately. If no eval is running this is a no-op.
-Pass `worker' to target a named worker; otherwise the default worker is
-interrupted."
+  :doc "Async: returns immediately. The response `outcome' field distinguishes
+the three states the caller might care about so an interrupt of a
+non-existent worker (typo) and an interrupt of an idle one are not
+confused with an interrupt that actually unwound an eval:
+
+  \"interrupted\"     -- user-interrupt was sent to a busy worker.
+  \"idle\"            -- worker exists but no eval was in progress.
+  \"no-such-worker\"  -- no worker by that name (typo or already reset).
+
+Pass `worker' to target a named worker; otherwise the default."
   :params (list (list :name "worker" :type "string" :required nil
                       :description "Worker name (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
     (declare (ignore ctx))
-    (let ((wname (or (%json-getf params "worker") +default-worker-name+)))
-      (%log-event (server-event-log server) "interrupt" "worker" wname)
-      (%interrupt-worker server wname))
-    (%success-response id (%json-object)))))
+    (let* ((wname (or (%json-getf params "worker") +default-worker-name+))
+           (outcome (progn
+                      (%log-event (server-event-log server)
+                                  "interrupt" "worker" wname)
+                      (%interrupt-worker server wname))))
+      (%success-response id
+                         (%json-object "outcome" (string-downcase outcome)
+                                       "worker" wname))))))
 
 (%register-method
  (make-method-spec

@@ -3202,6 +3202,31 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
                      (if alive "yes" "no")
                      auto-revert))))))))
 
+(defun %bridge-cmd-interrupt (args)
+  "`clpm repl-bridge interrupt [--worker W]'. The daemon now reports an
+outcome that distinguishes a real interrupt from a no-op against an idle
+or non-existent worker, so the rc and message reflect what happened."
+  (multiple-value-bind (opts pos)
+      (%bridge-parse-flags args '(("worker" . :string)))
+    (declare (ignore pos))
+    (%bridge-with-call (obj "interrupt"
+                            :params (%bridge-make-params
+                                     (list (cons "worker"
+                                                 (getf opts :worker)))))
+      (let ((outcome (%bridge-field obj "outcome"))
+            (worker (or (%bridge-field obj "worker") "default")))
+        (cond
+          ((string= outcome "interrupted")
+           (format t "interrupted worker ~A~%" worker))
+          ((string= outcome "idle")
+           (format t "worker ~A is idle; nothing to interrupt~%" worker))
+          ((string= outcome "no-such-worker")
+           (format *error-output* "no such worker: ~A~%" worker)
+           (return-from %bridge-cmd-interrupt 1))
+          (t
+           (format t "interrupt outcome=~A worker=~A~%"
+                   (or outcome "?") worker)))))))
+
 (defun %bridge-cmd-unwatch (args)
   (let* ((raw (first args))
          (id (and raw (ignore-errors
@@ -3651,17 +3676,7 @@ See `clpm repl-bridge help' for the full surface."
          (%bridge-cmd-help args))
         ((string= sub "serve") (%bridge-serve args))
         ((string= sub "eval") (%bridge-eval args))
-        ((string= sub "interrupt")
-         (multiple-value-bind (opts pos)
-             (%bridge-parse-flags args '(("worker" . :string)))
-           (declare (ignore pos))
-           (%bridge-simple-method "interrupt"
-                                  :params (%bridge-make-params
-                                           (list (cons "worker"
-                                                       (getf opts :worker))))
-                                  :renderer (lambda (obj)
-                                              (declare (ignore obj))
-                                              (format t "interrupted~%")))))
+        ((string= sub "interrupt") (%bridge-cmd-interrupt args))
         ((string= sub "ping")
          (%bridge-simple-method "ping" :renderer #'%bridge-render-ping))
         ((string= sub "status") (%bridge-status args))

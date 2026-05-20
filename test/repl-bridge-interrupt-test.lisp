@@ -100,5 +100,29 @@
                      r))))
 (format t "  OK~%")
 
+(format t "Test: interrupt outcome distinguishes idle / no-such-worker~%")
+(with-daemon
+    (lambda (sock)
+      ;; The default worker hasn't been spawned -- the daemon treats
+      ;; that as :idle (the user shouldn't have to know about lazy
+      ;; spawning). And a typo'd worker name is its own outcome.
+      (let* ((r (clpm.repl-bridge:send-request sock "interrupt")))
+        (assert-string= "idle"
+                        (lookup (lookup r "result") "outcome")))
+      ;; Spawn the default worker with one eval; the next interrupt
+      ;; still reports `idle' because the eval finished before we
+      ;; sent the interrupt.
+      (clpm.repl-bridge:send-request
+       sock "eval" :params (list :object (list (cons "form" "(+ 1 1)"))))
+      (let* ((r (clpm.repl-bridge:send-request sock "interrupt")))
+        (assert-string= "idle"
+                        (lookup (lookup r "result") "outcome")))
+      (let* ((r (clpm.repl-bridge:send-request
+                 sock "interrupt"
+                 :params (list :object (list (cons "worker" "nope"))))))
+        (assert-string= "no-such-worker"
+                        (lookup (lookup r "result") "outcome")))))
+(format t "  OK~%")
+
 (format t "~%REPL-bridge interrupt tests PASSED!~%")
 (sb-ext:exit :code 0)
