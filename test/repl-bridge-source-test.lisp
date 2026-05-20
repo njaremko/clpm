@@ -82,22 +82,42 @@
 ;;; ----------------------------------------------------------------------------
 ;;; #133: xref `who-calls' includes at least one caller of FORMAT.
 
-(format t "Test: xref callers of FORMAT exists~%")
+(format t "Test: xref callers tracks live in-image relationships~%")
 (with-daemon
   (lambda (sock)
+    ;; Define two functions on the wire so they get compiled with
+    ;; xref enabled, then ask who-calls the inner one.
+    (let* ((define-resp
+             (clpm.repl-bridge:send-request
+              sock "eval"
+              :params (list :object
+                            (list (cons "form"
+                                        "(progn (defun xref-callee () 'inner)
+                                                (defun xref-caller () (xref-callee))
+                                                :ok)"))))))
+      (assert-true (lookup define-resp "result")
+                   "couldn't define callee/caller: ~S" define-resp))
     (let* ((resp (clpm.repl-bridge:send-request
                   sock "xref"
                   :params (list :object
-                                (list (cons "symbol" "format")
+                                (list (cons "symbol" "xref-callee")
                                       (cons "direction" "callers")
-                                      (cons "package" "CL")))))
+                                      (cons "package" "CL-USER")))))
            (result (lookup resp "result"))
            (entries (array-items (lookup result "entries"))))
-      (assert-true (or (null entries) (consp entries))
-                   "entries should be a list: ~S" entries)
-      ;; SBCL has many internal callers of FORMAT but the result may be
-      ;; empty in a stripped image; we only check the call succeeded.
-      (assert-true result "xref returned no result: ~S" resp))))
+      (assert-true result "xref returned no result: ~S" resp)
+      (assert-true (consp entries)
+                   "expected xref-callee to have a caller, got: ~S" entries)
+      ;; The caller is XREF-CALLER -- name field carries it.
+      (let ((found nil))
+        (dolist (e entries)
+          (when (and (consp e) (eq (car e) :object))
+            (let ((nm (cdr (assoc "name" (cadr e) :test #'string=))))
+              (when (and (stringp nm)
+                         (search "XREF-CALLER" (string-upcase nm)))
+                (setf found t)))))
+        (assert-true found
+                     "expected XREF-CALLER among entries: ~S" entries)))))
 (format t "  xref OK~%")
 
 ;;; ----------------------------------------------------------------------------

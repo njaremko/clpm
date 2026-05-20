@@ -2714,7 +2714,17 @@ faithfully; nested objects/arrays fall back to JSON for now."
                               :params (%bridge-make-params
                                        (list (cons "symbol" sym)
                                              (cons "package" (getf opts :package)))))
-        (format t "~A~%" (or (%bridge-field obj "arglist") "(no arglist)"))))))
+        (format t "~A~%" (%bridge-render-arglist
+                          (%bridge-field obj "arglist")))))))
+
+(defun %bridge-render-arglist (raw)
+  "Normalize an arglist string for human output.
+Daemon returns the prin1'd lambda list; for zero-arg functions that's
+`\"NIL\"', which is technically correct but jarring. Map it to `()'."
+  (cond
+    ((null raw) "(no arglist)")
+    ((or (string= raw "NIL") (string= raw "nil")) "()")
+    (t raw)))
 
 (defun %bridge-cmd-doc (args)
   "`clpm repl-bridge doc SYMBOL [--type T] [--package P]'."
@@ -2763,7 +2773,11 @@ faithfully; nested objects/arrays fall back to JSON for now."
                               :params (%bridge-make-params
                                        (list (cons "symbol" sym)
                                              (cons "package" (getf opts :package)))))
-        (%bridge-print-kv obj '("name" "package" "arglist" "documentation"
+        (%bridge-print-kv obj '("name" "package"))
+        (let ((al (%bridge-field obj "arglist")))
+          (when al
+            (format t "arglist: ~A~%" (%bridge-render-arglist al))))
+        (%bridge-print-kv obj '("documentation"
                                 "ftype" "inline" "macro" "generic"))))))
 
 (defun %bridge-cmd-class-info (args)
@@ -2835,6 +2849,16 @@ faithfully; nested objects/arrays fall back to JSON for now."
                     (format t "~A  (no source location)~%"
                             (or kind "?")))))))))))))
 
+(defun %bridge-canon-xref-dir (dir)
+  "Normalize a user-supplied xref direction to the daemon's keyword name.
+\"calls\" is a friendlier alias for \"callers\"; everything else passes
+through. Unknown directions go to the daemon which will reject them
+with a clear protocol error."
+  (cond
+    ((null dir) dir)
+    ((string= dir "calls") "callers")
+    (t dir)))
+
 (defun %bridge-cmd-xref (args)
   "`clpm repl-bridge xref SYMBOL --direction DIR [--package P]'.
 
@@ -2850,7 +2874,8 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
       (%bridge-with-call (obj "xref"
                               :params (%bridge-make-params
                                        (list (cons "symbol" sym)
-                                             (cons "direction" dir)
+                                             (cons "direction"
+                                                   (%bridge-canon-xref-dir dir))
                                              (cons "package" (getf opts :package)))))
         (let ((entries (%bridge-array-items (%bridge-field obj "entries"))))
           (cond

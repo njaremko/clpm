@@ -2589,10 +2589,13 @@ DIRECTION is one of :callers, :callees, :references, :sets, :binds,
                 (t nil))))
         (loop for entry in raw
               collect
-              (let* ((name (if (consp entry) (first entry) entry))
-                     (src (if (and (consp entry) (cdr entry))
-                              (second entry)
-                              nil)))
+              ;; sb-introspect returns (NAME . DEFINITION-SOURCE) dotted
+              ;; pairs, not proper (NAME DEFINITION-SOURCE) lists. (cdr
+              ;; entry) is the definition-source; (second entry) would
+              ;; try (car <struct>) and signal an error that gets
+              ;; swallowed by the surrounding handler-case below.
+              (let* ((name (if (consp entry) (car entry) entry))
+                     (src (when (consp entry) (cdr entry))))
                 (%json-object
                  "name" (%safe-prin1 name)
                  "location" (and src (%definition-source-json src))))))

@@ -342,6 +342,28 @@
                  (assert-contains stdout "DIFF-FN-X"))
                (format t "  diff renderer OK~%")
 
+               (format t "Test: who-calls finds a live caller~%")
+               (run-cli-captured
+                '("repl-bridge" "eval"
+                  "(progn (defun cli-xref-callee () :inner)
+                          (defun cli-xref-caller () (cli-xref-callee))
+                          :ok)"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured
+                    '("repl-bridge" "who-calls" "cli-xref-callee"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "CLI-XREF-CALLER"))
+               (format t "  who-calls OK~%")
+
+               (format t "Test: xref --direction calls aliases to callers~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured
+                    '("repl-bridge" "xref" "cli-xref-callee"
+                      "--direction" "calls"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "CLI-XREF-CALLER"))
+               (format t "  xref --direction calls OK~%")
+
                (format t "Test: eval --handler declarative recovery~%")
                (multiple-value-bind (rc stdout)
                    (run-cli-captured

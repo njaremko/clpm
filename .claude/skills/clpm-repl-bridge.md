@@ -59,10 +59,12 @@ clpm repl-bridge ping                  # liveness + per-method counters
 # evaluation (auto-starts daemon)
 clpm repl-bridge eval '(+ 1 2)'
 clpm repl-bridge eval '(read-from-string "FOO")' --package my-app
+clpm repl-bridge eval '(/ 1 0)' --handler division-by-zero=use-value:999
+clpm repl-bridge eval '(error "x")' --debug        # enter debugger on a condition
 clpm repl-bridge time-eval '(some-fn)'             # wall + cpu + cons
 clpm repl-bridge profile-eval '(big-fn)' --top 10  # sb-sprof flat report
 clpm repl-bridge gc [--full]                       # trigger a GC
-clpm repl-bridge interrupt                         # unwind current eval
+clpm repl-bridge interrupt [--worker W]            # unwind current eval
 
 # introspection
 clpm repl-bridge apropos PATTERN [--package P]
@@ -196,6 +198,26 @@ Raw JSON-RPC form (only needed when scripting outside the CLI):
 `break-on: "warning"` makes the daemon enter the debugger on signaled warnings;
 `handlers: [{type:"…",restart:"…"}]` is the non-interactive variant that just
 invokes a named restart on a matching condition.
+
+## Recipe: declarative recovery (`eval --handler`)
+
+When you know up-front *how* you want a condition handled, skip the
+debugger CLI entirely:
+
+```sh
+# replace division-by-zero with 999
+clpm repl-bridge eval '(restart-case (/ 1 0) (use-value (v) v))' \
+    --handler division-by-zero=use-value:999
+
+# continue past a signaled condition (no restart args)
+clpm repl-bridge eval '(restart-case (signal '"'"'simple-error :format-control "x") (continue () :ok))' \
+    --handler simple-error=continue
+```
+
+Each `--handler` is `TYPE=RESTART[:ARG1[,ARG2[,...]]]`. The TYPE is a
+CL type specifier (matched with `typep`), RESTART names the restart to
+invoke, and ARGS (if present) are read+evaluated daemon-side at
+recovery time. `--handler` is repeatable; specs are tried in order.
 
 ## Recipe: inspector
 
