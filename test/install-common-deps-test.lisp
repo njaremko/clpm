@@ -211,6 +211,12 @@
             (get-output-stream-string stdout)
             (get-output-stream-string stderr))))
 
+(defun assert-no-mismatch-output (stdout stderr)
+  (assert-true (null (search "mismatch" stdout :test #'char-equal))
+               "Unexpected mismatch in stdout:~%~A" stdout)
+  (assert-true (null (search "mismatch" stderr :test #'char-equal))
+               "Unexpected mismatch in stderr:~%~A" stderr))
+
 (defun find-locked (lock system-id)
   (find system-id
         (clpm.project:lockfile-resolved lock)
@@ -235,12 +241,13 @@
            (write-project project-root (format nil "file://~A" (namestring remote)))
            (uiop:with-current-directory (project-root)
              (multiple-value-bind (rc stdout stderr)
-                 (run-cli-captured '("add" "alexandria" "bordeaux-threads" "--install"))
+                 (run-cli-captured '("add" "alexandria" "bordeaux-threads"))
                (assert-eql 0 rc)
-               (assert-true (null (search "mismatch" stdout :test #'char-equal))
-                            "Unexpected mismatch in stdout:~%~A" stdout)
-               (assert-true (null (search "mismatch" stderr :test #'char-equal))
-                            "Unexpected mismatch in stderr:~%~A" stderr)))
+               (assert-no-mismatch-output stdout stderr))
+             (multiple-value-bind (rc stdout stderr)
+                 (run-cli-captured '("install"))
+               (assert-eql 0 rc)
+               (assert-no-mismatch-output stdout stderr)))
            (let* ((lock (clpm.project:read-lock-file
                          (merge-pathnames "clpm.lock" project-root)))
                   (ids (sort (mapcar #'clpm.project:locked-system-id
