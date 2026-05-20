@@ -2050,6 +2050,434 @@ result carries `success', `output_truename', `warnings_p', `failure_p'."
            (error (c)
              (%error-response id "eval-error" (princ-to-string c))))))))))
 
+;;; ----------------------------------------------------------------------------
+;;; Introspection (#140-#148)
+;;; ----------------------------------------------------------------------------
+
+(defun %symbol-kinds (sym)
+  "Return a list of keyword tags describing which namespaces SYM
+inhabits: :function, :macro, :generic-function, :special-operator,
+:variable, :constant, :class, :type, :package."
+  (let ((tags '()))
+    (when (fboundp sym)
+      (cond
+        ((special-operator-p sym) (push :special-operator tags))
+        ((macro-function sym) (push :macro tags))
+        ((and (fboundp sym) (typep (fdefinition sym) 'generic-function))
+         (push :generic-function tags))
+        (t (push :function tags))))
+    (when (boundp sym)
+      (push (if (constantp sym) :constant :variable) tags))
+    (when (find-class sym nil)
+      (push :class tags))
+    (when (find-package sym) (push :package tags))
+    (nreverse tags)))
+
+(defun %apropos-entries (pattern pkg)
+  "Build [{name, package, kinds, external}, ...] for symbols matching PATTERN.
+PKG is a package object or NIL (search all)."
+  (let ((upat (string-upcase pattern))
+        (entries '()))
+    (flet ((add (sym)
+             (let* ((name (symbol-name sym))
+                    (sym-pkg (symbol-package sym))
+                    (external? (and sym-pkg
+                                    (eq :external
+                                        (nth-value 1
+                                                   (find-symbol name sym-pkg))))))
+               (push (list :object
+                           (list (cons "name" name)
+                                 (cons "package"
+                                       (and sym-pkg (package-name sym-pkg)))
+                                 (cons "kinds"
+                                       (%json-array
+                                        (mapcar (lambda (k)
+                                                  (string-downcase
+                                                   (symbol-name k)))
+                                                (%symbol-kinds sym))))
+                                 (cons "external" (and external? t))))
+                     entries))))
+      (cond
+        (pkg
+         (do-symbols (s pkg)
+           (when (search upat (symbol-name s)) (add s))))
+        (t
+         (dolist (p (list-all-packages))
+           (do-external-symbols (s p)
+             (when (search upat (symbol-name s)) (add s))))))
+      ;; Dedupe by (name . package).
+      (remove-duplicates (nreverse entries)
+                         :test (lambda (a b)
+                                 (and (string= (lookup* a "name")
+                                               (lookup* b "name"))
+                                      (string= (or (lookup* a "package") "")
+                                               (or (lookup* b "package") ""))))))))
+
+(defun lookup* (object key)
+  (when (and (consp object) (eq (car object) :object))
+    (cdr (assoc key (cadr object) :test #'string=))))
+
+(%register-method
+ (make-method-spec
+  :name "apropos"
+  :summary "Search symbols by name substring."
+  :doc "Required: `pattern' (case-insensitive substring). Optional:
+`package' restricts the search to one package (otherwise external
+symbols across all packages). Returns `{entries: [{name, package,
+kinds, external}, ...]}'."
+  :params (list (list :name "pattern" :type "string" :required t
+                      :description "Substring to match, case-insensitive.")
+                (list :name "package" :type "string" :required nil
+                      :description "Limit the search to one package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server ctx))
+    (let* ((pat (%json-getf params "pattern"))
+           (pkg-name (%json-getf params "package"))
+           (pkg (and pkg-name (%find-package-loose pkg-name))))
+      (cond
+        ((not (stringp pat))
+         (%error-response id "protocol-error" "missing `pattern' param"))
+        ((and pkg-name (null pkg))
+         (%error-response id "eval-error"
+                          (format nil "no such package: ~A" pkg-name)))
+        (t
+         (%success-response
+          id
+          (%json-object
+           "entries"
+           (%json-array (%apropos-entries pat pkg))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "documentation"
+  :summary "Return cl:documentation for SYMBOL of TYPE."
+  :doc "Required: `symbol', `type' (function|variable|type|structure|
+setf|method-combination|compiler-macro). Returns `{doc: <string or
+null>}'."
+  :params (list (list :name "symbol" :type "string" :required t
+                      :description "Symbol name.")
+                (list :name "type" :type "string" :required t
+                      :description "Documentation type.")
+                (list :name "package" :type "string" :required nil
+                      :description "Resolve `symbol' in this package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((sym-name (%json-getf params "symbol"))
+           (type-name (%json-getf params "type"))
+           (pkg-name (%json-getf params "package"))
+           (sym (and (stringp sym-name)
+                     (%symbol-from-string sym-name pkg-name :server server)))
+           ;; cl:documentation takes a CL symbol (function, variable, type,
+           ;; ...) not a keyword. Intern into the CL package so the symbol
+           ;; identity matches the method dispatch.
+           (type-sym (and (stringp type-name)
+                          (find-symbol (string-upcase type-name)
+                                       (find-package "COMMON-LISP")))))
+      (cond
+        ((or (null sym) (null type-sym))
+         (%error-response id "protocol-error"
+                          "missing `symbol' or unknown `type' param"))
+        (t
+         (let ((doc (handler-case (documentation sym type-sym)
+                      (error () nil))))
+           (%success-response id (%json-object "doc" doc)))))))))
+
+#+sbcl
+(defun %arglist-of (sym)
+  (handler-case (sb-introspect:function-lambda-list sym)
+    (error () nil)))
+#-sbcl
+(defun %arglist-of (sym) (declare (ignore sym)) nil)
+
+(%register-method
+ (make-method-spec
+  :name "arglist"
+  :summary "Return the lambda-list of a function-bound symbol."
+  :doc "Required: `symbol'. Optional: `package'. Returns `{arglist:
+<prin1>, parsed: <list>}'. PARSED is a JSON array of strings, one per
+element of the lambda list (including lambda-list keywords like
+`&optional')."
+  :params (list (list :name "symbol" :type "string" :required t
+                      :description "Function-bound symbol name.")
+                (list :name "package" :type "string" :required nil
+                      :description "Resolve in this package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((sym-name (%json-getf params "symbol"))
+           (pkg-name (%json-getf params "package"))
+           (sym (and (stringp sym-name)
+                     (%symbol-from-string sym-name pkg-name :server server))))
+      (cond
+        ((or (null sym) (not (fboundp sym)))
+         (%error-response id "eval-error"
+                          (format nil "not fbound: ~A" sym-name)))
+        (t
+         (let ((arglist (%arglist-of sym)))
+           (%success-response
+            id
+            (%json-object
+             "arglist" (%safe-prin1 arglist)
+             "parsed" (%json-array
+                       (mapcar (lambda (e) (%safe-prin1 e)) arglist)))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "complete-symbol"
+  :summary "List symbols whose name starts with PREFIX."
+  :doc "Required: `prefix' (case-insensitive). Optional: `package'
+(otherwise external symbols across all packages), `limit' (default 50)."
+  :params (list (list :name "prefix" :type "string" :required t
+                      :description "Case-insensitive starts-with match.")
+                (list :name "package" :type "string" :required nil
+                      :description "Limit to one package.")
+                (list :name "limit" :type "integer" :required nil
+                      :description "Maximum candidates (default 50)."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server ctx))
+    (let* ((prefix (%json-getf params "prefix"))
+           (pkg-name (%json-getf params "package"))
+           (pkg (and pkg-name (%find-package-loose pkg-name)))
+           (limit (or (%json-getf params "limit") 50))
+           (upat (and (stringp prefix) (string-upcase prefix)))
+           (names '()))
+      (cond
+        ((null upat)
+         (%error-response id "protocol-error" "missing `prefix' param"))
+        (t
+         (flet ((add (s)
+                  (let ((n (symbol-name s)))
+                    (when (and (>= (length n) (length upat))
+                               (string= upat n :end2 (length upat)))
+                      (push n names)))))
+           (cond
+             (pkg (do-symbols (s pkg) (add s)))
+             (t
+              (dolist (p (list-all-packages))
+                (do-external-symbols (s p) (add s))))))
+         (let* ((unique (remove-duplicates names :test #'string=))
+                (sorted (sort unique #'string<))
+                (head (subseq sorted 0 (min limit (length sorted)))))
+           (%success-response
+            id
+            (%json-object
+             "candidates" (%json-array head)
+             "total" (length unique)
+             "truncated" (> (length sorted) limit))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "package-info"
+  :summary "Describe a package: nicknames, use, used-by, exports."
+  :doc "Required: `name'. Returns nicknames, use list, used-by list,
+external symbol count, and a small head of exported symbols."
+  :params (list (list :name "name" :type "string" :required t
+                      :description "Package name."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server ctx))
+    (let* ((name (%json-getf params "name"))
+           (pkg (and (stringp name) (%find-package-loose name))))
+      (cond
+        ((null pkg)
+         (%error-response id "eval-error"
+                          (format nil "no such package: ~A" name)))
+        (t
+         (let ((exports '())
+               (export-count 0))
+           (do-external-symbols (s pkg)
+             (incf export-count)
+             (when (< (length exports) 100)
+               (push (symbol-name s) exports)))
+           (%success-response
+            id
+            (%json-object
+             "name" (package-name pkg)
+             "nicknames" (%json-array (package-nicknames pkg))
+             "use" (%json-array
+                    (mapcar #'package-name (package-use-list pkg)))
+             "used_by" (%json-array
+                        (mapcar #'package-name (package-used-by-list pkg)))
+             "export_count" export-count
+             "exports_head" (%json-array (sort exports #'string<)))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "class-info"
+  :summary "Describe a CL class: supers, subs, precedence, slots."
+  :doc "Required: `name' (symbol). Returns direct supers, direct subs,
+precedence list, slot specs (name, type, initform, accessors)."
+  :params (list (list :name "name" :type "string" :required t
+                      :description "Class symbol.")
+                (list :name "package" :type "string" :required nil
+                      :description "Resolve in this package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((name (%json-getf params "name"))
+           (pkg-name (%json-getf params "package"))
+           (sym (and (stringp name)
+                     (%symbol-from-string name pkg-name :server server)))
+           (class (and sym (find-class sym nil))))
+      (cond
+        ((null class)
+         (%error-response id "eval-error"
+                          (format nil "no such class: ~A" name)))
+        (t
+         (handler-case
+             #+sbcl
+           (progn
+             (sb-mop:finalize-inheritance class)
+             (let* ((direct-supers
+                      (mapcar (lambda (c) (symbol-name (class-name c)))
+                              (sb-mop:class-direct-superclasses class)))
+                    (direct-subs
+                      (mapcar (lambda (c) (symbol-name (class-name c)))
+                              (sb-mop:class-direct-subclasses class)))
+                    (precedence
+                      (mapcar (lambda (c) (symbol-name (class-name c)))
+                              (sb-mop:class-precedence-list class)))
+                    (slots
+                      (loop for slot in (sb-mop:class-direct-slots class)
+                            collect
+                            (%json-object
+                             "name" (symbol-name
+                                     (sb-mop:slot-definition-name slot))
+                             "type" (%safe-prin1
+                                     (sb-mop:slot-definition-type slot))
+                             "initform" (let ((iff (sb-mop:slot-definition-initform slot)))
+                                          (and iff (%safe-prin1 iff)))
+                             "readers" (%json-array
+                                        (mapcar #'symbol-name
+                                                (sb-mop:slot-definition-readers slot)))
+                             "writers" (%json-array
+                                        (mapcar #'%safe-prin1
+                                                (sb-mop:slot-definition-writers slot)))))))
+               (%success-response
+                id
+                (%json-object
+                 "name" (symbol-name (class-name class))
+                 "direct_supers" (%json-array direct-supers)
+                 "direct_subs" (%json-array direct-subs)
+                 "precedence" (%json-array precedence)
+                 "slots" (%json-array slots)))))
+           #-sbcl
+           (%error-response id "eval-error" "class-info is SBCL-only")
+           (error (c)
+             (%error-response id "eval-error" (princ-to-string c))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "function-info"
+  :summary "Combined arglist, documentation, and known types for a function."
+  :doc "Required: `symbol'. Returns arglist, function-type (if known),
+documentation, and inline-p."
+  :params (list (list :name "symbol" :type "string" :required t
+                      :description "Function-bound symbol.")
+                (list :name "package" :type "string" :required nil
+                      :description "Resolve in this package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((sym-name (%json-getf params "symbol"))
+           (pkg-name (%json-getf params "package"))
+           (sym (and (stringp sym-name)
+                     (%symbol-from-string sym-name pkg-name :server server))))
+      (cond
+        ((or (null sym) (not (fboundp sym)))
+         (%error-response id "eval-error"
+                          (format nil "not fbound: ~A" sym-name)))
+        (t
+         (%success-response
+          id
+          (%json-object
+           "name" (symbol-name sym)
+           "package" (and (symbol-package sym)
+                          (package-name (symbol-package sym)))
+           "arglist" (%safe-prin1 (%arglist-of sym))
+           "documentation" (handler-case (documentation sym 'function)
+                             (error () nil))
+           "function_type"
+           #+sbcl (handler-case
+                      (%safe-prin1 (sb-introspect:function-type sym))
+                    (error () nil))
+           #-sbcl nil
+           "macro_p" (and (macro-function sym) t)
+           "generic_p" (and (fboundp sym)
+                            (typep (fdefinition sym) 'generic-function)
+                            t)))))))))
+
+(%register-method
+ (make-method-spec
+  :name "disassemble"
+  :summary "Capture the disassembly of a function."
+  :doc "Required: `symbol'. Captures cl:disassemble's stdout into the
+response. Bounded by the daemon's 1 MB output cap."
+  :params (list (list :name "symbol" :type "string" :required t
+                      :description "Function symbol.")
+                (list :name "package" :type "string" :required nil
+                      :description "Resolve in this package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((sym-name (%json-getf params "symbol"))
+           (pkg-name (%json-getf params "package"))
+           (sym (and (stringp sym-name)
+                     (%symbol-from-string sym-name pkg-name :server server))))
+      (cond
+        ((or (null sym) (not (fboundp sym)))
+         (%error-response id "eval-error"
+                          (format nil "not fbound: ~A" sym-name)))
+        (t
+         (let ((out (with-output-to-string (s)
+                      (handler-case (disassemble sym :stream s)
+                        (error (c) (format s "~A" c))))))
+           (%success-response id (%json-object "output" out)))))))))
+
+(%register-method
+ (make-method-spec
+  :name "describe-system"
+  :summary "ASDF reflection: a system's components, deps, source root."
+  :doc "Required: `name'. Returns the system's primary metadata as
+recorded by ASDF, plus its declared and resolved dependencies."
+  :params (list (list :name "name" :type "string" :required t
+                      :description "ASDF system name."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server ctx))
+    (let* ((name (%json-getf params "name"))
+           (sys (and (stringp name)
+                     (handler-case (asdf:find-system name nil)
+                       (error () nil)))))
+      (cond
+        ((null sys)
+         (%error-response id "eval-error"
+                          (format nil "no such system: ~A" name)))
+        (t
+         (%success-response
+          id
+          (%json-object
+           "name" (asdf:component-name sys)
+           "version" (handler-case (asdf:component-version sys)
+                       (error () nil))
+           "source_directory"
+           (handler-case (namestring (asdf:system-source-directory sys))
+             (error () nil))
+           "depends_on" (%json-array
+                         (mapcar (lambda (d)
+                                   (if (consp d) (%safe-prin1 d)
+                                       (princ-to-string d)))
+                                 (asdf:component-sideway-dependencies sys)))
+           "license" (handler-case (asdf:system-licence sys)
+                       (error () nil))
+           "description" (handler-case (asdf:system-description sys)
+                           (error () nil))
+           "author" (handler-case (asdf:system-author sys)
+                      (error () nil))))))))))
+
 (%register-method
  (make-method-spec
   :name "load-file"
