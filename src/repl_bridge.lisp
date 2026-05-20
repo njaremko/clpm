@@ -446,6 +446,12 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
    (eval-count :initform 0 :accessor server-eval-count)
    (redefinitions :initform (make-hash-table :test 'equal)
                   :reader server-redefinitions)
+   (inspectors :initform (make-hash-table :test 'equal)
+               :reader server-inspectors)
+   (inspectors-mutex :initform (clpm.repl-bridge.compat:make-mutex
+                                :name "clpm.repl-bridge.inspectors")
+                     :reader server-inspectors-mutex)
+   (inspector-counter :initform 0 :accessor server-inspector-counter)
    (shutdown-requested? :initform nil :accessor server-shutdown-requested?)
    (event-log :initform nil :accessor server-event-log)))
 
@@ -2477,6 +2483,529 @@ recorded by ASDF, plus its declared and resolved dependencies."
                            (error () nil))
            "author" (handler-case (asdf:system-author sys)
                       (error () nil))))))))))
+
+;;; ----------------------------------------------------------------------------
+;;; Inspector (#120-#125)
+;;;
+;;; An inspector session is a stack of focused values. Each call to
+;;; inspect-into pushes a new frame; inspect-pop pops one. The session
+;;; renders its current top-of-stack as a list of "parts" -- one entry
+;;; per slot / element / kv pair -- shaped to the underlying type.
+;;; ----------------------------------------------------------------------------
+
+(defstruct inspector-session
+  id              ; string "ins-N"
+  ;; Stack: list of values, newest first. (car STACK) is the current focus.
+  stack
+  ;; Whether mutate is permitted (opt-in per session).
+  mutable?
+  ;; Pagination state: a plist :offset N (default 0).
+  view-state)
+
+(defun %allocate-inspector (server value mutable?)
+  (clpm.repl-bridge.compat:with-mutex
+      ((server-inspectors-mutex server))
+    (incf (server-inspector-counter server))
+    (let* ((id (format nil "ins-~A" (server-inspector-counter server)))
+           (sess (make-inspector-session
+                  :id id :stack (list value)
+                  :mutable? (and mutable? t)
+                  :view-state (list :offset 0))))
+      (setf (gethash id (server-inspectors server)) sess)
+      sess)))
+
+(defun %lookup-inspector (server id)
+  (clpm.repl-bridge.compat:with-mutex
+      ((server-inspectors-mutex server))
+    (gethash id (server-inspectors server))))
+
+(defun %drop-inspector (server id)
+  (clpm.repl-bridge.compat:with-mutex
+      ((server-inspectors-mutex server))
+    (remhash id (server-inspectors server))))
+
+(defun %inspector-current (sess)
+  (first (inspector-session-stack sess)))
+
+(defparameter +inspector-page-size+ 100)
+(defparameter +inspector-print-length+ 64)
+(defparameter +inspector-print-level+ 4)
+
+(defun %inspect-part-repr (value)
+  (let ((*print-length* +inspector-print-length+)
+        (*print-level* +inspector-print-level+)
+        (*print-pretty* nil))
+    (%safe-prin1 value)))
+
+(defun %proper-list-p (x)
+  "T if X is a proper list (NIL or a cons whose final cdr is NIL)."
+  (or (null x)
+      (and (consp x)
+           (handler-case (and (listp (cdr (last x))) t)
+             (error () nil)))))
+
+(defun %inspector-parts (value offset)
+  "Render parts for VALUE starting from OFFSET. Returns
+(values parts kind total-count). Pagination is the caller's job: this
+slices [offset, offset+page-size)."
+  (let ((page +inspector-page-size+))
+    (cond
+      ;; Proper lists: render as indexed elements.
+      ((%proper-list-p value)
+       (let* ((len (length value))
+              (start (max 0 (min offset len)))
+              (end (min (+ start page) len))
+              (parts (loop for i from start below end
+                           collect (%json-object
+                                    "i" i
+                                    "label" (princ-to-string i)
+                                    "repr" (%inspect-part-repr (nth i value))
+                                    "kind" "elem"))))
+         (values parts "list" len)))
+      ;; Dotted pair: car/cdr.
+      ((consp value)
+       (let ((parts (list
+                     (%json-object "i" 0 "label" "car"
+                                   "repr" (%inspect-part-repr (car value))
+                                   "kind" "car")
+                     (%json-object "i" 1 "label" "cdr"
+                                   "repr" (%inspect-part-repr (cdr value))
+                                   "kind" "cdr"))))
+         (values parts "cons" 2)))
+      (t
+       (typecase value
+      (string
+       (let* ((len (length value))
+              (start (max 0 (min offset len)))
+              (end (min (+ start page) len))
+              (parts (loop for i from start below end
+                           collect (%json-object
+                                    "i" i
+                                    "label" (princ-to-string i)
+                                    "repr" (%inspect-part-repr (char value i))
+                                    "kind" "char"))))
+         (values parts "string" len)))
+      (vector
+       (let* ((len (length value))
+              (start (max 0 (min offset len)))
+              (end (min (+ start page) len))
+              (parts (loop for i from start below end
+                           collect (%json-object
+                                    "i" i
+                                    "label" (princ-to-string i)
+                                    "repr" (%inspect-part-repr (aref value i))
+                                    "kind" "elem"))))
+         (values parts "vector" len)))
+      (list
+       (let* ((len (length value))
+              (start (max 0 (min offset len)))
+              (end (min (+ start page) len))
+              (parts (loop for i from start below end
+                           collect (%json-object
+                                    "i" i
+                                    "label" (princ-to-string i)
+                                    "repr" (%inspect-part-repr (nth i value))
+                                    "kind" "elem"))))
+         (values parts "list" len)))
+      (hash-table
+       (let ((entries '())
+             (i 0))
+         (maphash
+          (lambda (k v)
+            (when (and (>= i offset) (< i (+ offset page)))
+              (push (%json-object
+                     "i" i
+                     "label" (%inspect-part-repr k)
+                     "repr" (%inspect-part-repr v)
+                     "kind" "kv")
+                    entries))
+            (incf i))
+          value)
+         (values (nreverse entries) "hash-table" (hash-table-count value))))
+      (symbol
+       (let* ((parts
+                (append
+                 (list (%json-object "i" 0 "label" "name"
+                                     "repr" (%safe-prin1 (symbol-name value))
+                                     "kind" "name"))
+                 (list (%json-object "i" 1 "label" "package"
+                                     "repr" (and (symbol-package value)
+                                                 (package-name (symbol-package value)))
+                                     "kind" "package"))
+                 (when (boundp value)
+                   (list (%json-object "i" 2 "label" "value"
+                                       "repr" (%inspect-part-repr
+                                               (symbol-value value))
+                                       "kind" "value")))
+                 (when (fboundp value)
+                   (list (%json-object "i" 3 "label" "function"
+                                       "repr" (%inspect-part-repr
+                                               (symbol-function value))
+                                       "kind" "function")))
+                 (let ((p (symbol-plist value)))
+                   (when p
+                     (list (%json-object "i" 4 "label" "plist"
+                                         "repr" (%inspect-part-repr p)
+                                         "kind" "plist")))))))
+         (values parts "symbol" (length parts))))
+      (standard-object
+       #+sbcl
+       (let* ((class (class-of value))
+              (slots (handler-case
+                         (progn
+                           (sb-mop:finalize-inheritance class)
+                           (sb-mop:class-slots class))
+                       (error () nil)))
+              (parts (loop for slot in slots
+                           for idx from 0
+                           for name = (sb-mop:slot-definition-name slot)
+                           collect
+                           (%json-object
+                            "i" idx
+                            "label" (symbol-name name)
+                            "repr" (if (slot-boundp value name)
+                                       (%inspect-part-repr
+                                        (slot-value value name))
+                                       "<unbound>")
+                            "kind" "slot"))))
+         (values parts "instance" (length parts)))
+       #-sbcl
+       (values nil "instance" 0))
+      (structure-object
+       #+sbcl
+       (let* ((class (class-of value))
+              (slots (handler-case
+                         (progn
+                           (sb-mop:finalize-inheritance class)
+                           (sb-mop:class-slots class))
+                       (error () nil)))
+              (parts (loop for slot in slots
+                           for idx from 0
+                           for name = (sb-mop:slot-definition-name slot)
+                           collect
+                           (%json-object
+                            "i" idx
+                            "label" (symbol-name name)
+                            "repr" (if (slot-boundp value name)
+                                       (%inspect-part-repr
+                                        (slot-value value name))
+                                       "<unbound>")
+                            "kind" "slot"))))
+         (values parts "struct" (length parts)))
+       #-sbcl
+       (values nil "struct" 0))
+      (t
+       (values nil (string-downcase (string (type-of value))) 0)))))))
+
+(defun %inspector-into (sess i)
+  "Push the i-th part of the current focus onto the stack. Returns the
+new focus, or :no-part on out-of-range."
+  (let ((focus (%inspector-current sess)))
+    (typecase focus
+      (cons (case i
+              (0 (push (car focus) (inspector-session-stack sess))
+                 (car focus))
+              (1 (push (cdr focus) (inspector-session-stack sess))
+                 (cdr focus))
+              (t :no-part)))
+      (string
+       (cond ((and (integerp i) (<= 0 i (1- (length focus))))
+              (push (char focus i) (inspector-session-stack sess))
+              (char focus i))
+             (t :no-part)))
+      (vector
+       (cond ((and (integerp i) (<= 0 i (1- (length focus))))
+              (push (aref focus i) (inspector-session-stack sess))
+              (aref focus i))
+             (t :no-part)))
+      (list
+       (cond ((and (integerp i) (<= 0 i (1- (length focus))))
+              (push (nth i focus) (inspector-session-stack sess))
+              (nth i focus))
+             (t :no-part)))
+      (hash-table
+       (let ((found :no-part))
+         (let ((j 0))
+           (maphash (lambda (k v)
+                      (when (= j i)
+                        (push (cons k v) (inspector-session-stack sess))
+                        (setf found (cons k v)))
+                      (incf j))
+                    focus))
+         found))
+      (standard-object
+       #+sbcl
+       (handler-case
+           (let* ((class (class-of focus))
+                  (slots (progn (sb-mop:finalize-inheritance class)
+                                (sb-mop:class-slots class))))
+             (cond
+               ((and (integerp i) (< i (length slots)))
+                (let* ((slot (nth i slots))
+                       (name (sb-mop:slot-definition-name slot))
+                       (v (if (slot-boundp focus name)
+                              (slot-value focus name)
+                              :unbound)))
+                  (push v (inspector-session-stack sess))
+                  v))
+               (t :no-part)))
+         (error () :no-part)))
+      (t :no-part))))
+
+(defun %inspector-render (sess)
+  "Build the v2 JSON payload describing SESS's current view."
+  (let* ((focus (%inspector-current sess))
+         (offset (or (getf (inspector-session-view-state sess) :offset) 0)))
+    (multiple-value-bind (parts kind total)
+        (%inspector-parts focus offset)
+      (%json-object
+       "session" (inspector-session-id sess)
+       "value_repr" (%inspect-part-repr focus)
+       "type" (string-downcase
+               (handler-case (princ-to-string (type-of focus))
+                 (error () "?")))
+       "kind" kind
+       "parts" (%json-array parts)
+       "offset" offset
+       "total" total
+       "actions" (%json-array
+                  (append '("into" "pop" "eval" "page")
+                          (when (inspector-session-mutable? sess)
+                            '("mutate"))
+                          '("close")))
+       "depth" (length (inspector-session-stack sess))))))
+
+(%register-method
+ (make-method-spec
+  :name "inspect"
+  :summary "Open an inspector session on the value of FORM."
+  :doc "Required: `form'. Optional: `mutable' (boolean), `package'.
+Returns the initial inspection view including a `session' id used by
+subsequent inspect-* RPCs."
+  :params (list (list :name "form" :type "string" :required t
+                      :description "Form whose value is inspected.")
+                (list :name "mutable" :type "boolean" :required nil
+                      :description "Allow inspect-mutate.")
+                (list :name "package" :type "string" :required nil
+                      :description "Reader package for FORM."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((form-text (%json-getf params "form"))
+           (mutable (%json-getf params "mutable"))
+           (pkg-name (%json-getf params "package"))
+           (pkg (or (and pkg-name (%find-package-loose pkg-name))
+                    (and server (server-current-package server))
+                    (find-package "COMMON-LISP-USER"))))
+      (cond
+        ((not (stringp form-text))
+         (%error-response id "protocol-error" "missing `form' param"))
+        (t
+         (handler-case
+             (let* ((parsed (let ((*package* pkg))
+                              (%read-form form-text)))
+                    (value (let ((*package* pkg)) (eval parsed)))
+                    (sess (%allocate-inspector server value mutable)))
+               (%success-response id (%inspector-render sess)))
+           (error (c)
+             (%error-response id "eval-error" (princ-to-string c))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "inspect-into"
+  :summary "Push the i-th part of the current focus onto the inspector stack."
+  :doc "Required: `session', `i'. Returns the new view."
+  :params (list (list :name "session" :type "string" :required t
+                      :description "Inspector session id.")
+                (list :name "i" :type "integer" :required t
+                      :description "Part index to descend into."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((sid (%json-getf params "session"))
+           (i (%json-getf params "i"))
+           (sess (and (stringp sid) (%lookup-inspector server sid))))
+      (cond
+        ((null sess)
+         (%error-response id "eval-error" "no such inspector session"))
+        ((not (integerp i))
+         (%error-response id "protocol-error" "missing `i' param"))
+        (t
+         (let ((res (%inspector-into sess i)))
+           (cond
+             ((eq res :no-part)
+              (%error-response id "eval-error"
+                               (format nil "no part ~A" i)))
+             (t (%success-response id (%inspector-render sess)))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "inspect-pop"
+  :summary "Pop one frame off the inspector stack."
+  :doc "Required: `session'. Pops back to the previous focus. No-op
+when the stack already only has one frame; returns that frame."
+  :params (list (list :name "session" :type "string" :required t
+                      :description "Inspector session id."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((sid (%json-getf params "session"))
+           (sess (and (stringp sid) (%lookup-inspector server sid))))
+      (cond
+        ((null sess)
+         (%error-response id "eval-error" "no such inspector session"))
+        (t
+         (when (> (length (inspector-session-stack sess)) 1)
+           (pop (inspector-session-stack sess))
+           (setf (getf (inspector-session-view-state sess) :offset) 0))
+         (%success-response id (%inspector-render sess))))))))
+
+(%register-method
+ (make-method-spec
+  :name "inspect-eval"
+  :summary "Evaluate FORM with `*' bound to the inspector's current focus."
+  :doc "Required: `session', `form'. The returned value is rendered the
+same way as the inspector view; the session is *not* automatically
+descended into the result."
+  :params (list (list :name "session" :type "string" :required t
+                      :description "Inspector session id.")
+                (list :name "form" :type "string" :required t
+                      :description "Form to evaluate.")
+                (list :name "package" :type "string" :required nil
+                      :description "Reader package for FORM."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((sid (%json-getf params "session"))
+           (sess (and (stringp sid) (%lookup-inspector server sid)))
+           (form-text (%json-getf params "form"))
+           (pkg-name (%json-getf params "package"))
+           (pkg (or (and pkg-name (%find-package-loose pkg-name))
+                    (and server (server-current-package server))
+                    (find-package "COMMON-LISP-USER"))))
+      (cond
+        ((null sess)
+         (%error-response id "eval-error" "no such inspector session"))
+        ((not (stringp form-text))
+         (%error-response id "protocol-error" "missing `form' param"))
+        (t
+         (handler-case
+             (let* ((focus (%inspector-current sess))
+                    (parsed (let ((*package* pkg))
+                              (%read-form form-text)))
+                    (value (progv (list (find-symbol "*" "CL"))
+                                  (list focus)
+                             (let ((*package* pkg))
+                               (eval parsed)))))
+               (%success-response
+                id
+                (%json-object "value_repr" (%inspect-part-repr value))))
+           (error (c)
+             (%error-response id "eval-error" (princ-to-string c))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "inspect-mutate"
+  :summary "Set part i of the focus to the value of FORM."
+  :doc "Required: `session', `i', `form'. Requires the session to have
+been opened with `mutable: true'. Returns the refreshed view."
+  :params (list (list :name "session" :type "string" :required t
+                      :description "Inspector session id.")
+                (list :name "i" :type "integer" :required t
+                      :description "Part index to overwrite.")
+                (list :name "form" :type "string" :required t
+                      :description "Form whose value replaces the part."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((sid (%json-getf params "session"))
+           (sess (and (stringp sid) (%lookup-inspector server sid)))
+           (i (%json-getf params "i"))
+           (form-text (%json-getf params "form")))
+      (cond
+        ((null sess)
+         (%error-response id "eval-error" "no such inspector session"))
+        ((not (inspector-session-mutable? sess))
+         (%error-response id "protocol-error"
+                          "session is not mutable; reopen with mutable: true"))
+        ((or (not (integerp i)) (not (stringp form-text)))
+         (%error-response id "protocol-error" "missing `i' or `form' param"))
+        (t
+         (handler-case
+             (let* ((focus (%inspector-current sess))
+                    (parsed (%read-form form-text))
+                    (new-value (eval parsed)))
+               (typecase focus
+                 (cons (case i
+                         (0 (setf (car focus) new-value))
+                         (1 (setf (cdr focus) new-value))))
+                 (vector (setf (aref focus i) new-value))
+                 (hash-table
+                  (let ((j 0) (target-key nil))
+                    (maphash (lambda (k v)
+                               (declare (ignore v))
+                               (when (= j i) (setf target-key k))
+                               (incf j))
+                             focus)
+                    (when target-key
+                      (setf (gethash target-key focus) new-value))))
+                 (standard-object
+                  #+sbcl
+                  (let* ((class (class-of focus))
+                         (slots (progn (sb-mop:finalize-inheritance class)
+                                       (sb-mop:class-slots class))))
+                    (when (< i (length slots))
+                      (setf (slot-value focus
+                                        (sb-mop:slot-definition-name
+                                         (nth i slots)))
+                            new-value)))))
+               (%success-response id (%inspector-render sess)))
+           (error (c)
+             (%error-response id "eval-error" (princ-to-string c))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "inspect-page"
+  :summary "Set the page offset for the inspector view."
+  :doc "Required: `session', `offset' (integer >= 0). Returns the
+refreshed view."
+  :params (list (list :name "session" :type "string" :required t
+                      :description "Inspector session id.")
+                (list :name "offset" :type "integer" :required t
+                      :description "Starting index for the next page."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((sid (%json-getf params "session"))
+           (sess (and (stringp sid) (%lookup-inspector server sid)))
+           (offset (%json-getf params "offset")))
+      (cond
+        ((null sess)
+         (%error-response id "eval-error" "no such inspector session"))
+        ((not (integerp offset))
+         (%error-response id "protocol-error" "missing `offset' param"))
+        (t
+         (setf (getf (inspector-session-view-state sess) :offset)
+               (max 0 offset))
+         (%success-response id (%inspector-render sess))))))))
+
+(%register-method
+ (make-method-spec
+  :name "inspect-close"
+  :summary "Discard an inspector session."
+  :doc "Required: `session'. Frees the server-side stack."
+  :params (list (list :name "session" :type "string" :required t
+                      :description "Inspector session id."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let ((sid (%json-getf params "session")))
+      (cond
+        ((not (stringp sid))
+         (%error-response id "protocol-error" "missing `session' param"))
+        (t
+         (%drop-inspector server sid)
+         (%success-response id (%json-object))))))))
 
 (%register-method
  (make-method-spec

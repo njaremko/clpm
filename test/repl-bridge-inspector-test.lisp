@@ -1,0 +1,190 @@
+;;;; test/repl-bridge-inspector-test.lisp - inspector sessions.
+;;;;
+;;;; Covers BRIDGE_V2 #120 (inspect FORM), #121 (inspect-into / pop),
+;;;; #122 (inspect-eval), #123 (inspect-mutate), #124 (pagination),
+;;;; #125 (inspect-close).
+
+(require :asdf)
+(require :sb-bsd-sockets)
+
+(let* ((this-file (or *load-truename* *load-pathname*))
+       (test-dir (uiop:pathname-directory-pathname this-file))
+       (repo-root (uiop:pathname-parent-directory-pathname test-dir)))
+  (push repo-root asdf:*central-registry*))
+
+(format t "Loading CLPM...~%")
+(handler-case
+    (asdf:load-system :clpm :verbose nil)
+  (error (c)
+    (format *error-output* "Failed to load CLPM: ~A~%" c)
+    (sb-ext:exit :code 1)))
+(format t "CLPM loaded.~%")
+
+(defun fail (fmt &rest args)
+  (apply #'format *error-output* (concatenate 'string "FAIL: " fmt "~%") args)
+  (sb-ext:exit :code 1))
+
+(defun assert-true (x fmt &rest args)
+  (unless x (apply #'fail fmt args)))
+
+(defun assert-equal-string (expected actual)
+  (unless (and (stringp actual) (string= expected actual))
+    (fail "expected ~S, got ~S" expected actual)))
+
+(defun lookup (object key)
+  (when (and (consp object) (eq (car object) :object))
+    (cdr (assoc key (cadr object) :test #'string=))))
+
+(defun array-items (a)
+  (when (and (consp a) (eq (car a) :array))
+    (cadr a)))
+
+(defun with-daemon (fn)
+  (let* ((sock (format nil "/tmp/clpm-rb-ins-~A.sock" (random (expt 2 32))))
+         (thread (sb-thread:make-thread
+                  (lambda ()
+                    (handler-case
+                        (clpm.repl-bridge:start-server :socket-path sock)
+                      (error (c) (format *error-output* "daemon: ~A~%" c))))
+                  :name "test-bridge-ins")))
+    (unwind-protect
+         (progn
+           (loop for i from 0 below 50
+                 while (not (probe-file sock))
+                 do (sleep 0.05))
+           (assert-true (probe-file sock) "daemon never started")
+           (funcall fn sock))
+      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+        (error () nil))
+      (loop for i from 0 below 30
+            while (sb-thread:thread-alive-p thread)
+            do (sleep 0.05))
+      (when (sb-thread:thread-alive-p thread)
+        (ignore-errors (sb-thread:terminate-thread thread)))
+      (ignore-errors (delete-file sock)))))
+
+(defun do-rpc (sock method params)
+  (clpm.repl-bridge:send-request sock method
+                                  :params (list :object params)))
+
+;;; ----------------------------------------------------------------------------
+;;; #120: inspect FORM returns parts for a list.
+
+(format t "Test: inspect a 5-element list~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((resp (do-rpc sock "inspect"
+                          (list (cons "form" "(list 10 20 30 40 50)"))))
+           (result (lookup resp "result"))
+           (parts (array-items (lookup result "parts"))))
+      (assert-true result "no result: ~S" resp)
+      (assert-true (= 5 (length parts))
+                   "expected 5 parts, got ~A" (length parts))
+      (assert-equal-string "10" (lookup (first parts) "repr"))
+      (assert-equal-string "50" (lookup (fifth parts) "repr")))))
+(format t "  inspect list OK~%")
+
+;;; ----------------------------------------------------------------------------
+;;; #121: inspect-into descends; inspect-pop restores.
+
+(format t "Test: inspect-into / inspect-pop~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((initial (do-rpc sock "inspect"
+                             (list (cons "form" "(list (list :a :b) :c)"))))
+           (sid (lookup (lookup initial "result") "session"))
+           (into (do-rpc sock "inspect-into"
+                          (list (cons "session" sid)
+                                (cons "i" 0))))
+           (in-result (lookup into "result"))
+           (in-parts (array-items (lookup in-result "parts"))))
+      (assert-equal-string "(:A :B)" (lookup in-result "value_repr"))
+      (assert-true (= 2 (length in-parts))
+                   "inner expected 2 parts, got ~A" (length in-parts))
+      ;; Pop back; verify we're at the outer list again.
+      (let* ((popped (do-rpc sock "inspect-pop" (list (cons "session" sid))))
+             (po-result (lookup popped "result")))
+        (assert-true (search "C" (lookup po-result "value_repr"))
+                     "after pop, expected outer list focus, got ~S"
+                     (lookup po-result "value_repr"))))))
+(format t "  into/pop OK~%")
+
+;;; ----------------------------------------------------------------------------
+;;; #122: inspect-eval gets * bound to focus.
+
+(format t "Test: inspect-eval reads * = focus~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((init (do-rpc sock "inspect"
+                          (list (cons "form" "(list 5 6 7)"))))
+           (sid (lookup (lookup init "result") "session"))
+           (resp (do-rpc sock "inspect-eval"
+                          (list (cons "session" sid)
+                                (cons "form" "(length *)"))))
+           (vr (lookup (lookup resp "result") "value_repr")))
+      (assert-equal-string "3" vr))))
+(format t "  inspect-eval OK~%")
+
+;;; ----------------------------------------------------------------------------
+;;; #123: inspect-mutate replaces a vector element.
+
+(format t "Test: inspect-mutate on a vector~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((init (do-rpc sock "inspect"
+                          (list (cons "form" "(make-array 3 :initial-element 0)")
+                                (cons "mutable" t))))
+           (sid (lookup (lookup init "result") "session")))
+      (do-rpc sock "inspect-mutate"
+              (list (cons "session" sid)
+                    (cons "i" 1)
+                    (cons "form" "42")))
+      (let* ((view (do-rpc sock "inspect-pop"
+                            ;; pop is a no-op when stack is len 1, so use it
+                            ;; just to re-fetch the rendered view.
+                            (list (cons "session" sid))))
+             (parts (array-items
+                     (lookup (lookup view "result") "parts"))))
+        (assert-equal-string "42" (lookup (second parts) "repr"))))))
+(format t "  mutate OK~%")
+
+;;; ----------------------------------------------------------------------------
+;;; #124: pagination.
+
+(format t "Test: inspect-page on a 250-element list~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((init (do-rpc sock "inspect"
+                          (list (cons "form"
+                                      "(loop for i from 0 below 250 collect i)"))))
+           (sid (lookup (lookup init "result") "session"))
+           (first-result (lookup init "result")))
+      (assert-true (= 250 (lookup first-result "total")) "total mismatch")
+      (assert-true (= 100 (length (array-items
+                                    (lookup first-result "parts"))))
+                   "first page should be 100")
+      (let* ((paged (do-rpc sock "inspect-page"
+                             (list (cons "session" sid)
+                                   (cons "offset" 100))))
+             (pr (lookup paged "result"))
+             (parts (array-items (lookup pr "parts"))))
+        (assert-equal-string "100" (lookup (first parts) "repr"))))))
+(format t "  pagination OK~%")
+
+;;; ----------------------------------------------------------------------------
+;;; #125: inspect-close drops the session.
+
+(format t "Test: inspect-close~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((init (do-rpc sock "inspect"
+                          (list (cons "form" "(list 1 2 3)"))))
+           (sid (lookup (lookup init "result") "session")))
+      (do-rpc sock "inspect-close" (list (cons "session" sid)))
+      (let ((after (do-rpc sock "inspect-into"
+                            (list (cons "session" sid) (cons "i" 0)))))
+        (assert-true (lookup after "error") "expected error after close")))))
+(format t "  close OK~%")
+
+(format t "~%REPL-bridge inspector tests PASSED!~%")
+(sb-ext:exit :code 0)
