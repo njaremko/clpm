@@ -674,22 +674,43 @@ recent call (closest to the error)."
   (mapcar (lambda (r) (string (restart-name r))) (compute-restarts)))
 
 (defun %restart-arity (restart)
-  "Best-effort arity for the restart's interactive-function. Without one,
-return 0 (the restart takes no args), unless the restart's name suggests
-otherwise: USE-VALUE / STORE-VALUE conventionally take one arg."
-  (let* ((interactive
-           (or (sb-kernel::restart-interactive-function restart) nil))
+  "Best-effort arity for the restart's body lambda-list (how many
+values INVOKE-RESTART will consume). Returns either a non-negative
+INTEGER -- meaning \"exactly N positional arguments\" -- or the
+keyword :VARIADIC, meaning \"SBCL exposes the restart through a &REST
+wrapper and the true body arity isn't observable, so any number is
+plausible\" (this happens for `restart-case' clauses with multiple
+positional parameters).
+
+The :interactive thunk is a distinct contract -- it takes zero args
+and returns a list -- so its arity is the wrong observation to
+report here. We probe the restart's body function via sb-kernel
+internals, falling back to standard-restart conventions."
+  (let* ((body-fn (handler-case
+                      (sb-kernel::restart-function restart)
+                    (error () nil)))
          (name (and (restart-name restart)
-                    (symbol-name (restart-name restart)))))
+                    (symbol-name (restart-name restart))))
+         (lambda-arity
+           (lambda (lambda-list)
+             (let ((required 0)
+                   (variadic nil))
+               (dolist (s lambda-list)
+                 (cond
+                   ((member s '(&optional &key &aux))
+                    (return))
+                   ((eq s '&rest)
+                    (setf variadic t)
+                    (return))
+                   ((symbolp s) (incf required))))
+               (if variadic :variadic required)))))
     (cond
-      (interactive
-       (let* ((args (handler-case (sb-introspect:function-lambda-list interactive)
-                      (error () nil))))
-         (count-if (lambda (s)
-                     (and (symbolp s)
-                          (not (member s lambda-list-keywords))))
-                   args)))
-      ((member name '("USE-VALUE" "STORE-VALUE") :test #'string=) 1)
+      (body-fn
+       (let ((ll (handler-case (sb-introspect:function-lambda-list body-fn)
+                   (error () nil))))
+         (if ll (funcall lambda-arity ll) 0)))
+      ((member name '("USE-VALUE" "STORE-VALUE" "RETURN-VALUE")
+               :test #'string=) 1)
       (t 0))))
 
 (defun %restart-json (restart)
@@ -708,8 +729,16 @@ otherwise: USE-VALUE / STORE-VALUE conventionally take one arg."
                 (cons "interactive"
                       (and (sb-kernel::restart-interactive-function restart) t))
                 (cons "args_arity"
-                      (handler-case (%restart-arity restart)
-                        (error () 0)))))))
+                      ;; INTEGER for an exact required-arg count, or
+                      ;; the string "variadic" when SBCL's restart
+                      ;; wrapper hides a multi-arg restart-case clause
+                      ;; behind &REST. JSON has no way to express that
+                      ;; gracefully other than as a tag string.
+                      (let ((a (handler-case (%restart-arity restart)
+                                 (error () 0))))
+                        (case a
+                          (:variadic "variadic")
+                          (t a))))))))
 
 (defun %condition-slot-values (condition)
   "Capture the slot values of CONDITION as a list of (slot-name . prin1)
@@ -1090,6 +1119,19 @@ symbols resolve as the user expects."
     (%read-form form-text)))
 
 #+sbcl
+(defun %debug-internal-symbol-p (sym)
+  "True if SYM lives in a system package whose debug-vars we should
+elide from frame-eval LET-wrappers (handler clusters, raw lexenvs,
+ORIGINAL-EXP, etc.). Matches SBCL's nested SB-* packages plus the
+COMMON-LISP package itself -- but *not* COMMON-LISP-USER, since
+that's where ad-hoc user definitions land."
+  (let ((pkg (and (symbolp sym) (symbol-package sym))))
+    (when pkg
+      (let ((name (package-name pkg)))
+        (or (string= name "COMMON-LISP")
+            (and (>= (length name) 3)
+                 (string= "SB-" name :end2 3)))))))
+
 (defun %eval-in-frame (session frame-index form-text)
   "Evaluate FORM-TEXT in the lexenv of the frame at FRAME-INDEX. Returns
 an alist of result fields suitable for emit-event."
@@ -1108,14 +1150,35 @@ an alist of result fields suitable for emit-event."
                               (when debug-fun
                                 (sb-di:do-debug-fun-vars (v debug-fun)
                                   (let ((name (sb-di:debug-var-symbol v)))
-                                    (when name
+                                    ;; Skip SBCL internal locals --
+                                    ;; their values (handler clusters,
+                                    ;; lexenvs, raw forms) routinely
+                                    ;; don't survive being quoted into
+                                    ;; a LET binding and just produce
+                                    ;; noise the user can't act on.
+                                    (when (and name
+                                               (not (%debug-internal-symbol-p
+                                                     name)))
                                       (push (list name
                                                   (list 'quote
                                                         (handler-case
                                                             (sb-di:debug-var-value v frame)
                                                           (error () nil))))
                                             vars)))))
-                              (nreverse vars))
+                              ;; A debug-fun can expose the same logical
+                              ;; name multiple times (loop rebindings,
+                              ;; SBCL's internal SB-IMPL::NAME alias,
+                              ;; etc.). LET would signal a compile-time
+                              ;; "occurs more than once" error, so keep
+                              ;; only the most-recently-bound copy --
+                              ;; that's what the user sees at the break.
+                              ;; PUSH stored newest first; default
+                              ;; DELETE-DUPLICATES keeps the first
+                              ;; occurrence, which is what we want.
+                              (nreverse
+                               (delete-duplicates vars
+                                                  :key #'first
+                                                  :test #'eq)))
                           (error () nil)))
               (pkg (or (and *server* (server-current-package *server*))
                        (find-package "COMMON-LISP-USER"))))

@@ -1846,15 +1846,25 @@ the *bottom* of the stack and keep the user portion. The first
     (nreverse kept)))
 
 (defun %bridge-print-restart (stream restart-obj)
-  "Render one restart object as `  NAME [arity N] -- report'."
+  "Render one restart object as `  NAME [arity hint] [, interactive] -- report'.
+
+`args_arity' may be a non-negative integer (exact required count) or
+the string \"variadic\" -- the daemon's signal that SBCL hides a
+multi-arg restart-case clause behind an &REST wrapper."
   (let ((name (%bridge-field restart-obj "name"))
         (arity (%bridge-field restart-obj "args_arity"))
         (interactive (%bridge-field restart-obj "interactive"))
         (report (%bridge-field restart-obj "report")))
     (format stream "  ~A" (or name "?"))
-    (when (and (integerp arity) (plusp arity))
-      (format stream " (~D arg~:P~:[~;, interactive~])"
-              arity interactive))
+    (let ((arity-text
+            (cond
+              ((and (integerp arity) (plusp arity))
+               (format nil "~D arg~:P" arity))
+              ((and (stringp arity) (string= arity "variadic"))
+               "variadic args"))))
+      (when (or arity-text interactive)
+        (format stream " (~@[~A~]~:[~;~:[~;, ~]interactive~])"
+                arity-text interactive arity-text)))
     (when (and report (stringp report) (plusp (length report)))
       (format stream " -- ~A"
               (if (search #.(string #\Newline) report)
