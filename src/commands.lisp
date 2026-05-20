@@ -3171,8 +3171,15 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
     (%bridge-with-call (obj "kill-worker"
                             :params (%bridge-make-params
                                      (list (cons "name" name))))
-      (declare (ignore obj))
-      (format t "killed ~A~%" name))))
+      ;; The daemon already reports `killed: false' when no worker by
+      ;; that name exists; without honoring that the CLI would claim
+      ;; success for typo'd names.
+      (cond
+        ((%bridge-field obj "killed")
+         (format t "killed worker ~A~%" name))
+        (t
+         (format *error-output* "no such worker: ~A~%" name)
+         (return-from %bridge-cmd-kill-worker 1))))))
 
 (defun %bridge-cmd-reset (args)
   (multiple-value-bind (opts pos)
