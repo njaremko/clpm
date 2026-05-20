@@ -2927,14 +2927,36 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
     (%bridge-with-call (obj "compile-file"
                             :params (%bridge-make-params
                                      (list (cons "path" path))))
-      (let ((diags (%bridge-array-items (%bridge-field obj "diagnostics"))))
-        (format t "compiled ~A~%" (or (%bridge-field obj "fasl") path))
-        (when diags
-          (dolist (d diags)
-            (let* ((o (cadr d))
-                   (sev (%bridge-field o "severity"))
-                   (msg (%bridge-field o "message")))
-              (format t "  ~A: ~A~%" sev msg))))))))
+      (let* ((success (%bridge-field obj "success"))
+             (fasl (or (%bridge-field obj "output_truename")
+                       (%bridge-field obj "fasl")))
+             (warnings (%bridge-field obj "warnings_p"))
+             (failure (%bridge-field obj "failure_p"))
+             (diags (%bridge-array-items (%bridge-field obj "diagnostics"))))
+        (cond
+          ((eq success t)
+           (format t "compiled ~A~%" (or fasl path)))
+          ((or failure (null success))
+           (format *error-output* "FAILED to compile ~A~%" path)))
+        (cond
+          (diags
+           (dolist (d diags)
+             (let* ((o (cadr d))
+                    (sev (%bridge-field o "severity"))
+                    (msg (%bridge-field o "message")))
+               (format t "  ~A: ~A~%" sev msg))))
+          (t
+           ;; Daemon doesn't (yet) stream individual diagnostics;
+           ;; surface the rolled-up flags so the user knows whether
+           ;; compile-file's *compile-warnings* / *compile-failure*
+           ;; were tripped.
+           (when warnings
+             (format *error-output* "  (compile produced warnings)~%"))
+           (when failure
+             (format *error-output* "  (compile produced failures)~%"))))
+        ;; Non-zero exit if compile failed.
+        (when (or failure (and (null success) (null (eq success t))))
+          (return-from %bridge-cmd-compile-file 1))))))
 
 (defun %bridge-cmd-load-file (args)
   "`clpm repl-bridge load-file PATH'."

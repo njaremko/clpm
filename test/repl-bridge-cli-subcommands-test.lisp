@@ -324,6 +324,22 @@
                    (assert-contains stdout "hi")))
                (format t "  compile-file/load-file flow OK~%")
 
+               (format t "Test: compile-file failure surfaces flags + rc=1~%")
+               (let ((broken (merge-pathnames "broken.lisp" proj)))
+                 (with-open-file (s broken :direction :output
+                                           :if-exists :supersede)
+                   ;; unbalanced paren forces a hard failure
+                   (write-string "(defun broken () (+ 1 " s))
+                 (multiple-value-bind (rc stdout stderr)
+                     (run-cli-captured (list "repl-bridge" "compile-file"
+                                             (namestring broken)))
+                   (declare (ignore stdout))
+                   (assert-eql 1 rc)
+                   (assert-true (or (search "FAILED" stderr)
+                                    (search "failures" stderr))
+                                "expected failure marker, got: ~A" stderr)))
+               (format t "  compile-file failure OK~%")
+
                (format t "Test: eval default is human-readable~%")
                (multiple-value-bind (rc stdout)
                    (run-cli-captured '("repl-bridge" "eval" "(+ 1 2)"))
