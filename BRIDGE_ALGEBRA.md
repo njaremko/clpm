@@ -225,11 +225,15 @@ Implemented:
 5. `output-prefix`: streaming and terminal output share a bounded sink, so both
    observations expose the same prefix and large writes are bounded as they
    occur.
-6. Shutdown now resolves active debug sessions before stopping workers, so a
+6. `closed-request-algebra`: registered method specs now form a decode gate.
+   Unknown params, non-object params, and wrong JSON types fail as protocol
+   errors before handlers run. Transport-wide `token` and dispatch-wide
+   `explain` remain explicit implicit params.
+7. Shutdown now resolves active debug sessions before stopping workers, so a
    kept debugger stop cannot wedge daemon teardown.
 
 Still open:
 
-1. Turn method specs into decoders so handlers consume typed request values
-   rather than ad hoc JSON lookups.
-2. Separate internal terminal outcomes from the JSON compatibility renderer.
+1. Separate every internal terminal outcome from the JSON compatibility
+   renderer. Eval already has structured `eval-result` data, but the wider RPC
+   registry still returns rendered JSON frames directly.

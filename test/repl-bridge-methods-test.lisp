@@ -116,5 +116,49 @@
                    "wrong error code: ~S" err))))
 (format t "  unknown-method error OK~%")
 
+;;; ----------------------------------------------------------------------------
+;;; Method specs are constructors: params must be closed and typed.
+
+(format t "Test: request params are decoded from method specs~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((extra (clpm.repl-bridge:send-request
+                   sock "eval"
+                   :params (list :object
+                                 (list (cons "form" "(+ 1 2)")
+                                       (cons "bogus" t)))))
+           (extra-error (lookup extra "error")))
+      (assert-true extra-error
+                   "unknown eval param should be rejected: ~S"
+                   extra)
+      (assert-true (search "unknown param"
+                           (lookup extra-error "message"))
+                   "wrong unknown-param message: ~S"
+                   extra-error))
+    (let* ((typed (clpm.repl-bridge:send-request
+                   sock "eval"
+                   :params (list :object
+                                 (list (cons "form" 42)))))
+           (typed-error (lookup typed "error")))
+      (assert-true typed-error
+                   "wrong-typed eval param should be rejected: ~S"
+                   typed)
+      (assert-true (search "expected string"
+                           (lookup typed-error "message"))
+                   "wrong type message: ~S"
+                   typed-error))
+    (let* ((not-object (clpm.repl-bridge:send-request
+                        sock "help"
+                        :params (list :array nil)))
+           (not-object-error (lookup not-object "error")))
+      (assert-true not-object-error
+                   "non-object params should be rejected: ~S"
+                   not-object)
+      (assert-true (search "params must be an object"
+                           (lookup not-object-error "message"))
+                   "wrong non-object params message: ~S"
+                   not-object-error))))
+(format t "  schema decode OK~%")
+
 (format t "~%REPL-bridge methods tests PASSED!~%")
 (sb-ext:exit :code 0)

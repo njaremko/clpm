@@ -2002,8 +2002,11 @@ queryable via `list-redefinitions' with `worker'."
   "Self-describing registry entry for one RPC method.
 
 PARAMS is a list of param descriptors, each a plist with
-  :name (string) :type (\"string\" / \"object\" / \"boolean\" / \"integer\")
-  :required (boolean) :description (string).
+  :name (string)
+  :type (\"string\" / \"object\" / \"array\" / \"boolean\" / \"integer\" /
+         \"string-or-boolean\" / \"any\")
+  :required (boolean)
+  :description (string).
 
 HANDLER is `(server params id ctx) -> json-response | NIL'. Returning
 NIL means the handler has already emitted its terminal frame."
@@ -2039,21 +2042,130 @@ NIL means the handler has already emitted its terminal frame."
                             "name" (getf p :name)
                             "type" (getf p :type)
                             "required" (and (getf p :required) t)
-                            "description" (getf p :description))))))
+	                            "description" (getf p :description))))))
+
+(defparameter +implicit-method-params+ '("token" "explain")
+  "Transport/dispatch params accepted for every method without appearing in
+the method-local schema.")
+
+(defun %json-object-alist (value)
+  (when (and (consp value) (eq (car value) :object))
+    (cadr value)))
+
+(defun %json-array-p (value)
+  (and (consp value) (eq (car value) :array)))
+
+(defun %json-object-p (value)
+  (and (consp value) (eq (car value) :object)))
+
+(defun %json-boolean-p (value)
+  (or (eq value t) (eq value :false) (null value)))
+
+(defun %json-value-type-name (value)
+  (cond
+    ((stringp value) "string")
+    ((integerp value) "integer")
+    ((%json-array-p value) "array")
+    ((%json-object-p value) "object")
+    ((%json-boolean-p value) "boolean")
+    (t (string-downcase (symbol-name (type-of value))))))
+
+(defun %json-value-matches-type-p (value type)
+  (cond
+    ((string= type "any") t)
+    ((string= type "string") (stringp value))
+    ((string= type "integer") (integerp value))
+    ((string= type "boolean") (%json-boolean-p value))
+    ((string= type "array") (%json-array-p value))
+    ((string= type "object") (%json-object-p value))
+    ((string= type "string-or-boolean")
+     (or (stringp value) (%json-boolean-p value)))
+    (t nil)))
+
+(defun %method-param-spec (spec name)
+  (find name (method-spec-params spec)
+        :key (lambda (p) (getf p :name))
+        :test #'string=))
+
+(defun %implicit-method-param-p (name)
+  (member name +implicit-method-params+ :test #'string=))
+
+(defun %decode-method-params (spec params id)
+  "Validate PARAMS against SPEC. Returns (values PARAMS NIL) on success,
+or (values NIL ERROR-RESPONSE) on failure."
+  (flet ((error-result (fmt &rest args)
+           (%error-response id "protocol-error"
+                            (apply #'format nil fmt args))))
+    (let ((alist nil))
+      (cond
+        ((null params))
+        ((%json-object-p params)
+         (setf alist (%json-object-alist params)))
+        (t
+         (return-from %decode-method-params
+           (values nil
+                   (error-result "params must be an object for ~A"
+                                 (method-spec-name spec))))))
+      (dolist (entry alist)
+        (let ((name (car entry)))
+          (unless (and (stringp name)
+                       (or (%method-param-spec spec name)
+                           (%implicit-method-param-p name)))
+            (return-from %decode-method-params
+              (values nil
+                      (error-result "unknown param `~A' for ~A"
+                                    name
+                                    (method-spec-name spec)))))))
+      (dolist (param-spec (method-spec-params spec))
+        (let* ((name (getf param-spec :name))
+               (type (getf param-spec :type))
+               (cell (assoc name alist :test #'string=)))
+          (cond
+            ((and (getf param-spec :required) (null cell))
+             (return-from %decode-method-params
+               (values nil
+                       (error-result "missing required param `~A' for ~A"
+                                     name
+                                     (method-spec-name spec)))))
+            ((and cell
+                  type
+                  (not (%json-value-matches-type-p (cdr cell) type)))
+             (return-from %decode-method-params
+               (values nil
+                       (error-result "param `~A' expected ~A, got ~A"
+                                     name
+                                     type
+                                     (%json-value-type-name (cdr cell)))))))))
+      (values (or params (%json-object)) nil))))
+
+(defun %decode-params-for-method (method params id)
+  "Decode PARAMS for METHOD when METHOD is known. Unknown methods are left to
+the normal dispatch path so they still produce the canonical unknown-method
+error."
+  (let ((spec (%lookup-method method)))
+    (cond
+      (spec (%decode-method-params spec params id))
+      (t (values params nil)))))
 
 (defun %dispatch-method (server method params id &optional ctx)
   "Return a JSON response for METHOD; never raises."
   (let ((spec (%lookup-method method)))
     (cond
-      ((null spec)
-       (%error-response id "protocol-error"
-                        (format nil "unknown method: ~A" method)))
-      (t
-       (handler-case
-           (funcall (method-spec-handler spec) server params id ctx)
-         (error (c)
-           (%error-response id "protocol-error"
-                            (format nil "dispatch failed: ~A" c))))))))
+	      ((null spec)
+	       (%error-response id "protocol-error"
+	                        (format nil "unknown method: ~A" method)))
+	      (t
+	       (multiple-value-bind (decoded-params decode-error)
+	           (%decode-method-params spec params id)
+	         (cond
+	           (decode-error decode-error)
+	           (t
+	            (handler-case
+	                (funcall (method-spec-handler spec)
+	                         server decoded-params id ctx)
+	              (error (c)
+	                (%error-response id "protocol-error"
+	                                 (format nil "dispatch failed: ~A" c)))))))))))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Registered methods
@@ -2193,24 +2305,36 @@ lost."
                       :description "Per-call package override.")
                 (list :name "stream" :type "boolean" :required nil
                       :description "Emit incremental stdout/stderr events.")
-                (list :name "query_interactive" :type "boolean" :required nil
-                      :description "Bind *standard-input* to a bidirectional query stream.")
-                (list :name "record_signals" :type "boolean" :required nil
-                      :description "Record non-error conditions signaled during eval.")
-                (list :name "worker" :type "string" :required nil
-                      :description "Run on a named worker; spawned if absent.")
-                (list :name "concurrent" :type "boolean" :required nil
-                      :description "Run on a fresh disposable worker that's destroyed after the eval.")
-                (list :name "break_on" :type "string" :required nil
-                      :description "Type name to bind *break-on-signals* to; \"none\" / false / nil disables.")
-                (list :name "max_real_ms" :type "integer" :required nil
-                      :description "Abort with code resource-exhausted if real time exceeds this.")
-                (list :name "max_cons_bytes" :type "integer" :required nil
-                      :description "Abort with code resource-exhausted if bytes-consed exceeds this.")
-                (list :name "print_length" :type "integer" :required nil
-                      :description "Bind *print-length* during prin1 of values.")
-                (list :name "print_level" :type "integer" :required nil
-                      :description "Bind *print-level* during prin1 of values."))
+	                (list :name "query_interactive" :type "boolean" :required nil
+	                      :description "Bind *standard-input* to a bidirectional query stream.")
+	                (list :name "debug" :type "boolean" :required nil
+	                      :description "Enter a server-owned debug session on unhandled conditions.")
+	                (list :name "record_signals" :type "boolean" :required nil
+	                      :description "Record non-error conditions signaled during eval.")
+	                (list :name "worker" :type "string" :required nil
+	                      :description "Run on a named worker; spawned if absent.")
+	                (list :name "concurrent" :type "boolean" :required nil
+	                      :description "Run on a fresh disposable worker that's destroyed after the eval.")
+	                (list :name "handlers" :type "array" :required nil
+	                      :description "Declarative condition handlers as {type,restart,args} objects.")
+	                (list :name "break_on" :type "string-or-boolean" :required nil
+	                      :description "Type name to bind *break-on-signals* to; \"none\" / false / nil disables.")
+	                (list :name "max_real_ms" :type "integer" :required nil
+	                      :description "Abort with code resource-exhausted if real time exceeds this.")
+	                (list :name "max_cons_bytes" :type "integer" :required nil
+	                      :description "Abort with code resource-exhausted if bytes-consed exceeds this.")
+	                (list :name "print_length" :type "integer" :required nil
+	                      :description "Bind *print-length* during prin1 of values.")
+	                (list :name "print_level" :type "integer" :required nil
+	                      :description "Bind *print-level* during prin1 of values.")
+	                (list :name "print_circle" :type "boolean" :required nil
+	                      :description "Bind *print-circle* during prin1 of values.")
+	                (list :name "print_radix" :type "boolean" :required nil
+	                      :description "Bind *print-radix* during prin1 of values.")
+	                (list :name "print_base" :type "integer" :required nil
+	                      :description "Bind *print-base* during prin1 of values.")
+	                (list :name "print_pretty" :type "boolean" :required nil
+	                      :description "Bind *print-pretty* during prin1 of values."))
   :handler
   (lambda (server params id ctx)
     (%dispatch-eval server params id ctx))))
@@ -4963,6 +5087,12 @@ the connection thread stays free to read those continuations."
                           (%success-response id payload))
       (error () nil))))
 
+(defun %write-response-inline (cstate response)
+  (clpm.repl-bridge.compat:with-mutex ((connection-state-stream-mutex cstate))
+    (handler-case
+        (%write-line-json (connection-state-stream cstate) response)
+      (error () nil))))
+
 (defun %write-debug-action-reply (cstate id reply)
   (case (first reply)
     (:result
@@ -5181,15 +5311,27 @@ with v2 toggles requiring continuations)."
                        "id" id "method" method)
            (%write-error-inline cstate id "protocol-error"
                                 "missing or invalid `token`"))
-          ;; Continuation: the user's reply to an `event:query'.
-          ((string= method "query-response")
-           (%route-query-response server cstate id params))
-          ;; Continuations: debug-* actions driving an in-flight debugger.
-          ((or (string= method "debug-invoke-restart")
-               (string= method "debug-eval-in-frame")
-               (string= method "debug-continue")
-               (string= method "debug-abort"))
-           (%route-debug-action server cstate id method params))
+	          ;; Continuation: the user's reply to an `event:query'.
+	          ((string= method "query-response")
+	           (multiple-value-bind (decoded-params decode-error)
+	               (%decode-params-for-method method params id)
+	             (cond
+	               (decode-error
+	                (%write-response-inline cstate decode-error))
+	               (t
+	                (%route-query-response server cstate id decoded-params)))))
+	          ;; Continuations: debug-* actions driving an in-flight debugger.
+	          ((or (string= method "debug-invoke-restart")
+	               (string= method "debug-eval-in-frame")
+	               (string= method "debug-continue")
+	               (string= method "debug-abort"))
+	           (multiple-value-bind (decoded-params decode-error)
+	               (%decode-params-for-method method params id)
+	             (cond
+	               (decode-error
+	                (%write-response-inline cstate decode-error))
+	               (t
+	                (%route-debug-action server cstate id method decoded-params)))))
           ;; eval with v2 continuation toggles -> spawn a dispatcher thread.
           ((and (string= method "eval")
                 (%eval-uses-continuation? params))
