@@ -164,6 +164,7 @@ When not in a project, only the global config registries are used."
                         (asd-path (merge-pathnames (format nil "~A.asd" name) project-root))
                         (src-path (merge-pathnames (format nil "src/~A.lisp" name) project-root))
                         (test-path (merge-pathnames (format nil "test/~A-test.lisp" name) project-root))
+                        (gitignore-path (merge-pathnames ".gitignore" project-root))
                         (manifest-path (merge-pathnames "clpm.project" project-root)))
                    (when (uiop:directory-exists-p project-root)
                      (log-error "Destination already exists: ~A" (namestring project-root))
@@ -186,6 +187,13 @@ When not in a project, only the global config registries are used."
                                                     :function (format nil "~A::main" name)))
                                    :scripts nil)))
                      (clpm.project:write-project-file project manifest-path))
+
+                   ;; .gitignore
+                   (write-text gitignore-path ".DS_Store
+.clpm/
+*.fasl
+*.fasl-tmp
+")
 
                    ;; ASDF system + test system.
                    (write-text

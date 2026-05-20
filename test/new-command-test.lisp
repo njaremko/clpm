@@ -30,6 +30,21 @@
   (unless (eql expected actual)
     (fail "Assertion failed: expected ~S, got ~S" expected actual)))
 
+(defun assert-equal (expected actual)
+  (unless (equal expected actual)
+    (fail "Assertion failed: expected ~S, got ~S" expected actual)))
+
+(defparameter *expected-gitignore*
+  ".DS_Store
+.clpm/
+*.fasl
+*.fasl-tmp
+")
+
+(defun assert-gitignore (root)
+  (assert-equal *expected-gitignore*
+                (uiop:read-file-string (merge-pathnames ".gitignore" root))))
+
 (format t "Testing `clpm new` scaffolding...~%")
 
 (clpm.store:with-temp-dir (tmp)
@@ -42,9 +57,10 @@
     (uiop:with-current-directory (workspace)
       (assert-eql 0 (clpm:run-cli '("new" "binproj" "--bin"))))
     (assert-true (uiop:directory-exists-p bin-root) "Expected bin project dir")
-    (dolist (rel '("clpm.project" "binproj.asd" "src/binproj.lisp" "test/binproj-test.lisp"))
+    (dolist (rel '(".gitignore" "clpm.project" "binproj.asd" "src/binproj.lisp" "test/binproj-test.lisp"))
       (assert-true (uiop:file-exists-p (merge-pathnames rel bin-root))
                    "Missing scaffold file: ~A" rel))
+    (assert-gitignore bin-root)
     (let ((p (clpm.project:read-project-file (merge-pathnames "clpm.project" bin-root))))
       (assert-true (string= "binproj" (clpm.project:project-name p))
                    "Unexpected project name: ~S" (clpm.project:project-name p))
@@ -73,9 +89,10 @@
     (uiop:with-current-directory (workspace)
       (assert-eql 0 (clpm:run-cli (list "new" "libproj" "--lib" "--dir" (namestring workspace)))))
     (assert-true (uiop:directory-exists-p lib-root) "Expected lib project dir")
-    (dolist (rel '("clpm.project" "libproj.asd" "src/libproj.lisp" "test/libproj-test.lisp"))
+    (dolist (rel '(".gitignore" "clpm.project" "libproj.asd" "src/libproj.lisp" "test/libproj-test.lisp"))
       (assert-true (uiop:file-exists-p (merge-pathnames rel lib-root))
                    "Missing scaffold file: ~A" rel))
+    (assert-gitignore lib-root)
     (let ((p (clpm.project:read-project-file (merge-pathnames "clpm.project" lib-root))))
       (assert-true (string= "libproj" (clpm.project:project-name p))
                    "Unexpected project name: ~S" (clpm.project:project-name p))
