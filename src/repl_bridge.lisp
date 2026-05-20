@@ -2802,9 +2802,15 @@ PKG is a package object or NIL (search all)."
          (do-symbols (s pkg)
            (when (search upat (symbol-name s)) (add s))))
         (t
+         ;; Walk every package and visit each symbol *once* by gating on
+         ;; its home package. This matches the standard `apropos' --
+         ;; internal symbols in CL-USER (where the REPL defines things)
+         ;; show up too, not just exported ones.
          (dolist (p (list-all-packages))
-           (do-external-symbols (s p)
-             (when (search upat (symbol-name s)) (add s))))))
+           (do-symbols (s p)
+             (when (and (eq (symbol-package s) p)
+                        (search upat (symbol-name s)))
+               (add s))))))
       ;; Dedupe by (name . package).
       (remove-duplicates (nreverse entries)
                          :test (lambda (a b)
@@ -2822,9 +2828,10 @@ PKG is a package object or NIL (search all)."
   :name "apropos"
   :summary "Search symbols by name substring."
   :doc "Required: `pattern' (case-insensitive substring). Optional:
-`package' restricts the search to one package (otherwise external
-symbols across all packages). Returns `{entries: [{name, package,
-kinds, external}, ...]}'."
+`package' restricts the search to one package (otherwise every
+symbol -- internal and external -- across all packages, visited via
+its home package). Returns `{entries: [{name, package, kinds,
+external}, ...]}'."
   :params (list (list :name "pattern" :type "string" :required t
                       :description "Substring to match, case-insensitive.")
                 (list :name "package" :type "string" :required nil

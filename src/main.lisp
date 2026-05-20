@@ -128,7 +128,12 @@ Returns (values command command-args options)."
            (let* ((raw (nth i args))
                   (kind (clpm.lisp:parse-lisp-kind raw)))
              (push (cons :lisp kind) options)))
-          ((or (string= arg "-p") (string= arg "--package"))
+          ;; Workspace-member target: `-p` / `--package`. Only consumed as a
+          ;; global *before* the command, so subcommands are free to define
+          ;; their own `--package` flag (the repl-bridge introspection commands
+          ;; mean it as a Common Lisp package).
+          ((and (null command)
+                (or (string= arg "-p") (string= arg "--package")))
            (incf i)
            (when (>= i (length args))
              (clpm.errors:signal-error 'clpm.errors:clpm-user-error

@@ -1811,6 +1811,9 @@ because the daemon couldn't come up."
                   1))
            (ignore-errors (delete-file pid))))))))
 
+(defvar *bridge-cli-json* nil
+  "When set, CLI subcommands print raw JSON instead of human text.")
+
 (defparameter +bridge-daemon-frame-names+
   '("%STRUCTURED-BACKTRACE" "%CONDITION-JSON" "%CAPTURE-ERROR-SNAPSHOT"
     "%ENTER-DEBUGGER" "%SIGNAL" "%EVAL-ONE" "%WORKER-LOOP"
@@ -1851,7 +1854,7 @@ the *bottom* of the stack and keep the user portion. The first
     (format stream "  ~A" (or name "?"))
     (when (and (integerp arity) (plusp arity))
       (format stream " (~D arg~:P~:[~;, interactive~])"
-              arity arity interactive))
+              arity interactive))
     (when (and report (stringp report) (plusp (length report)))
       (format stream " -- ~A"
               (if (search #.(string #\Newline) report)
@@ -1962,6 +1965,7 @@ own renderer so this fallback is rarely hit."
 (defun %bridge-send-or-autostart (sock pid project-root method
                                   &key params (autostart t))
   "Send a request, auto-starting the daemon on connect failure."
+  (declare (ignore pid project-root))
   (let ((resp (clpm.repl-bridge:send-request sock method
                                              :params params
                                              :connect-timeout 1)))
@@ -1972,10 +1976,8 @@ own renderer so this fallback is rarely hit."
           (log-error "No daemon running. Start one with `clpm repl-bridge serve` or drop --no-autostart.")
           (return-from %bridge-send-or-autostart nil))
          (t
-          ;; Auto-start.
           (let ((rc (%bridge-serve (list "--detach"))))
             (declare (ignore rc))
-            (declare (ignorable project-root pid))
             (clpm.repl-bridge:send-request sock method :params params
                                            :connect-timeout 5)))))
       (t resp))))
@@ -2246,9 +2248,6 @@ prints the long-form doc plus its parameters."
 
 ;;; ----------------------------------------------------------------------------
 ;;; Generic helpers used by the new single-shot CLI surface.
-
-(defvar *bridge-cli-json* nil
-  "When set, CLI subcommands print raw JSON instead of human text.")
 
 (defun %bridge-obj (resp)
   "Return the parsed result object on success, or NIL.
@@ -2677,7 +2676,8 @@ faithfully; nested objects/arrays fall back to JSON for now."
                                        (list (cons "symbol" sym)
                                              (cons "type" type)
                                              (cons "package" (getf opts :package)))))
-        (let ((doc (%bridge-field obj "documentation")))
+        (let ((doc (or (%bridge-field obj "doc")
+                       (%bridge-field obj "documentation"))))
           (format t "~A~%" (or doc "(no documentation)")))))))
 
 (defun %bridge-cmd-disassemble (args)
@@ -2770,8 +2770,15 @@ faithfully; nested objects/arrays fall back to JSON for now."
                       (file (%bridge-field lobj "file"))
                       (line (%bridge-field lobj "line"))
                       (char (%bridge-field lobj "char_offset")))
-                 (format t "~A  ~A~@[:~A~]~@[ #~A~]~%"
-                         (or kind "?") (or file "?") line char))))))))))
+                 (cond
+                   ((and (stringp file) (plusp (length file)))
+                    (format t "~A  ~A~@[:~A~]~@[ #~A~]~%"
+                            (or kind "?") file
+                            (and (integerp line) (plusp line) line)
+                            (and (integerp char) (plusp char) char)))
+                   (t
+                    (format t "~A  (no source location)~%"
+                            (or kind "?")))))))))))))
 
 (defun %bridge-cmd-xref (args)
   "`clpm repl-bridge xref SYMBOL --direction DIR [--package P]'.
