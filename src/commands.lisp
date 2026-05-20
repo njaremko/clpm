@@ -2765,12 +2765,19 @@ faithfully; nested objects/arrays fall back to JSON for now."
         (let ((cands (%bridge-array-items (%bridge-field obj "candidates")))
               (total (%bridge-field obj "total"))
               (truncated (%bridge-field obj "truncated")))
-          (dolist (s cands)
-            (when (stringp s) (format t "~A~%" s)))
-          (when (and total
-                     (or truncated
-                         (and (numberp total) (> total (length cands)))))
-            (format t "~&;; ~A total~:[~;, truncated~]~%" total truncated)))))))
+          (cond
+            ((null cands)
+             ;; Mirror `apropos': a zero-match result must be observable
+             ;; on its own. Otherwise empty stdout is indistinguishable
+             ;; from "the CLI silently dropped the request".
+             (format t "0 candidates~%"))
+            (t
+             (dolist (s cands)
+               (when (stringp s) (format t "~A~%" s)))
+             (when (and total
+                        (or truncated
+                            (and (numberp total) (> total (length cands)))))
+               (format t "~&;; ~A total~:[~;, truncated~]~%" total truncated)))))))))
 
 (defun %bridge-cmd-arglist (args)
   "`clpm repl-bridge arglist SYMBOL [--package P]'."
@@ -3196,16 +3203,28 @@ Aliases: who-calls (direction=calls), who-references (direction=references)."
                      auto-revert))))))))
 
 (defun %bridge-cmd-unwatch (args)
-  (let ((id (and (first args)
-                 (ignore-errors (parse-integer (first args) :junk-allowed nil)))))
-    (unless id
-      (log-error "Usage: clpm repl-bridge unwatch ID")
-      (return-from %bridge-cmd-unwatch 1))
+  (let* ((raw (first args))
+         (id (and raw (ignore-errors
+                       (parse-integer raw :junk-allowed nil)))))
+    (cond
+      ((null raw)
+       (log-error "Usage: clpm repl-bridge unwatch ID")
+       (return-from %bridge-cmd-unwatch 1))
+      ((null id)
+       (log-error "unwatch ID must be the integer id from list-watches; got ~S" raw)
+       (return-from %bridge-cmd-unwatch 1)))
     (%bridge-with-call (obj "unwatch"
                             :params (%bridge-make-params
                                      (list (cons "id" id))))
-      (declare (ignore obj))
-      (format t "unwatched ~A~%" id))))
+      ;; The daemon's `unwatch' is idempotent: unknown ids return
+      ;; `stopped: false'. Without honoring that here the CLI would
+      ;; claim "unwatched 99999" for a watch that never existed.
+      (cond
+        ((%bridge-field obj "stopped")
+         (format t "unwatched ~A~%" id))
+        (t
+         (format *error-output* "no active watch with id ~A~%" id)
+         (return-from %bridge-cmd-unwatch 1))))))
 
 (defun %bridge-render-watch-event (event)
   "Render one watch-event JSON object as a single human-readable line.
