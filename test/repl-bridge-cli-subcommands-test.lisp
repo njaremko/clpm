@@ -203,6 +203,17 @@
                  (assert-contains stdout "depth: 2"))
                (format t "  inspect --path OK~%")
 
+               (format t "Test: inspect --eval evaluates with * bound to focus~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured
+                    '("repl-bridge" "inspect" "(list 10 20 30)"
+                      "--path" "1,0"
+                      "--eval" "(+ * 100)"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "value: 20")
+                 (assert-contains stdout "=> 120"))
+               (format t "  inspect --eval OK~%")
+
                (format t "Test: inspect handles atomic values~%")
                ;; Used to fail because (type-of 42) returns the *list*
                ;; (INTEGER 0 ...) and the inspector's fallthrough called

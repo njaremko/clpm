@@ -3255,18 +3255,47 @@ line) for programmatic consumption."
 ;;; ----------------------------------------------------------------------------
 ;;; Single-shot inspect with --path traversal.
 
+(defun %bridge-render-inspect-view (view)
+  "Print one inspector-view JSON object as human text."
+  (format t "session: ~A  depth: ~A~%"
+          (%bridge-field view "session")
+          (%bridge-field view "depth"))
+  (format t "type: ~A  kind: ~A~%"
+          (%bridge-field view "type")
+          (%bridge-field view "kind"))
+  (format t "value: ~A~%" (%bridge-field view "value_repr"))
+  (let ((parts (%bridge-array-items (%bridge-field view "parts"))))
+    (when parts
+      (format t "parts:~%")
+      (dolist (p parts)
+        (let ((po (cadr p)))
+          (format t "  [~A] ~A => ~A~%"
+                  (%bridge-field po "i")
+                  (or (%bridge-field po "label") "?")
+                  (%bridge-field po "repr"))))))
+  (format t "actions: ~{~A~^, ~}~%"
+          (%bridge-array-items (%bridge-field view "actions"))))
+
 (defun %bridge-cmd-inspect (args)
-  "`clpm repl-bridge inspect FORM [--path 0,1,2] [--package P] [--keep]'.
+  "`clpm repl-bridge inspect FORM [--path 0,1,2] [--eval FORM2]
+                                 [--package P] [--keep]'.
 
 By default the inspector session is opened, traversed by the optional
-path, the resulting view is printed, and the session is closed."
+path, the resulting view is printed, and the session is closed.
+
+With `--eval FORM2', after the path-walk evaluates FORM2 with `*'
+bound to the current focus and prints both the focus view and the
+inspect-eval result. Useful when you want to peek at a computed
+property of the focus without descending into it (e.g. \"how many
+slots does this object expose?\")."
   (multiple-value-bind (opts pos)
       (%bridge-parse-flags args '(("path" . :string)
+                                   ("eval" . :string)
                                    ("package" . :string)
                                    ("keep" . :flag)))
     (let ((form (first pos)))
       (unless form
-        (log-error "Usage: clpm repl-bridge inspect FORM [--path 0,1,2] [--package P] [--keep]")
+        (log-error "Usage: clpm repl-bridge inspect FORM [--path 0,1,2] [--eval FORM2] [--package P] [--keep]")
         (return-from %bridge-cmd-inspect 1))
       (multiple-value-bind (project-root sock)
           (%bridge-resolve-project)
@@ -3308,31 +3337,30 @@ path, the resulting view is printed, and the session is closed."
                        ((%bridge-err final-resp)
                         (return-from %bridge-cmd-inspect
                           (%bridge-render-error final-resp)))))
-                   (cond
-                     (*bridge-cli-json*
-                      (%bridge-emit-json final-resp))
-                     (t
-                      (let ((view (%bridge-obj final-resp)))
-                        (format t "session: ~A  depth: ~A~%"
-                                (%bridge-field view "session")
-                                (%bridge-field view "depth"))
-                        (format t "type: ~A  kind: ~A~%"
-                                (%bridge-field view "type")
-                                (%bridge-field view "kind"))
-                        (format t "value: ~A~%" (%bridge-field view "value_repr"))
-                        (let ((parts (%bridge-array-items
-                                      (%bridge-field view "parts"))))
-                          (when parts
-                            (format t "parts:~%")
-                            (dolist (p parts)
-                              (let ((po (cadr p)))
-                                (format t "  [~A] ~A => ~A~%"
-                                        (%bridge-field po "i")
-                                        (or (%bridge-field po "label") "?")
-                                        (%bridge-field po "repr"))))))
-                        (format t "actions: ~{~A~^, ~}~%"
-                                (%bridge-array-items
-                                 (%bridge-field view "actions"))))))
+                   (let ((eval-resp
+                           (when (getf opts :eval)
+                             (clpm.repl-bridge:send-request
+                              sock "inspect-eval"
+                              :params (%bridge-make-params
+                                       (list (cons "session" session)
+                                             (cons "form" (getf opts :eval))
+                                             (cons "package"
+                                                   (getf opts :package))))
+                              :connect-timeout 5))))
+                     (cond
+                       (*bridge-cli-json*
+                        (%bridge-emit-json final-resp)
+                        (when eval-resp (%bridge-emit-json eval-resp)))
+                       (t
+                        (%bridge-render-inspect-view (%bridge-obj final-resp))
+                        (when eval-resp
+                          (cond
+                            ((%bridge-err eval-resp)
+                             (%bridge-render-error eval-resp))
+                            (t
+                             (let ((v (%bridge-field (%bridge-obj eval-resp)
+                                                     "value_repr")))
+                               (format t "=> ~A~%" (or v "(no value)")))))))))
                    0)
               (unless (getf opts :keep)
                 (ignore-errors

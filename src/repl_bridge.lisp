@@ -3982,9 +3982,10 @@ when the stack already only has one frame; returns that frame."
  (make-method-spec
   :name "inspect-eval"
   :summary "Evaluate FORM with `*' bound to the inspector's current focus."
-  :doc "Required: `session', `form'. The returned value is rendered the
-same way as the inspector view; the session is *not* automatically
-descended into the result."
+  :doc "Required: `session', `form'. Returns `{value_repr: <prin1>}'
+-- a single rendered value, not a new inspector view. The session is
+*not* automatically descended into the result; use `inspect' on the
+form again if you want to walk into it."
   :params (list (list :name "session" :type "string" :required t
                       :description "Inspector session id.")
                 (list :name "form" :type "string" :required t
