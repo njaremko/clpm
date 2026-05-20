@@ -437,15 +437,13 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
   ((socket-path :initarg :socket-path :reader server-socket-path)
    (transport :initarg :transport :initform nil :accessor server-transport)
    (socket :initform nil :accessor server-socket)
-   (worker :initform nil :accessor server-worker)
-   (worker-mutex :initform (clpm.repl-bridge.compat:make-mutex :name "clpm.repl-bridge.worker")
-                 :reader server-worker-mutex)
-   (current-package :initform (find-package "COMMON-LISP-USER")
-                    :accessor server-current-package)
+   (workers :initform (make-hash-table :test 'equal)
+            :reader server-workers)
+   (workers-mutex :initform (clpm.repl-bridge.compat:make-mutex :name "clpm.repl-bridge.workers")
+                  :reader server-workers-mutex)
+   (concurrent-counter :initform 0 :accessor server-concurrent-counter)
    (started-at :initform (get-universal-time) :reader server-started-at)
    (eval-count :initform 0 :accessor server-eval-count)
-   (redefinitions :initform (make-hash-table :test 'equal)
-                  :reader server-redefinitions)
    (inspectors :initform (make-hash-table :test 'equal)
                :reader server-inspectors)
    (inspectors-mutex :initform (clpm.repl-bridge.compat:make-mutex
@@ -551,8 +549,33 @@ its connection or sends an explicit `interrupt' request."))
 ;;; --------------------------------------------------------------------------
 
 (defstruct worker
+  "One eval thread. Most clients only ever touch the worker named
+\"default\"; named / concurrent workers (#170-#173) give the LLM a
+sandboxed slot to run an experiment in without polluting the main
+session's package, history, or redefinition log.
+
+STATE transitions are advisory (lock-free): the worker thread writes,
+the connection threads read for `list-workers'. The default worker is
+created on first eval and never removed; concurrent workers (one-shot)
+are destroyed automatically when their eval completes."
+  (name "default" :type string)
   mailbox
-  thread)
+  thread
+  (state :idle :type keyword)
+  (package (find-package "COMMON-LISP-USER"))
+  last-eval-id
+  (started-at (get-universal-time) :type integer)
+  (last-active-at (get-universal-time) :type integer)
+  (redefinitions (make-hash-table :test 'equal))
+  current-job
+  (concurrent? nil :type boolean))
+
+(defvar *current-worker* nil
+  "Worker struct of the currently-executing eval, bound by `%worker-loop'.
+Read by `%eval-one' and `%record-redefinition' so per-worker state
+lands in the right bucket.")
+
+(defparameter +default-worker-name+ "default")
 
 (defstruct eval-job
   form
@@ -841,9 +864,13 @@ must not block the eval response."
                          (cons "package" pkg-name)
                          (cons "form" (let ((*print-pretty* nil))
                                         (prin1-to-string form))))))
-      (when *server*
-        (setf (gethash key (server-redefinitions *server*))
-              record))
+      (cond
+        (*current-worker*
+         (setf (gethash key (worker-redefinitions *current-worker*))
+               record))
+        (*server*
+         (setf (gethash key (server-redefinitions *server*))
+               record)))
       record)))
 
 (defun %find-package-loose (name)
@@ -1198,6 +1225,7 @@ sessions."
          (override-pkg (and package-override
                             (%find-package-loose package-override)))
          (package (or override-pkg
+                      (and *current-worker* (worker-package *current-worker*))
                       (and *server* (server-current-package *server*))
                       (find-package "COMMON-LISP-USER")))
          (returned-values '())
@@ -1330,9 +1358,12 @@ sessions."
                           (multiple-value-list (eval form)))))))
             (setf package *package*)
             ;; History is updated *only* when no override was specified --
-            ;; the override is per-call scoped.
-            (when (and *server* (null override-pkg))
-              (setf (server-current-package *server*) *package*)
+            ;; the override is per-call scoped. Persistent package state
+            ;; lives on the worker (the default worker for v1 callers,
+            ;; named workers for `eval --worker NAME').
+            (when (null override-pkg)
+              (when *current-worker*
+                (setf (worker-package *current-worker*) *package*))
               (handler-case (%update-history! form returned-values)
                 (error () nil))))
         (user-interrupt ()
@@ -1342,56 +1373,126 @@ sessions."
           (return-from %eval-one (finish :err-condition c))))
       (finish))))
 
-(defun %worker-loop (mailbox)
-  "Pull jobs from MAILBOX, eval each, post the result to job's result-mailbox.
-Returns when a `:stop' sentinel arrives."
-  (loop
-    (let ((job (clpm.repl-bridge.compat:receive-message mailbox)))
+(defun %worker-loop (worker)
+  "Pull jobs from WORKER's mailbox, eval each, post the result to the job's
+result-mailbox. Returns when a `:stop' sentinel arrives. Binds
+`*current-worker*' so `%eval-one' and `%record-redefinition' land their
+side-effects on the right worker."
+  (let ((mailbox (worker-mailbox worker)))
+    (loop
+      (let ((job (clpm.repl-bridge.compat:receive-message mailbox)))
+        (cond
+          ((eq job :stop) (return))
+          (t
+           (setf (worker-state worker) :busy
+                 (worker-current-job worker) job
+                 (worker-last-active-at worker) (get-universal-time))
+           (let ((result
+                   (let ((*current-worker* worker))
+                     (handler-case
+                         (%eval-one (eval-job-form job)
+                                    :package-override (eval-job-package-override job)
+                                    :options (eval-job-options job)
+                                    :job job)
+                       ;; Any unexpected interrupt at this outermost level
+                       ;; becomes an "interrupted" result for the requester.
+                       (user-interrupt ()
+                         (make-eval-result :code "interrupted"
+                                           :values nil :output "" :error-output ""
+                                           :package "" :elapsed-ms 0
+                                           :conditions '()
+                                           :signaled-conditions nil
+                                           :truncated? nil
+                                           :redefined nil
+                                           :history nil))))))
+             (setf (worker-state worker) :idle
+                   (worker-current-job worker) nil
+                   (worker-last-active-at worker) (get-universal-time))
+             (clpm.repl-bridge.compat:send-message (eval-job-result-mailbox job) result))))))))
+
+(defun %make-worker (server name &key concurrent?)
+  "Spawn a fresh worker thread and register it under NAME. Caller must hold
+SERVER-WORKERS-MUTEX."
+  (let* ((mailbox (clpm.repl-bridge.compat:make-mailbox))
+         (worker (make-worker :name name
+                              :mailbox mailbox
+                              :package (find-package "COMMON-LISP-USER")
+                              :concurrent? concurrent?)))
+    (setf (worker-thread worker)
+          (clpm.repl-bridge.compat:make-thread
+           (lambda () (%worker-loop worker))
+           :name (format nil "clpm.repl-bridge.worker[~A]" name)))
+    (setf (gethash name (server-workers server)) worker)
+    worker))
+
+(defun %ensure-worker (server &key (name +default-worker-name+) concurrent?)
+  "Return the worker named NAME, spawning it if absent or dead. With
+CONCURRENT?, NAME is a freshly-minted one-shot identifier; the caller
+should pass an existing concurrent name back as NAME to address it
+again."
+  (clpm.repl-bridge.compat:with-mutex ((server-workers-mutex server))
+    (let ((existing (gethash name (server-workers server))))
       (cond
-        ((eq job :stop) (return))
+        ((and existing
+              (clpm.repl-bridge.compat:thread-alive-p (worker-thread existing)))
+         existing)
+        (existing
+         (remhash name (server-workers server))
+         (%make-worker server name :concurrent? concurrent?))
         (t
-         (let ((result
-                 (handler-case
-                     (%eval-one (eval-job-form job)
-                                :package-override (eval-job-package-override job)
-                                :options (eval-job-options job)
-                                :job job)
-                   ;; Any unexpected interrupt at this outermost level becomes
-                   ;; an "interrupted" result for the requester.
-                   (user-interrupt ()
-                     (make-eval-result :code "interrupted"
-                                       :values nil :output "" :error-output ""
-                                       :package "" :elapsed-ms 0
-                                       :conditions '()
-                                       :signaled-conditions nil
-                                       :truncated? nil
-                                       :redefined nil
-                                       :history nil)))))
-           (clpm.repl-bridge.compat:send-message (eval-job-result-mailbox job) result)))))))
+         (%make-worker server name :concurrent? concurrent?))))))
 
-(defun %ensure-worker (server)
-  "Start a worker thread for SERVER if none is alive. Returns the worker's
-inbound mailbox. Thread-safe via SERVER-WORKER-MUTEX."
-  (clpm.repl-bridge.compat:with-mutex ((server-worker-mutex server))
-    (when (or (null (server-worker server))
-              (not (clpm.repl-bridge.compat:thread-alive-p
-                    (worker-thread (server-worker server)))))
-      (let ((mailbox (clpm.repl-bridge.compat:make-mailbox)))
-        (setf (server-worker server)
-              (make-worker
-               :mailbox mailbox
-               :thread (clpm.repl-bridge.compat:make-thread
-                        (lambda () (%worker-loop mailbox))
-                        :name "clpm.repl-bridge.worker")))))
-    (worker-mailbox (server-worker server))))
+(defun %fresh-concurrent-worker (server)
+  "Spawn a one-shot worker for `eval --concurrent'. The name is
+auto-generated and the worker is destroyed once the eval completes."
+  (clpm.repl-bridge.compat:with-mutex ((server-workers-mutex server))
+    (let* ((n (incf (server-concurrent-counter server)))
+           (name (format nil "$concurrent-~D" n)))
+      (%make-worker server name :concurrent? t))))
 
-(defun %interrupt-worker (server)
-  "Signal user-interrupt inside the worker, unwinding its current eval."
-  (let ((w (server-worker server)))
+(defun %find-worker (server name)
+  "Return the worker named NAME, or NIL if unknown / dead."
+  (clpm.repl-bridge.compat:with-mutex ((server-workers-mutex server))
+    (gethash name (server-workers server))))
+
+(defun %remove-worker (server name)
+  "Remove NAME from the workers table. Caller is responsible for stopping
+the thread before calling."
+  (clpm.repl-bridge.compat:with-mutex ((server-workers-mutex server))
+    (remhash name (server-workers server))))
+
+(defun %all-workers (server)
+  "Snapshot of all workers as a list. Thread-safe."
+  (clpm.repl-bridge.compat:with-mutex ((server-workers-mutex server))
+    (loop for w being the hash-values of (server-workers server) collect w)))
+
+(defun %kill-worker (server worker)
+  "Terminate WORKER's thread (if alive) and remove it from the registry."
+  (when (clpm.repl-bridge.compat:thread-alive-p (worker-thread worker))
+    (setf (worker-state worker) :dead)
+    (clpm.repl-bridge.compat:terminate-thread (worker-thread worker)))
+  (%remove-worker server (worker-name worker)))
+
+(defun %interrupt-worker (server &optional (name +default-worker-name+))
+  "Signal user-interrupt inside the named worker. NIL means the default."
+  (let ((w (%find-worker server (or name +default-worker-name+))))
     (when (and w (clpm.repl-bridge.compat:thread-alive-p (worker-thread w)))
       (clpm.repl-bridge.compat:interrupt-thread
        (worker-thread w)
        (lambda () (signal 'user-interrupt))))))
+
+(defun server-current-package (server)
+  "The persistent eval `*package*' for the default worker. Other named
+workers track their own package in `worker-package'."
+  (worker-package (%ensure-worker server)))
+
+(defun (setf server-current-package) (pkg server)
+  (setf (worker-package (%ensure-worker server)) pkg))
+
+(defun server-redefinitions (server)
+  "Default-worker redefinition table. Named workers each keep their own,
+queryable via `list-redefinitions' with `worker'."
+  (worker-redefinitions (%ensure-worker server)))
 
 ;;; --------------------------------------------------------------------------
 ;;; Method dispatch
@@ -1489,25 +1590,35 @@ via the `pid' and `eval_count' fields."
  (make-method-spec
   :name "current-package"
   :summary "Return the persistent eval *package* as a string."
-  :doc "No parameters. Returns `{package: \"FOO\"}'."
-  :params nil
+  :doc "Returns `{package: \"FOO\"}'. Pass `worker' to inspect a named
+worker's package; otherwise the default worker is reported."
+  :params (list (list :name "worker" :type "string" :required nil
+                      :description "Name of the worker (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
-    (declare (ignore params ctx))
-    (%success-response
-     id (%json-object "package" (package-name (server-current-package server)))))))
+    (declare (ignore ctx))
+    (let* ((wname (or (%json-getf params "worker") +default-worker-name+))
+           (w (%ensure-worker server :name wname)))
+      (%success-response
+       id (%json-object "worker" (worker-name w)
+                        "package" (package-name (worker-package w))))))))
 
 (%register-method
  (make-method-spec
   :name "set-package"
   :summary "Set the persistent eval *package* by name."
-  :doc "Looks up the package case-insensitively. Returns the canonical name."
+  :doc "Looks up the package case-insensitively. Returns the canonical name.
+Pass `worker' to set a named worker's package; otherwise the default
+worker is changed."
   :params (list (list :name "name" :type "string" :required t
-                      :description "Package name; matched case-insensitively."))
+                      :description "Package name; matched case-insensitively.")
+                (list :name "worker" :type "string" :required nil
+                      :description "Worker name (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (let* ((name (%json-getf params "name"))
+           (wname (or (%json-getf params "worker") +default-worker-name+))
            (pkg (and (stringp name) (%find-package-loose name))))
       (cond
         ((not (stringp name))
@@ -1516,9 +1627,11 @@ via the `pid' and `eval_count' fields."
          (%error-response id "eval-error"
                           (format nil "No such package: ~A" name)))
         (t
-         (setf (server-current-package server) pkg)
-         (%success-response id
-          (%json-object "package" (package-name pkg)))))))))
+         (let ((w (%ensure-worker server :name wname)))
+           (setf (worker-package w) pkg)
+           (%success-response id
+            (%json-object "worker" (worker-name w)
+                          "package" (package-name pkg))))))))))
 
 (%register-method
  (make-method-spec
@@ -1554,6 +1667,10 @@ With `query_interactive: true', any read from *standard-input* /
                       :description "Bind *standard-input* to a bidirectional query stream.")
                 (list :name "record_signals" :type "boolean" :required nil
                       :description "Record non-error conditions signaled during eval.")
+                (list :name "worker" :type "string" :required nil
+                      :description "Run on a named worker; spawned if absent.")
+                (list :name "concurrent" :type "boolean" :required nil
+                      :description "Run on a fresh disposable worker that's destroyed after the eval.")
                 (list :name "print_length" :type "integer" :required nil
                       :description "Bind *print-length* during prin1 of values.")
                 (list :name "print_level" :type "integer" :required nil
@@ -1566,34 +1683,130 @@ With `query_interactive: true', any read from *standard-input* /
  (make-method-spec
   :name "interrupt"
   :summary "Signal a user-interrupt inside the worker, unwinding its current eval."
-  :doc "No parameters. Async: returns immediately. If no eval is running,
-this is a no-op."
-  :params nil
+  :doc "Async: returns immediately. If no eval is running this is a no-op.
+Pass `worker' to target a named worker; otherwise the default worker is
+interrupted."
+  :params (list (list :name "worker" :type "string" :required nil
+                      :description "Worker name (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
-    (declare (ignore params ctx))
-    (%log-event (server-event-log server) "interrupt")
-    (%interrupt-worker server)
+    (declare (ignore ctx))
+    (let ((wname (or (%json-getf params "worker") +default-worker-name+)))
+      (%log-event (server-event-log server) "interrupt" "worker" wname)
+      (%interrupt-worker server wname))
     (%success-response id (%json-object)))))
 
 (%register-method
  (make-method-spec
   :name "reset"
-  :summary "Kill the worker thread and clear the redefinition log."
+  :summary "Kill a worker thread and clear its redefinition log."
   :doc "Use to recover from a runaway eval that ignored `interrupt'. The
-next eval request spawns a fresh worker; persistent package state is
-preserved across resets."
+next eval against the same worker name spawns a fresh thread.
+Persistent package state is preserved across resets. Pass `worker' to
+reset a named worker; otherwise the default worker is reset."
+  :params (list (list :name "worker" :type "string" :required nil
+                      :description "Worker name (default: \"default\")."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((wname (or (%json-getf params "worker") +default-worker-name+))
+           (w (%find-worker server wname)))
+      (when w
+        (let ((preserved-pkg (worker-package w)))
+          (when (clpm.repl-bridge.compat:thread-alive-p (worker-thread w))
+            (%log-event (server-event-log server)
+                        "worker-terminated" "worker" wname)
+            (clpm.repl-bridge.compat:terminate-thread (worker-thread w)))
+          (%remove-worker server wname)
+          ;; Recreate the named worker eagerly so the persistent package
+          ;; (and the slot itself) survives the reset.
+          (let ((fresh (%ensure-worker server :name wname)))
+            (setf (worker-package fresh) preserved-pkg)))))
+    (%success-response id (%json-object)))))
+
+(defun %worker-state-string (worker)
+  "Human-readable string form of a worker's STATE keyword."
+  (let ((debug (and (worker-current-job worker)
+                    (eval-job-debug-session (worker-current-job worker)))))
+    (cond
+      (debug "in-debugger")
+      ((eq (worker-state worker) :busy) "busy")
+      ((eq (worker-state worker) :dead) "dead")
+      (t "idle"))))
+
+(defun %worker-json (worker)
+  "JSON `(:object …)' summary of one worker. `now' is the current
+universal time, used for `age_seconds'."
+  (let ((now (get-universal-time)))
+    (list :object
+          (list (cons "name" (worker-name worker))
+                (cons "state" (%worker-state-string worker))
+                (cons "package" (package-name (worker-package worker)))
+                (cons "last_eval_id" (worker-last-eval-id worker))
+                (cons "started_at_unix" (worker-started-at worker))
+                (cons "age_seconds" (- now (worker-started-at worker)))
+                (cons "last_active_seconds_ago"
+                      (- now (worker-last-active-at worker)))
+                (cons "concurrent" (worker-concurrent? worker))
+                (cons "alive"
+                      (and (worker-thread worker)
+                           (clpm.repl-bridge.compat:thread-alive-p
+                            (worker-thread worker))
+                           t))))))
+
+(%register-method
+ (make-method-spec
+  :name "list-workers"
+  :summary "Return every named eval worker with its state and package."
+  :doc "Returns `{entries: [{name, state, package, last_eval_id,
+started_at_unix, age_seconds, last_active_seconds_ago, concurrent,
+alive}, ...]}'. `state' is one of `idle' / `busy' / `in-debugger' /
+`dead'."
   :params nil
   :handler
   (lambda (server params id ctx)
     (declare (ignore params ctx))
-    (let ((w (server-worker server)))
-      (when (and w (clpm.repl-bridge.compat:thread-alive-p (worker-thread w)))
-        (%log-event (server-event-log server) "worker-terminated")
-        (clpm.repl-bridge.compat:terminate-thread (worker-thread w)))
-      (setf (server-worker server) nil)
-      (clrhash (server-redefinitions server)))
-    (%success-response id (%json-object)))))
+    ;; Make sure the default worker shows up even before any eval has
+    ;; been routed to it.
+    (%ensure-worker server)
+    (%success-response
+     id
+     (%json-object "entries"
+                   (%json-array
+                    (mapcar #'%worker-json (%all-workers server))))))))
+
+(%register-method
+ (make-method-spec
+  :name "kill-worker"
+  :summary "Terminate a worker thread and forget it."
+  :doc "Like `reset' but the worker is *not* recreated -- subsequent
+`eval' calls naming a killed worker will spawn a fresh one. The
+default worker cannot be killed; use `reset' instead."
+  :params (list (list :name "name" :type "string" :required t
+                      :description "Name of the worker to kill."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (let* ((name (%json-getf params "name")))
+      (cond
+        ((not (stringp name))
+         (%error-response id "protocol-error" "missing `name' param"))
+        ((string= name +default-worker-name+)
+         (%error-response id "eval-error"
+                          "use `reset' instead of killing the default worker"))
+        (t
+         (let ((w (%find-worker server name)))
+           (cond
+             ((null w)
+              ;; Idempotent: killing an unknown worker is a no-op.
+              (%success-response id
+               (%json-object "name" name "killed" nil)))
+             (t
+              (%log-event (server-event-log server)
+                          "worker-killed" "worker" name)
+              (%kill-worker server w)
+              (%success-response id
+               (%json-object "name" name "killed" t)))))))))))
 
 (%register-method
  (make-method-spec
@@ -1616,18 +1829,23 @@ Returns `{output: <text>}'."
   :summary "Return the running log of top-level redefinitions seen by eval."
   :doc "Defun, defmethod, defmacro, defgeneric, defclass, defstruct, defvar,
 defparameter, defconstant, define-condition, defpackage. The log is
-cleared by `reset'."
-  :params nil
+cleared by `reset'. Pass `worker' to scope to a named worker, otherwise
+the default worker's log is returned."
+  :params (list (list :name "worker" :type "string" :required nil
+                      :description "Worker name (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
-    (declare (ignore params ctx))
-    (%success-response
-     id
-     (%json-object "entries"
-                   (%json-array
-                    (loop for v being the hash-values of
-                          (server-redefinitions server)
-                          collect (list :object v))))))))
+    (declare (ignore ctx))
+    (let* ((wname (or (%json-getf params "worker") +default-worker-name+))
+           (w (%ensure-worker server :name wname)))
+      (%success-response
+       id
+       (%json-object "worker" (worker-name w)
+                     "entries"
+                     (%json-array
+                      (loop for v being the hash-values of
+                            (worker-redefinitions w)
+                            collect (list :object v)))))))))
 
 (%register-method
  (make-method-spec
@@ -3402,6 +3620,8 @@ keeps the worker fast-path identical to v1."
       (maybe-bool "debug" :debug)
       (maybe-bool "query_interactive" :query-interactive)
       (maybe-bool "record_signals" :record-signals)
+      (maybe-bool "concurrent" :concurrent)
+      (maybe-string "worker" :worker)
       (maybe-string "break_on" :break-on)
       ;; "handlers" is an array of {type, restart, args} objects. We pass
       ;; the raw array form through; the eval path translates it.
@@ -3449,12 +3669,17 @@ as a prin1 string, or NIL for `(values)')."
 (defun %dispatch-eval (server params id &optional ctx)
   (let* ((form (%json-getf params "form"))
          (package-override (%json-getf params "package"))
-         (options (%parse-eval-options params)))
+         (options (%parse-eval-options params))
+         (concurrent? (getf options :concurrent))
+         (worker-name (or (getf options :worker) +default-worker-name+))
+         (worker (cond
+                   (concurrent? (%fresh-concurrent-worker server))
+                   (t (%ensure-worker server :name worker-name)))))
     (cond
       ((not (stringp form))
        (%error-response id "protocol-error" "missing `form` param"))
       (t
-       (let* ((mailbox (%ensure-worker server))
+       (let* ((mailbox (worker-mailbox worker))
               (reply-box (clpm.repl-bridge.compat:make-mailbox))
               (query-box (and (getf options :query-interactive)
                               (clpm.repl-bridge.compat:make-mailbox)))
@@ -3470,6 +3695,7 @@ as a prin1 string, or NIL for `(values)')."
                     :result-mailbox reply-box)))
          (when ctx
            (setf (request-context-options ctx) options))
+         (setf (worker-last-eval-id worker) id)
          ;; Register *before* posting to the worker so a continuation
          ;; message racing with `event:query' still finds the job.
          (when (and ctx (request-context-cstate ctx))
@@ -3477,6 +3703,12 @@ as a prin1 string, or NIL for `(values)')."
          (incf (server-eval-count server))
          (clpm.repl-bridge.compat:send-message mailbox job)
          (let ((result (clpm.repl-bridge.compat:receive-message reply-box)))
+           (when (worker-concurrent? worker)
+             ;; One-shot: teardown after the eval completes (success or
+             ;; failure). Best-effort; if the worker is wedged the
+             ;; supervisor can still see it via `list-workers'.
+             (clpm.repl-bridge.compat:send-message mailbox :stop)
+             (%remove-worker server (worker-name worker)))
            (cond
              ((null (eval-result-code result))
               (let ((payload (%eval-success-payload result)))
@@ -3607,8 +3839,10 @@ thread sees the same instance; only one daemon may run per process."
                (error ()
                  (when (server-shutdown-requested? server)
                    (loop-finish))))))
-      (let ((w (server-worker server)))
-        (when (and w (clpm.repl-bridge.compat:thread-alive-p (worker-thread w)))
+      ;; Stop every worker we spawned. Best-effort: the daemon is going
+      ;; away, so failure to join is acceptable.
+      (dolist (w (%all-workers server))
+        (when (clpm.repl-bridge.compat:thread-alive-p (worker-thread w))
           (clpm.repl-bridge.compat:send-message (worker-mailbox w) :stop)
           (handler-case
               (clpm.repl-bridge.compat:join-thread (worker-thread w))
