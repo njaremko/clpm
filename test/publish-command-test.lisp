@@ -1,4 +1,4 @@
-;;;; test/publish-command-test.lisp - `clpm publish` command tests
+;;;; test/publish-command-test.lisp - `clpm registry publish` command tests
 
 (require :asdf)
 (require :sb-posix)
@@ -49,7 +49,7 @@
                 (get-output-stream-string out)
                 (get-output-stream-string err))))))
 
-(format t "Testing `clpm publish`...~%")
+(format t "Testing `clpm registry publish`...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))

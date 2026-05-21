@@ -222,6 +222,9 @@ despite some legacy comments). The rules a user needs to know:
 
 ## Commands
 
+Bare `clpm` prints the command schema. Commands that change project state are
+explicit resource operations.
+
 | Command | Description |
 |---------|-------------|
 | `clpm help <cmd>` | Show command-specific help |

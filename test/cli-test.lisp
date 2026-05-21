@@ -26,13 +26,58 @@
   (unless (eql expected actual)
     (fail "Assertion failed: expected ~S, got ~S" expected actual)))
 
+(defun assert-string= (expected actual)
+  (unless (string= expected actual)
+    (fail "Assertion failed: expected ~S, got ~S" expected actual)))
+
+(defun run-cli-captured (args)
+  (let ((out (make-string-output-stream))
+        (err (make-string-output-stream)))
+    (let ((*standard-output* out)
+          (*error-output* err))
+      (let ((code (clpm:run-cli args)))
+        (values code
+                (get-output-stream-string out)
+                (get-output-stream-string err))))))
+
 (format t "Testing --help...~%")
 (assert-eql 0 (clpm:run-cli '("--help")))
 (format t "  --help PASSED~%")
 
+(format t "Testing bare clpm is help only...~%")
+(multiple-value-bind (bare-code bare-out bare-err)
+    (run-cli-captured '())
+  (multiple-value-bind (help-code help-out help-err)
+      (run-cli-captured '("help"))
+    (assert-eql 0 bare-code)
+    (assert-eql help-code bare-code)
+    (assert-string= help-out bare-out)
+    (assert-string= help-err bare-err)))
+(format t "  Bare help PASSED~%")
+
 (format t "Testing unknown command...~%")
 (assert-eql 1 (clpm:run-cli '("unknown-command")))
 (format t "  Unknown command PASSED~%")
+
+(format t "Testing public command handler exports...~%")
+(dolist (name '("CMD-PROJECT" "CMD-DEPS" "CMD-REGISTRY" "CMD-RUN"
+                "CMD-STORE" "CMD-REPL" "CMD-SKILL" "CMD-HELP"
+                "CMD-DOCTOR"))
+  (multiple-value-bind (_symbol status)
+      (find-symbol name "CLPM.COMMANDS")
+    (declare (ignore _symbol))
+    (assert-eql :external status)))
+(dolist (name '("CMD-INIT" "CMD-NEW" "CMD-ADD" "CMD-REMOVE"
+                "CMD-SEARCH" "CMD-INFO" "CMD-TREE" "CMD-WHY"
+                "CMD-RESOLVE" "CMD-FETCH" "CMD-BUILD" "CMD-INSTALL"
+                "CMD-UPDATE" "CMD-WORKSPACE" "CMD-EXEC" "CMD-TEST"
+                "CMD-PACKAGE" "CMD-CLEAN" "CMD-GC" "CMD-SCRIPTS"
+                "CMD-AUDIT" "CMD-SBOM" "CMD-KEYS" "CMD-PUBLISH"))
+  (multiple-value-bind (_symbol status)
+      (find-symbol name "CLPM.COMMANDS")
+    (declare (ignore _symbol))
+    (assert-eql :internal status)))
+(format t "  Public handler exports PASSED~%")
 
 (format t "Testing run-program :timeout keyword...~%")
 (multiple-value-bind (output error-output exit-code)

@@ -288,7 +288,7 @@ clpm [options] repl eval FORM [--package P] [--worker W] [--debug] ...
 clpm [options] repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
 
-Bare `clpm [options]` denotes `clpm [options] deps sync`.
+Bare `clpm [options]` denotes `clpm [options] help`.
 
 ## Current Surface Classification
 
@@ -407,6 +407,35 @@ Bare `clpm [options]` denotes `clpm [options] deps sync`.
     cannot remove `daemon`, `eval`, or `call` without losing lifecycle
     control, ergonomic one-form evaluation, or controlled protocol access.
 
+### Iteration 4: Attack Empty Invocations and Package Exports
+
+- Commands deleted:
+  - No additional CLI tokens. The parser had already stopped accepting the
+    derived top-level commands.
+- Commands merged:
+  - No additional semantic carriers.
+- Commands derived instead of exposed:
+  - Internal implementation functions such as `cmd-resolve`, `cmd-install`,
+    `cmd-keys`, and `cmd-gc` remain implementation details of the resource
+    dispatchers, not exported public API.
+- Commands that survived and why:
+  - Bare `clpm` survives only as `help`, a safe schema observation. Letting
+    an empty invocation mutate `clpm.lock`, fetch sources, compile code, or
+    activate a project fails the "no surprise effects" test.
+  - The exported `clpm.commands` command surface is limited to resource
+    dispatchers and observation commands: `cmd-project`, `cmd-deps`,
+    `cmd-registry`, `cmd-run`, `cmd-store`, `cmd-repl`, `cmd-skill`,
+    `cmd-help`, and `cmd-doctor`.
+- Laws/protocol invariants added:
+  - Empty invocation is observational: `parse [] = Help Root`.
+  - Package export morphism: exported command-handler symbols are exactly the
+    public command constructors, not every implementation leaf.
+- Remaining discomfort:
+  - `--insecure` remains a deliberately dangerous global option because the
+    test suite needs a way to prove verification failure and explicit
+    debugging sometimes requires bypassing trust. It is semantically marked
+    as an integrity override and must stay noisy in documentation and logs.
+
 ## Constructors
 
 Terminal constructors:
@@ -432,7 +461,7 @@ repl         :: ReplOperation -> Invocation
 Derived constructors:
 
 ```haskell
-defaultInvocation = deps (sync Active)
+defaultInvocation = help Root
 run script name args = run (Script name args)
 registry key op = registry (Key op)
 registry publish args = registry (Publish args)
@@ -456,8 +485,8 @@ Constructor responsibility audit:
 ## Denotation Laws
 
 ```haskell
-Law: "default is active dependency sync"
-  denote (parse []) ctx world = denote (deps (sync Active)) ctx world
+Law: "default is help"
+  denote (parse []) ctx world = denote (help Root) ctx world
 
 Law: "sync/lock"
   denote (deps (sync Lock)) ctx world =
@@ -601,6 +630,11 @@ Law: "parse/help schema"
 forall invocation selector.
   parse invocation = Right command
   => help selector commandSchema mentions command iff command is public
+
+Law: "package/export schema"
+  exportedCommandHandlers(clpm.commands)
+  = { cmd-project, cmd-deps, cmd-registry, cmd-run, cmd-store, cmd-repl,
+      cmd-skill, cmd-help, cmd-doctor }
 ```
 
 Rejected instances:
@@ -640,6 +674,8 @@ Repairs required before implementation:
    expose only the target public surface.
 2. Update focused command tests to use the new surface.
 3. Add coverage that removed top-level wrappers are no longer public.
+4. Add coverage that removed leaf handlers are not exported from
+   `clpm.commands`.
 
 ## Reference Implementation Derivation
 
@@ -660,6 +696,9 @@ Primitive constructors:
 - `cmd-run` as the execution resource dispatcher
 - `cmd-store`
 - `cmd-repl`
+- `cmd-skill`
+- `cmd-help`
+- `cmd-doctor`
 
 Derived constructors:
 
@@ -675,8 +714,8 @@ Observation implementation:
 
 Transported instances through `denote`/`reify`:
 
-- Existing internal functions may remain if the public parser no longer
-  exposes their old top-level names.
+- Existing internal functions may remain if neither the public parser nor
+  package exports expose their old top-level names.
 - No compatibility aliases are added.
 
 ## Property and Command Tests
@@ -687,8 +726,7 @@ Generators:
 
 Denotation properties:
 
-- Bare `clpm` and `clpm deps sync` return the same kind of outcome in a
-  project.
+- Bare `clpm` and `clpm help` return the same safe schema observation.
 - `deps sync --to lock` writes/refreshes `clpm.lock` and does not require
   activation.
 - `store gc --dry-run` does not mutate store reachability.
@@ -704,6 +742,8 @@ Failed-counterexample regressions:
   `clpm gc` are unknown top-level commands after the refinement.
 - `clpm run repl` and `clpm help run repl` reject the obsolete ordinary REPL
   surface and point at `clpm repl`.
+- `clpm.commands:cmd-install`, `clpm.commands:cmd-keys`,
+  `clpm.commands:cmd-gc`, and other leaf handlers are not external symbols.
 
 Reference versus optimized equivalence:
 

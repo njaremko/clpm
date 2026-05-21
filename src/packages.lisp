@@ -399,34 +399,10 @@
            #:cmd-project
            #:cmd-deps
            #:cmd-store
-           #:cmd-init
-           #:cmd-new
-           #:cmd-add
-           #:cmd-remove
-           #:cmd-search
-           #:cmd-info
-           #:cmd-tree
-           #:cmd-why
-           #:cmd-resolve
-           #:cmd-fetch
-           #:cmd-build
-           #:cmd-install
-           #:cmd-update
-           #:cmd-workspace
            #:cmd-registry
            #:cmd-repl
            #:cmd-skill
            #:cmd-run
-           #:cmd-exec
-           #:cmd-test
-           #:cmd-package
-           #:cmd-clean
-           #:cmd-gc
-           #:cmd-scripts
-           #:cmd-audit
-           #:cmd-sbom
-           #:cmd-keys
-           #:cmd-publish
            #:cmd-help
            #:cmd-doctor))
 
