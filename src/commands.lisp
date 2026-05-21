@@ -1801,6 +1801,40 @@ workflows, not the runtime image."
 ;; via `uiop:launch-program` which inherits the right file descriptors --
 ;; we don't need fork/setsid/dup2 from inside the daemon.
 
+(defun %bridge-pathlike-p (string)
+  (and (stringp string)
+       (or (find #\/ string)
+           (find #\\ string))))
+
+(defun %bridge-existing-file (path)
+  (let ((found (and path (uiop:file-exists-p path))))
+    (when (and found (not (uiop:directory-pathname-p found)))
+      (namestring (truename found)))))
+
+(defun %bridge-saved-sbcl-executable ()
+  #+sbcl
+  (let* ((runtime (and sb-ext:*runtime-pathname*
+                       (uiop:file-exists-p sb-ext:*runtime-pathname*)))
+         (core (and sb-ext:*core-pathname*
+                    (uiop:file-exists-p sb-ext:*core-pathname*))))
+    (when (and runtime core
+               (string= (namestring (truename runtime))
+                        (namestring (truename core))))
+      (namestring (truename runtime))))
+  #-sbcl
+  nil)
+
+(defun %bridge-clpm-executable ()
+  "Return the executable that can re-enter this CLPM image, or NIL."
+  (let ((argv0 (uiop:argv0)))
+    (or (and (%bridge-pathlike-p argv0)
+             (%bridge-existing-file argv0))
+        (%bridge-saved-sbcl-executable)
+        (and (stringp argv0)
+             (plusp (length argv0))
+             (not (%bridge-pathlike-p argv0))
+             (which argv0)))))
+
 (defun %bridge-maybe-autostart (project-root)
   "If the manifest sets `:repl (:autostart t ...)`, ensure a daemon is
 running for PROJECT-ROOT by launching `daemon --detach' when one is not.
@@ -1816,10 +1850,9 @@ because the daemon couldn't come up."
           (when (and existing (%bridge-pid-alive-p existing))
             (log-info "repl daemon already running (pid ~D)" existing)
             (return-from %bridge-maybe-autostart)))
-        (let ((clpm-bin (uiop:argv0)))
-          (unless (and clpm-bin (probe-file clpm-bin))
-            (log-error "repl autostart: clpm binary not found at ~S"
-                       clpm-bin)
+        (let ((clpm-bin (%bridge-clpm-executable)))
+          (unless clpm-bin
+            (log-error "repl autostart: could not find current clpm executable")
             (return-from %bridge-maybe-autostart))
           (log-info "repl: starting daemon (autostart from manifest)")
           (handler-case
@@ -1867,10 +1900,9 @@ because the daemon couldn't come up."
           (return-from %bridge-daemon-start 1)))
       (cond
         (detach
-         (let ((clpm-bin (uiop:argv0)))
-           (unless (and clpm-bin (probe-file clpm-bin))
-             (log-error "Could not find clpm binary at ~S; --detach unavailable"
-                        clpm-bin)
+         (let ((clpm-bin (%bridge-clpm-executable)))
+           (unless clpm-bin
+             (log-error "Could not find current clpm executable; --detach unavailable")
              (return-from %bridge-daemon-start 1))
            (let ((argv (append (list clpm-bin "repl" "daemon")
                                (when no-load (list "--no-load")))))
