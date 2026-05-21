@@ -74,5 +74,14 @@
                      "Round-trip mismatch for clpm.project")))))
 
 (format t "  clpm.project round-trip PASSED~%")
+
+(format t "Testing clpm.project public exports are backed by bindings...~%")
+(multiple-value-bind (symbol status)
+    (find-symbol "LOCKFILE-PROJECT" "CLPM.PROJECT")
+  (declare (ignore symbol))
+  (assert-true (not (eq status :external))
+               "CLPM.PROJECT exports dead LOCKFILE-PROJECT accessor"))
+(format t "  clpm.project export hygiene PASSED~%")
+
 (format t "~%Project round-trip tests PASSED!~%")
 (sb-ext:exit :code 0)

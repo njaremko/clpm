@@ -3040,7 +3040,7 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
     (return-from %bridge-help 1))
   (format t "Usage:~%")
   (format t "  clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]~%")
-  (format t "  clpm repl eval FORM [--package P] [--worker W] [--debug] ...~%")
+  (format t "  clpm repl eval FORM [--package P] [--worker W] [--debug] [--json]~%")
   (format t "  clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...~%~%")
   (format t "Use `clpm repl call methods` to list callable daemon RPCs.~%")
   (format t "Use `clpm repl call help --method gc` for a callable method schema.~%")
@@ -5610,8 +5610,8 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "The public bridge CLI is deliberately small:"
     ""
     "```sh"
-    "clpm repl daemon [--detach] [--no-load] [--status] [--stop]"
-    "clpm repl eval FORM [--package P] [--worker W] [--debug] ..."
+    "clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]"
+    "clpm repl eval FORM [--package P] [--worker W] [--debug] [--json]"
     "clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]..."
     "```"
     ""
@@ -5707,7 +5707,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     ""
     "## Help"
     ""
-    "Use `clpm help` for the command list, `clpm help <command>` for command-specific help, and `clpm skill` to print this SKILL.md markdown."))
+    "Use `clpm help` for the command list, `clpm help <command> [subcommand ...]` for command-specific help, and `clpm skill` to print this SKILL.md markdown."))
 
 (defun cmd-skill (&rest args)
   "Print SKILL.md markdown teaching an agent how to use CLPM."
@@ -5916,7 +5916,7 @@ sub-subcommand=\"set\")."
             (p "   or: clpm registry add --quicklisp [--name quicklisp] [--url <dist-url>] [--trust tofu|sha256:<64-hex-digest>]")
             (p "")
             (p "Example:")
-            (p "  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:abcd...")
+            (p "  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:<key-id>")
             (p "  clpm registry add --quicklisp --trust tofu")
             (p "")
             (p "Quicklisp note: dists do not publish version constraints between systems,")
@@ -6086,7 +6086,7 @@ sub-subcommand=\"set\")."
            (t
             (p "Usage:")
             (p "  clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]")
-            (p "  clpm repl eval <form> [--package <pkg>] [--worker <name>] [--debug] ...")
+            (p "  clpm repl eval <form> [--package <pkg>] [--worker <name>] [--debug] [--json]")
             (p "  clpm repl call <method> [--params-json <json>] [--PARAM <value>]...")
             (p "")
             (p "Drive a persistent project-scoped Lisp daemon. `call methods`")

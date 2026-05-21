@@ -175,7 +175,7 @@ The `clpm.project` file is a data-only S-expression:
   :registries
     ((:git :url "https://example.org/clpm-registry.git"
            :name "main"
-           :trust "ed25519:abcd..."))
+           :trust "ed25519:<key-id>"))
   :sbcl (:min "2.4.0" :max nil)
   :build (:jobs 8 :compile (:debug nil :speed 3 :safety 1)))
 ```

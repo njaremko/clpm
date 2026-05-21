@@ -67,6 +67,10 @@
   (assert-contains stdout "skill")
   (assert-contains stdout "repl")
   (assert-contains stdout "Scoped options must appear before the command token.")
+  (assert-contains stdout "Use `clpm help <command> [subcommand ...]`")
+  (assert-not-contains stdout "ed25519:example-key-id"
+                       "top-level help still uses fake trust key example:~%~A"
+                       stdout)
   (assert-not-contains stdout "help [cmd]      "
                        "top-level help under-advertises nested help selectors:~%~A"
                        stdout)
@@ -252,7 +256,10 @@
   (assert-contains stdout "Usage: clpm registry add")
   (assert-contains stdout "ed25519:<key-id>")
   (assert-contains stdout "--quicklisp")
-  (assert-contains stdout "--trust tofu|sha256:<64-hex-digest>"))
+  (assert-contains stdout "--trust tofu|sha256:<64-hex-digest>")
+  (assert-not-contains stdout "ed25519:abcd"
+                       "registry add help still uses fake trust key example:~%~A"
+                       stdout))
 
 ;; registry publish: writes CLPM artifacts only, no VCS side effects.
 (multiple-value-bind (code stdout stderr)
@@ -270,7 +277,8 @@
   (assert-eql 0 code)
   (assert-contains stdout "clpm repl daemon")
   (assert-contains stdout "[--status [--json]]")
-  (assert-contains stdout "clpm repl eval")
+  (assert-contains stdout "clpm repl eval <form>")
+  (assert-contains stdout "[--json]")
   (assert-contains stdout "clpm repl call")
   (assert-contains stdout "public callable RPC")
   (assert-not-contains stdout "lists the RPC registry"
@@ -307,6 +315,14 @@
   (assert-eql 0 code)
   (assert-contains stdout "Usage: clpm repl call")
   (assert-contains stdout "--params-json"))
+
+;; repl resource help mirrors the nested help page.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("repl" "--help"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "clpm repl eval <form>")
+  (assert-contains stdout "[--json]"))
 
 (format t "  Per-subcommand help PASSED~%")
 

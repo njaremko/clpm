@@ -58,6 +58,7 @@
   (assert-contains stdout "Strongly prefer it")
   (assert-contains stdout "Debug-first workflow")
   (assert-contains stdout "clpm repl eval '(error")
+  (assert-contains stdout "clpm repl eval FORM [--package P] [--worker W] [--debug] [--json]")
   (assert-contains stdout "clpm repl call list-watches")
   (assert-contains stdout "clpm repl call debug-abort --session 1")
   (assert-contains stdout "Do not leave kept debug sessions")

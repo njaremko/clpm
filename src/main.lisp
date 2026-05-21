@@ -40,11 +40,11 @@ Options:
 
 Scoped options must appear before the command token.
 Command-scoped options are documented on the commands that accept them.
-Use `clpm help <command> [subcommand]` before passing scoped options.
+Use `clpm help <command> [subcommand ...]` before passing scoped options.
 
 Examples:
   clpm doctor
-  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:example-key-id
+  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:<key-id>
   clpm project new myproject --bin
   clpm project init myproject
   clpm deps add alexandria bordeaux-threads

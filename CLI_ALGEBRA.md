@@ -2228,6 +2228,30 @@ but output kind and machine-readable shape are semantic.
     servers. Detached CLI daemons remain separate OS processes, and the default
     eval namespace now covers the user-visible REPL binding leak.
 
+### Iteration 72: Public Schema Must Be Bound and Concrete
+
+- Commands deleted:
+  - None at the command level.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Public package exports are schema observations. A name that is not backed
+    by a real binding is not a compatibility surface; it is deleted.
+- Commands that survived and why:
+  - `help`, `--help`, README, and `skill` survive as observations of the
+    command algebra, not independent hand-maintained surfaces.
+- Laws/protocol invariants added:
+  - Every exported `clpm.project` lockfile accessor must be backed by an
+    actual struct accessor or constructor contract.
+  - Nested help selectors are variadic everywhere user-facing schema text
+    describes them: `clpm help <command> [subcommand ...]`.
+  - Example trust values must be typed placeholders such as
+    `ed25519:<key-id>`, not fake key material.
+  - Every umbrella REPL eval usage names `--json`, because machine-readable
+    eval output is a surviving observation mode.
+- Remaining discomfort:
+  - None for this schema-honesty slice.
+
 ## Constructors
 
 Terminal constructors:
@@ -2718,8 +2742,14 @@ Failed-counterexample regressions:
 - README documents the workspace, standalone project, and workspace-member
   `project new` constructor forms.
 - Tests pin the exact public exports of `CLPM.COMMANDS` and `CLPM`.
+- `clpm.project:lockfile-project` is not exported; the surviving lockfile
+  project observations are the backed accessors `lockfile-project-name` and
+  `lockfile-project-sha256`.
 - README solver prose no longer mentions implementation-history comments.
 - Root help advertises `help [cmd ...]` rather than only `help [cmd]`.
+- Root help, nested help, README, and generated skill output use concrete
+  variadic help selectors, typed Ed25519 trust placeholders, and REPL eval
+  summaries that include `[--json]`.
 - `clpm registry publish --git-commit ...` is rejected; publish does not run
   VCS commands.
 - `clpm repl eval FORM --pretty` is rejected; human output is the default and

@@ -178,7 +178,6 @@
            #:lockfile-generated-at
            #:lockfile-project-sha256
            #:lockfile-registries-sha256
-           #:lockfile-project
            #:lockfile-registries
            #:lockfile-resolved
            #:lockfile-opted-in-optionals
