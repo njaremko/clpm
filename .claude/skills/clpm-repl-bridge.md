@@ -6,9 +6,10 @@ description: Prefer and operate CLPM's persistent project-scoped Lisp daemon for
 # clpm-repl-bridge
 
 Use `clpm repl` whenever you need to understand or change a live Common
-Lisp system. It gives agents a persistent project-scoped SBCL image with loaded
-systems, package state, workers, debugger sessions, inspector sessions, watches,
-traces, and a self-describing RPC registry.
+Lisp system. On a terminal it starts a foreground project Lisp for a human; in
+non-interactive tool use it ensures a persistent project-scoped SBCL daemon
+with loaded systems, package state, workers, debugger sessions, inspector
+sessions, watches, traces, and a self-describing RPC registry.
 
 Prefer it over fresh `sbcl` or one-off scripts for bug investigation, local
 redefinition, source navigation, frame inspection, timing, tracing, and
@@ -17,14 +18,17 @@ end-to-end tests, dependency graph changes, packaging, and CI gates.
 
 ## Public CLI
 
-The CLI has three semantic commands:
+The CLI has one default plus three explicit semantic commands:
 
 ```sh
+clpm repl
 clpm repl daemon [--detach] [--no-load] [--status] [--stop]
 clpm repl eval FORM [--package P] [--worker W] [--debug] ...
 clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
 
+- bare `clpm repl` starts a foreground project Lisp when stdin/stdout are
+  terminals; otherwise it ensures a detached daemon and returns.
 - `daemon` owns lifecycle. Use `--detach` to start in the background,
   `--status` to check and clean stale pid/socket files, and `--stop` for
   normal shutdown.
@@ -47,7 +51,7 @@ clpm repl call help --method gc
 ## First Moves
 
 ```sh
-clpm repl daemon --detach
+clpm repl
 clpm repl daemon --status
 clpm repl eval '(+ 1 2)'
 clpm repl call ping

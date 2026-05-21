@@ -66,7 +66,7 @@ client                                 │                              │
 ### Why this shape
 
 - **One daemon per project, project-scoped socket.** Two clpm projects in different directories are mutually invisible. Daemons live alongside `.clpm/` (already excluded from the source tree by clpm convention).
-- **Each `clpm repl eval` is a one-shot client.** The daemon persists state; the CLI does not. From the LLM's point of view, every form is a discrete tool call that returns a result — no stdin/stdout management, no `Monitor`-tool polling, no sentinel parsing. This is the single most important design decision: it matches how LLM tool-use actually works (stateless RPC, stateful server).
+- **Each `clpm repl eval` is a one-shot client.** The daemon persists state; the CLI does not. From the LLM's point of view, every form is a discrete tool call that returns a result — no stdin/stdout management for eval/call, no `Monitor`-tool polling, no sentinel parsing. This is the single most important design decision: it matches how LLM tool-use actually works (stateless RPC, stateful server).
 - **The CLI auto-starts the daemon if absent.** First `eval` after `clpm deps sync` boots the daemon, loads the lockfile's systems, then runs the form. Subsequent evals attach to the running daemon in microseconds.
 - **Filesystem permissions = auth.** Mode 0600 socket. No tokens, no TLS. The threat model is "untrusted local user," which Unix permissions already handle.
 - **Worker thread + interrupt.** Eval runs on a dedicated thread. `sb-thread:interrupt-thread` signals a `user-interrupt` condition that unwinds cleanly. Client-side ctrl-C closes the socket; the daemon notices the broken pipe and interrupts the worker automatically.
@@ -270,7 +270,8 @@ Help text (`print-command-help :repl`) with per-subcommand drilling per #017 of 
 
 **Acceptance criteria**
 
-- `clpm repl` with no args prints the usage line and exits 1.
+- `clpm repl` with no args starts a human project Lisp on a terminal and
+  ensures a detached daemon in non-interactive use.
 - `clpm help repl <subcommand>` prints the focused page.
 - Unknown subcommand prints "Unknown subcommand: X" and exits 1.
 - New test `test/repl-help-test.lisp` matches the existing per-subcommand help test pattern.

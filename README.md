@@ -101,15 +101,16 @@ clpm deps sbom --format cyclonedx-json --out sbom.json
 
 ## AI-assisted development: the REPL operator manual
 
-CLPM ships `clpm repl`: a persistent project-scoped SBCL daemon that
-answers JSON-RPC over a Unix socket. It exists so an LLM (or any non-Lisp
-tool) can drive a long-lived image — redefining one `defun` instead of
-reloading systems, capturing stdout/stderr per call, surfacing in-image drift
-from disk.
+CLPM ships `clpm repl`, with a default chosen for the caller. In a terminal,
+bare `clpm repl` starts a foreground project Lisp for a human. In
+non-interactive use, bare `clpm repl` ensures the persistent project-scoped
+SBCL daemon is running, so an LLM (or any non-Lisp tool) can drive a
+long-lived image — redefining one `defun` instead of reloading systems,
+capturing stdout/stderr per call, surfacing in-image drift from disk.
 
 ```bash
 clpm deps sync                                       # one-time setup
-clpm repl daemon --detach                           # background daemon
+clpm repl                                           # terminal: Lisp, non-terminal: daemon
 clpm repl daemon --status --json                    # machine-readable status
 clpm repl eval '(asdf:load-system "my-app")'
 clpm repl eval '(my-app:hello)'
@@ -155,8 +156,8 @@ daemon; it never starts one implicitly. Transport fields such as
   the dispatcher exposes. `call methods` lists them; `call help --method
   METHOD` returns the long doc + parameter schema.
 
-Run `clpm skill` for agent recipes, and `clpm help repl` for the
-three-command REPL surface.
+Run `clpm skill` for agent recipes, and `clpm help repl` for the REPL
+surface.
 
 ## Project File Format
 
@@ -284,6 +285,7 @@ explicit resource operations.
 | `clpm run test` | Run project tests |
 | `clpm run script <name> [-- <args...>]` | Run a project script |
 | `clpm run scripts` | List project scripts |
+| `clpm repl` | Terminal: foreground project Lisp; non-terminal: ensure daemon |
 | `clpm repl daemon [--detach] [--no-load]` | Start a project REPL daemon |
 | `clpm repl daemon --status [--json]` | Inspect the project REPL daemon |
 | `clpm repl daemon --stop` | Stop the project REPL daemon |

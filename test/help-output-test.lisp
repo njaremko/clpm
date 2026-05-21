@@ -379,11 +379,14 @@
   (assert-true (not (search "--git-commit" stdout :test #'char-equal))
                "registry publish help still advertises git commits:~%~A" stdout))
 
-;; repl umbrella: lists the three public commands.
+;; repl umbrella: lists bare terminal/non-interactive default plus commands.
 (multiple-value-bind (code stdout stderr)
     (run-cli-captured '("help" "repl"))
   (declare (ignore stderr))
   (assert-eql 0 code)
+  (assert-contains stdout "clpm repl")
+  (assert-contains stdout "stdin/stdout")
+  (assert-contains stdout "detached project daemon")
   (assert-contains stdout "clpm repl daemon")
   (assert-contains stdout "[--status [--json]]")
   (assert-contains stdout "clpm repl eval <form>")

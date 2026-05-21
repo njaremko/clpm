@@ -31,7 +31,7 @@ Commands:
   run ...          Run entrypoints, tests, scripts, or commands
   store ...        Clean project outputs and garbage collect the store
   skill            Print an agent SKILL.md for using clpm
-  repl ...         Persistent Lisp image (for LLM-driven dev)
+  repl ...         Project Lisp REPL or persistent daemon
 
 Options:
   -v, --verbose    Verbose output
@@ -49,6 +49,7 @@ Examples:
   clpm project init myproject
   clpm deps add alexandria bordeaux-threads
   clpm deps sync
+  clpm repl
   clpm repl eval '(asdf:load-system \"myproject\")'
   clpm deps update alexandria
 " *version*))
@@ -322,6 +323,8 @@ Returns (values command command-args options)."
                   :test #'string=)
           nil)
          (t t))))
+    (:repl
+     (null (first command-args)))
     (t nil)))
 
 (defun optional-dependency-command-p (command command-args)
@@ -385,9 +388,10 @@ Returns (values command command-args options)."
                    '("exec" "test" "script" "scripts")
                    :test #'string=)))
       (:repl
-       (and (stringp subcommand)
-            (member subcommand '("daemon" "eval" "call")
-                    :test #'string=)))
+       (or (null subcommand)
+           (and (stringp subcommand)
+                (member subcommand '("daemon" "eval" "call")
+                        :test #'string=))))
       (:store
        (and (stringp subcommand)
             (string= subcommand "clean")))

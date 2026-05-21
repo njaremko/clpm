@@ -298,6 +298,7 @@ clpm [options] run scripts
 clpm [options] store clean [--dist] [--store]
 clpm [options] store gc [--dry-run]
 
+clpm [options] repl
 clpm [options] repl daemon [--detach] [--no-load] [--status [--json]] [--stop]
 clpm [options] repl eval FORM [--package P] [--worker W] [--no-autostart] [--json]
 clpm [options] repl eval FORM [--package P] [--worker W] [--no-autostart] --debug [debug-options]
@@ -305,6 +306,9 @@ clpm [options] repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
 
 Bare `clpm [options]` denotes `clpm [options] help`.
+Bare `clpm [options] repl` denotes a foreground project Lisp when stdin and
+stdout are terminals; otherwise it ensures a detached daemon for the selected
+project. This is a context observation, not a new resource carrier.
 `repl call METHOD` excludes the daemon's `eval` RPC; public evaluation is
 `repl eval FORM`.
 `--offline` is accepted only where artifact/cache state can affect the
@@ -352,7 +356,7 @@ operations: `deps sync`, `deps update`, `deps search`, `deps info`,
 | `run` | Primitive execution | `run` | Runs the configured project entrypoint. |
 | `exec` | Derived execution | `run exec` | Executes an arbitrary command in the project environment. |
 | `test` | Derived execution | `run test` | Executes configured test systems. |
-| `run repl` | Rejected duplicate protocol | `repl` | Ordinary REPL/debugging is the same semantic carrier as the persistent repl and is not public separately. |
+| `run repl` | Rejected duplicate protocol | `repl` | Project REPL/debugging belongs to the top-level `repl` carrier. |
 | `scripts` | Derived execution/listing | `run script`, `run scripts` | Scripts are named project executions. |
 | `package` | Artifact constructor | `project package` | Builds the artifact configured by project metadata. |
 | `clean` | Store/project cleanup | `store clean` | Removes generated project/store reachability. |
@@ -401,6 +405,7 @@ but output kind and machine-readable shape are semantic.
 | `run scripts` | Script names, one per line | Errors only | None | None | `test/scripts-command-test.lisp` |
 | `store clean` | Human deletion/untracking lines | Errors only | Removes `.clpm/`, `dist/`, optional store entries, and GC roots | None | `test/clean-command-test.lisp` |
 | `store gc` | Human deletion summary | Errors only | Deletes unreachable store entries unless `--dry-run` | Dry-run is human observation only | `test/gc-roots-test.lisp` |
+| `repl` | Terminal: child Lisp REPL stdio; non-terminal: daemon ensure status | Errors only | Terminal may activate project; non-terminal writes pid/socket/log lifecycle files | None | `test/repl-default-test.lisp` |
 | `repl daemon` | Foreground server blocks; detach returns status line | Launch errors only | Writes pid/socket/log lifecycle files | None | `test/repl-cli-test.lisp` |
 | `repl daemon --status` | Human status | Errors only | Cleans stale pid/socket files | `--json` status object | `test/repl-cli-test.lisp` |
 | `repl daemon --stop` | Human stop/not-running status | Errors only | Removes daemon lifecycle state | None | `test/repl-cli-test.lisp` |
@@ -462,16 +467,16 @@ but output kind and machine-readable shape are semantic.
 ### Iteration 3: Collapse REPL/Debug Protocol
 
 - Commands deleted:
-  - `run repl` and the ordinary REPL implementation entry point.
+  - `run repl` as an execution subcommand.
 - Commands merged:
-  - Ordinary REPL/debugging is merged into `repl`; users evaluate
-    forms with `eval`, manage lifecycle with `daemon`, and use controlled
-    protocol hooks through `call`.
+  - Ordinary project REPL/debugging is merged into top-level `repl`; humans
+    use bare `clpm repl`, tools use the daemon-backed `eval`/`call` forms,
+    and lifecycle stays under `daemon`.
 - Commands derived instead of exposed:
-  - "Start a project REPL" is no longer a public constructor. For interactive
-    state, use `repl daemon --detach`; for one form, use
-    `repl eval`; for debugger and image operations, use
-    `repl call METHOD`.
+  - Bare `repl` is a defaulting constructor:
+    `terminal(stdin, stdout) => project Lisp session`,
+    otherwise `ensure (repl daemon --detach)`.
+    It adds no second place for one-form eval or daemon RPC.
 - Commands that survived and why:
   - `run` survives only for bounded project execution: entrypoint, `exec`,
     `test`, `script`, and `scripts`.
@@ -2690,13 +2695,21 @@ Constructor responsibility audit:
 | old `resolve/fetch/build/install` | Pipeline prefixes | Yes | Yes, `deps sync --to ...` |
 | old `keys/publish` | Registry operations | Yes | Yes, `registry key/publish` |
 | old `exec/test/scripts` | Execution modes | Yes | Yes, `run ...` |
-| ordinary `repl` / `run repl` | Duplicate REPL/debug protocol | Yes | No, deleted in favor of `repl`. |
+| old `run repl` | Duplicate REPL/debug protocol | Yes | No, deleted in favor of top-level `repl`. |
 
 ## Denotation Laws
 
 ```haskell
 Law: "default is help"
   denote (parse []) ctx world = denote (help Root) ctx world
+
+Law: "bare repl terminal default"
+  terminal stdin ctx && terminal stdout ctx =>
+  denote (repl Default) ctx world = runProjectLisp ctx world
+
+Law: "bare repl non-terminal default"
+  not (terminal stdin ctx && terminal stdout ctx) =>
+  denote (repl Default) ctx world = ensureDetachedDaemon ctx world
 
 Law: "sync/lock"
   denote (deps (sync Lock)) ctx world =

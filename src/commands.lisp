@@ -1577,7 +1577,7 @@ lockfile; NIL persists no opt-ins."
                                      :lisp-kind kind
                                      :lisp-version lisp-version))
       (log-info "Project installed successfully")
-      (log-info "Run 'clpm repl eval FORM' or 'clpm repl daemon --detach' for live Lisp debugging")
+      (log-info "Run 'clpm repl' for a project Lisp or daemon-backed live debugging")
       ;; Manifest may request that the repl daemon come up automatically
       ;; on install. Skipped when a daemon for this project is already running,
       ;; or when stdout isn't a tty (we don't want this happening inside CI).
@@ -1833,6 +1833,15 @@ malformed."
                           :external-format :utf-8)
     (format s "~D~%" (sb-posix:getpid))))
 
+(defun %bridge-project-preload-systems (project)
+  "Return project systems that a project REPL should load initially."
+  (let* ((systems (and project (clpm.project:project-systems project)))
+         (repl (and project (clpm.project:project-repl project)))
+         (extra (and repl (getf repl :preload))))
+    (remove-if-not #'stringp
+                   (append (when (listp systems) systems)
+                           (when (listp extra) extra)))))
+
 (defun %bridge-load-project (project-root)
   "Activate the project and preload its declared systems.
 
@@ -1854,12 +1863,8 @@ workflows, not the runtime image."
     (when (uiop:file-exists-p manifest)
       (handler-case
           (let* ((proj (clpm.project:read-project-file manifest))
-                 (systems (and proj (clpm.project:project-systems proj)))
-                 (rb (and proj (clpm.project:project-repl proj)))
-                 (extra (getf rb :preload)))
-            (dolist (sys (remove-if-not #'stringp
-                                        (append systems
-                                                (when (listp extra) extra))))
+                 (systems (%bridge-project-preload-systems proj)))
+            (dolist (sys systems)
               (handler-case
                   (asdf:load-system sys :verbose nil)
                 (error (c)
@@ -1894,16 +1899,91 @@ workflows, not the runtime image."
   #-sbcl
   nil)
 
-(defun %bridge-clpm-executable ()
-  "Return the executable that can re-enter this CLPM image, or NIL."
-  (let ((argv0 (uiop:argv0)))
-    (or (and (%bridge-pathlike-p argv0)
-             (%bridge-existing-file argv0))
-        (%bridge-saved-sbcl-executable)
-        (and (stringp argv0)
-             (plusp (length argv0))
-             (not (%bridge-pathlike-p argv0))
-             (which argv0)))))
+(defstruct (bridge-launcher
+            (:constructor %make-bridge-launcher (kind argv reason)))
+  kind
+  argv
+  reason)
+
+(defun %bridge-lisp-executable-name-p (path)
+  (let ((name (and path (string-downcase (file-namestring path)))))
+    (member name '("sbcl" "sbcl.exe" "ccl" "ccl64" "ecl" "ecl.exe")
+            :test #'string=)))
+
+(defun %bridge-executable-launcher ()
+  "Return a launcher for a saved CLPM executable, or NIL.
+
+The ordinary source-loaded development process often has argv0 = `sbcl'.
+That is not a CLPM executable, so it must not be used for daemon detachment."
+  (let* ((argv0 (uiop:argv0))
+         (candidate
+           (or (and (%bridge-pathlike-p argv0)
+                    (%bridge-existing-file argv0))
+               (%bridge-saved-sbcl-executable)
+               (and (stringp argv0)
+                    (plusp (length argv0))
+                    (not (%bridge-pathlike-p argv0))
+                    (not (%bridge-lisp-executable-name-p argv0))
+                    (which argv0)))))
+    (when (and candidate
+               (not (%bridge-lisp-executable-name-p candidate)))
+      (%make-bridge-launcher :executable (list candidate) nil))))
+
+(defun %bridge-source-root ()
+  "Return the loaded CLPM source root as a directory pathname, or NIL."
+  (handler-case
+      (let ((system (asdf:find-system :clpm nil)))
+        (and system
+             (uiop:ensure-directory-pathname
+              (asdf:system-source-directory system))))
+    (error () nil)))
+
+(defun %bridge-source-launcher ()
+  "Return a launcher that re-enters CLPM by loading the source system."
+  (let ((sbcl (clpm.lisp:find-lisp :sbcl))
+        (source-root (%bridge-source-root)))
+    (cond
+      ((null sbcl)
+       (%make-bridge-launcher
+        :unavailable nil
+        "could not find sbcl to load the CLPM source system"))
+      ((null source-root)
+       (%make-bridge-launcher
+        :unavailable nil
+        "could not locate the loaded CLPM source system"))
+      (t
+       (%make-bridge-launcher
+        :source-system
+        (list sbcl
+              "--noinform"
+              "--non-interactive"
+              "--disable-debugger"
+              "--eval" "(require :asdf)"
+              "--eval" (format nil "(push #P~S asdf:*central-registry*)"
+                                (namestring source-root))
+              "--eval" "(asdf:load-system :clpm :verbose nil)")
+        nil)))))
+
+(defun %bridge-current-launcher ()
+  "Return the best launcher for a detached daemon child."
+  (or (%bridge-executable-launcher)
+      (%bridge-source-launcher)))
+
+(defun %bridge-main-eval-form (args)
+  (with-standard-io-syntax
+    (let ((*package* (find-package "CL-USER")))
+      (prin1-to-string `(clpm:main ',args)))))
+
+(defun %bridge-launch-argv (launcher args)
+  (ecase (bridge-launcher-kind launcher)
+    (:executable
+     (append (bridge-launcher-argv launcher) args))
+    (:source-system
+     (append (bridge-launcher-argv launcher)
+             (list "--eval" (%bridge-main-eval-form args))))))
+
+(defun %bridge-launcher-unavailable-p (launcher)
+  (eq (bridge-launcher-kind launcher) :unavailable))
 
 (defun %bridge-maybe-autostart (project-root)
   "If the manifest sets `:repl (:autostart t ...)`, ensure a daemon is
@@ -1932,15 +2012,16 @@ because the daemon couldn't come up."
                  (log-error "repl autostart: daemon pid ~D is not responsive"
                             existing)
                  (return-from %bridge-maybe-autostart))))))
-        (let ((clpm-bin (%bridge-clpm-executable)))
-          (unless clpm-bin
-            (log-error "repl autostart: could not find current clpm executable")
+        (let ((launcher (%bridge-current-launcher)))
+          (when (%bridge-launcher-unavailable-p launcher)
+            (log-error "repl autostart: ~A"
+                       (bridge-launcher-reason launcher))
             (return-from %bridge-maybe-autostart))
           (log-info "repl: starting daemon (autostart from manifest)")
           (handler-case
               (uiop:with-current-directory (project-root)
-                (uiop:launch-program (list clpm-bin "repl" "daemon"
-                                           "--detach")
+                (uiop:launch-program
+                 (%bridge-launch-argv launcher (list "repl" "daemon"))
                                      :output nil :error-output nil :input nil))
             (error (c)
               (log-error "repl autostart failed: ~A" c)))))
@@ -1994,12 +2075,15 @@ because the daemon couldn't come up."
                (return-from %bridge-daemon-start 1))))))
       (cond
         (detach
-         (let ((clpm-bin (%bridge-clpm-executable)))
-           (unless clpm-bin
-             (log-error "Could not find current clpm executable; --detach unavailable")
+         (let ((launcher (%bridge-current-launcher)))
+           (when (%bridge-launcher-unavailable-p launcher)
+             (log-error "Could not construct CLPM launcher; --detach unavailable: ~A"
+                        (bridge-launcher-reason launcher))
              (return-from %bridge-daemon-start 1))
-           (let ((argv (append (list clpm-bin "repl" "daemon")
-                               (when no-load (list "--no-load")))))
+           (let ((argv (%bridge-launch-argv
+                        launcher
+                        (append (list "repl" "daemon")
+                                (when no-load (list "--no-load"))))))
              (ensure-directories-exist log)
              (handler-case
                  (uiop:with-current-directory (project-root)
@@ -3157,16 +3241,115 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
 ;;; ----------------------------------------------------------------------------
 ;;; Dispatcher.
 
+(defparameter *bridge-repl-default-mode* :detect
+  "Default mode for bare `clpm repl'.
+
+One of:
+  :detect              choose from the current streams
+  :interactive-session run a foreground project Lisp
+  :daemon             ensure a detached project daemon")
+
+(defun %bridge-terminal-stream-p (stream)
+  (and (streamp stream)
+       (handler-case
+           (interactive-stream-p stream)
+         (error () nil))))
+
+(defun %bridge-detected-repl-default-mode ()
+  (ecase *bridge-repl-default-mode*
+    (:interactive-session :interactive-session)
+    (:daemon :daemon)
+    (:detect
+     (if (and (%bridge-terminal-stream-p *standard-input*)
+              (%bridge-terminal-stream-p *standard-output*))
+         :interactive-session
+         :daemon))))
+
+(defun %bridge-lisp-kind-name (kind)
+  (string-downcase (symbol-name kind)))
+
+(defun %bridge-interactive-repl (args)
+  "Run a foreground project Lisp for human terminal use."
+  (when args
+    (log-error "Usage: clpm repl")
+    (return-from %bridge-interactive-repl 1))
+  (multiple-value-bind (project-root manifest-path _lock-path workspace-root
+                        _workspace-path)
+      (find-effective-project-root)
+    (declare (ignore _lock-path _workspace-path))
+    (unless manifest-path
+      (when (null workspace-root)
+        (log-no-project-found))
+      (return-from %bridge-interactive-repl 1))
+    (let* ((project (clpm.project:read-project-file manifest-path))
+           (kind (effective-lisp-kind project)))
+      (multiple-value-bind (config-path rc)
+          (ensure-project-activated project-root)
+        (unless (zerop rc)
+          (return-from %bridge-interactive-repl rc))
+        (let* ((systems (%bridge-project-preload-systems project))
+               (argv (clpm.lisp:lisp-run-argv
+                      kind
+                      :load-files (list (namestring config-path))
+                      :eval-forms (lisp-load-systems-eval-forms systems)
+                      :noinform nil
+                      :noninteractive nil
+                      :disable-debugger nil)))
+          (log-info "Starting ~A project REPL in ~A"
+                    (%bridge-lisp-kind-name kind)
+                    (namestring project-root))
+          (multiple-value-bind (output error-output exit-code)
+              (clpm.platform:run-program argv
+                                         :directory project-root
+                                         :input :interactive
+                                         :output :interactive
+                                         :error-output :interactive)
+            (declare (ignore output error-output))
+            exit-code))))))
+
+(defun %bridge-ensure-detached-daemon (args)
+  "Ensure the selected project has a detached daemon for non-interactive use."
+  (when args
+    (log-error "Usage: clpm repl")
+    (return-from %bridge-ensure-detached-daemon 1))
+  (when *lisp*
+    (log-error "--lisp only applies to the interactive terminal form of `clpm repl`")
+    (return-from %bridge-ensure-detached-daemon 1))
+  (multiple-value-bind (project-root sock pid)
+      (%bridge-resolve-project)
+    (unless project-root
+      (return-from %bridge-ensure-detached-daemon 1))
+    (%bridge-clean-stale sock pid)
+    (let ((existing (%bridge-read-pidfile pid)))
+      (when (and existing (%bridge-pid-alive-p existing))
+        (multiple-value-bind (state _ping _obj)
+            (%bridge-ping-daemon sock project-root)
+          (declare (ignore _ping _obj))
+          (cond
+            ((eq state :running)
+             (format t "running (pid ~D)~%" existing)
+             (return-from %bridge-ensure-detached-daemon 0))
+            ((eq state :project-mismatch)
+             (%bridge-clean-lifecycle-files sock pid))
+            (t
+             (log-error "Daemon pid ~D is running but not responsive"
+                        existing)
+             (return-from %bridge-ensure-detached-daemon 1))))))
+    (%bridge-daemon-start (list "--detach"))))
+
 (defun %bridge-help (args)
   "Print the small public repl CLI surface."
   (when args
     (log-error "Usage: clpm repl [daemon|eval|call] ...")
     (return-from %bridge-help 1))
   (format t "Usage:~%")
+  (format t "  clpm repl~%")
   (format t "  clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]~%")
   (format t "  clpm repl eval FORM [--package P] [--worker W] [--no-autostart] [--json]~%")
   (format t "  clpm repl eval FORM [--package P] [--worker W] [--no-autostart] --debug [debug-options]~%")
   (format t "  clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...~%~%")
+  (format t "Bare `clpm repl` starts a human project Lisp on a terminal,~%")
+  (format t "or ensures a detached daemon when stdin/stdout are not terminals.~%")
   (format t "Use `clpm repl call methods` to list callable daemon RPCs.~%")
   (format t "Use `clpm repl call help --method gc` for a callable method schema.~%")
   (format t "Use `clpm help repl` for CLI details.~%")
@@ -3178,7 +3361,11 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
 See `clpm help repl' for the full surface."
   (let ((sub (pop args)))
     (cond
-      ((or (null sub) (string= sub "--help") (string= sub "-h"))
+      ((null sub)
+       (ecase (%bridge-detected-repl-default-mode)
+         (:interactive-session (%bridge-interactive-repl args))
+         (:daemon (%bridge-ensure-detached-daemon args))))
+      ((or (string= sub "--help") (string= sub "-h"))
        (%bridge-help args))
       ((string= sub "daemon") (%bridge-daemon args))
       ((string= sub "eval") (%bridge-eval args))
@@ -5906,13 +6093,14 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     ""
     "## REPL"
     ""
-    "`clpm repl` gives agents a persistent project-scoped Lisp image. Strongly prefer it for iterative Common Lisp development and debugging because definitions, packages, workers, restarts, frame locals, and debugger sessions can persist across calls."
+    "`clpm repl` chooses the useful default for the caller: on a terminal it starts a foreground project Lisp, and in non-interactive tool use it ensures a detached persistent daemon. Strongly prefer the daemon-backed `eval`/`call` forms for iterative Common Lisp development and debugging because definitions, packages, workers, restarts, frame locals, and debugger sessions can persist across calls."
     ""
-    "Use `clpm repl` before starting a fresh `sbcl` or ad hoc script when you need to understand a live condition, inspect a value, redefine one function, time a form, trace calls, or confirm image state. Fresh processes are still right for clean end-to-end tests, packaging, and dependency graph changes."
+    "For humans, bare `clpm repl` is the shortest path to a project Lisp. For agents, run `clpm repl` once to ensure the daemon, then use `clpm repl eval` and `clpm repl call` for discrete tool calls. Fresh processes are still right for clean end-to-end tests, packaging, and dependency graph changes."
     ""
-    "The public bridge CLI is deliberately small:"
+    "The public REPL CLI is deliberately small:"
     ""
     "```sh"
+    "clpm repl"
     "clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]"
     "clpm repl eval FORM [--package P] [--worker W] [--no-autostart] [--json]"
     "clpm repl eval FORM [--package P] [--worker W] [--no-autostart] --debug [debug-options]"
@@ -5924,7 +6112,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "Lifecycle and discovery:"
     ""
     "```sh"
-    "clpm repl daemon --detach"
+    "clpm repl"
     "clpm repl daemon --status"
     "clpm repl call ping"
     "clpm repl call methods"
@@ -6384,18 +6572,21 @@ sub-subcommand=\"set\")."
             (p "")
             (p "Use `clpm repl eval FORM` for evaluation; call is not an eval alias.")
             (p "Use --params-json for arrays, objects, or explicit null.")
-            0)
+           0)
            (t
             (p "Usage:")
+            (p "  clpm repl")
             (p "  clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]")
             (p "  clpm repl eval <form> [--package <pkg>] [--worker <name>] [--no-autostart] [--json]")
             (p "  clpm repl eval <form> [--package <pkg>] [--worker <name>] [--no-autostart] --debug [debug-options]")
             (p "  clpm repl call <method> [--params-json <json>] [--PARAM <value>]...")
             (p "")
-            (p "Drive a persistent project-scoped Lisp daemon. `call methods`")
-            (p "lists the public callable RPC registry, and `call help --method NAME` returns")
-            (p "the exact parameter schema for a method. `call` requires an")
-            (p "existing daemon; use `daemon --detach` or `eval` to start one.")
+            (p "Bare `clpm repl` starts a foreground project Lisp when stdin/stdout")
+            (p "are terminals; otherwise it ensures a detached project daemon.")
+            (p "`call methods` lists the public callable RPC registry, and")
+            (p "`call help --method NAME` returns the exact parameter schema")
+            (p "for a method. `call` requires an existing daemon; use bare")
+            (p "`clpm repl`, `daemon --detach`, or `eval` to start one.")
             (p "")
             (p "Run `clpm help repl <subcommand>` for per-subcommand details.")
             (p "")
