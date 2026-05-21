@@ -100,16 +100,24 @@
                             "bare repl did not create daemon socket: ~A"
                             socket))
              (multiple-value-bind (rc stdout stderr)
-                 (run-cli-captured '("repl"))
+                 (run-cli-captured '("repl" "--non-interactive"))
                (unless (zerop rc)
-                 (fail "expected bare repl to be idempotent, rc ~D~%stdout:~%~A~%stderr:~%~A"
+                 (fail "expected forced non-interactive repl to be idempotent, rc ~D~%stdout:~%~A~%stderr:~%~A"
                        rc stdout stderr))
                (assert-true (probe-file socket)
-                            "daemon socket disappeared after idempotent repl: ~A"
+                            "daemon socket disappeared after forced non-interactive repl: ~A"
                             socket))
              (format t "  bare non-interactive repl OK~%"))
         (ignore-errors
           (run-cli-captured '("repl" "daemon" "--stop")))))))
+
+(format t "Test: repl mode flags reject conflict~%")
+(multiple-value-bind (rc stdout stderr)
+    (run-cli-captured '("repl" "--interactive" "--non-interactive"))
+  (declare (ignore stdout))
+  (assert-eql 1 rc)
+  (assert-contains stderr "Use only one of --interactive or --non-interactive"))
+(format t "  repl mode conflict OK~%")
 
 (with-short-temp-dir (tmp)
   (let* ((project-root (merge-pathnames "eval-autostart/" tmp))
@@ -138,9 +146,7 @@
          (fake-sbcl (merge-pathnames "sbcl" bin-dir))
          (argv-file (merge-pathnames "repl-argv.txt" project-root))
          (pwd-file (merge-pathnames "repl-pwd.txt" project-root))
-         (old-path (sb-posix:getenv "PATH"))
-         (mode-symbol (find-symbol "*BRIDGE-REPL-DEFAULT-MODE*"
-                                   "CLPM.COMMANDS")))
+         (old-path (sb-posix:getenv "PATH")))
     (write-minimal-project project-root)
     (write-executable-file
      fake-sbcl
@@ -149,8 +155,6 @@ printf '%s\n' \"$@\" > repl-argv.txt
 pwd > repl-pwd.txt
 exit 0
 ")
-    (unless mode-symbol
-      (fail "could not find repl default mode test hook"))
     (unwind-protect
          (progn
            (sb-posix:setenv "PATH"
@@ -160,10 +164,9 @@ exit 0
                                          (or old-path ""))
                             1)
            (uiop:with-current-directory (project-root)
-             (format t "Test: bare interactive repl starts foreground Lisp~%")
+             (format t "Test: forced interactive repl starts foreground Lisp~%")
              (multiple-value-bind (rc stdout stderr)
-                 (progv (list mode-symbol) (list :interactive-session)
-                   (run-cli-captured '("repl")))
+                 (run-cli-captured '("repl" "--interactive"))
                (declare (ignore stderr))
                (assert-eql 0 rc)
                (assert-contains stdout "Starting sbcl project REPL")
@@ -181,7 +184,7 @@ exit 0
                               "expected repl cwd ~S, got ~S"
                               (namestring (truename project-root))
                               (namestring (truename pwd)))))
-             (format t "  bare interactive repl OK~%")))
+             (format t "  forced interactive repl OK~%")))
       (if old-path
           (sb-posix:setenv "PATH" old-path 1)
           (sb-posix:unsetenv "PATH")))))

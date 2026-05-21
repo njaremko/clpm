@@ -298,7 +298,7 @@ clpm [options] run scripts
 clpm [options] store clean [--dist] [--store]
 clpm [options] store gc [--dry-run]
 
-clpm [options] repl
+clpm [options] repl [--interactive|--non-interactive]
 clpm [options] repl daemon [--detach] [--no-load] [--status [--json]] [--stop]
 clpm [options] repl eval FORM [--package P] [--worker W] [--no-autostart] [--json]
 clpm [options] repl eval FORM [--package P] [--worker W] [--no-autostart] --debug [debug-options]
@@ -308,16 +308,17 @@ clpm [options] repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 Bare `clpm [options]` denotes `clpm [options] help`.
 Bare `clpm [options] repl` denotes a foreground project Lisp when stdin and
 stdout are terminals; otherwise it ensures a detached daemon for the selected
-project. This is a context observation, not a new resource carrier.
+project. `--interactive` and `--non-interactive` choose those two meanings
+explicitly. This is a context observation, not a new resource carrier.
 `repl call METHOD` excludes the daemon's `eval` RPC; public evaluation is
 `repl eval FORM`.
 `--offline` is accepted only where artifact/cache state can affect the
 operation: `deps sync` beyond the lock stage and `deps sbom`.
 `--jobs` is accepted only where dependency realization can perform parallel
 source fetch or build work: `deps sync` beyond the lock stage.
-`--lisp` is accepted only where CLPM chooses a Lisp implementation: build or
-active dependency realization, project packaging, and `run` operations that
-execute Lisp entrypoints/tests/scripts.
+`--lisp` is accepted only where CLPM chooses a Lisp implementation:
+build/active dependency realization, project packaging, `run` operations that
+execute Lisp entrypoints/tests/scripts, and the interactive `repl` form.
 `-p/--package` is accepted only where CLPM resolves project state from a
 workspace root: project packaging, dependency operations, registry publish,
 run, repl, and project-local store clean.
@@ -405,7 +406,7 @@ but output kind and machine-readable shape are semantic.
 | `run scripts` | Script names, one per line | Errors only | None | None | `test/scripts-command-test.lisp` |
 | `store clean` | Human deletion/untracking lines | Errors only | Removes `.clpm/`, `dist/`, optional store entries, and GC roots | None | `test/clean-command-test.lisp` |
 | `store gc` | Human deletion summary | Errors only | Deletes unreachable store entries unless `--dry-run` | Dry-run is human observation only | `test/gc-roots-test.lisp` |
-| `repl` | Terminal: child Lisp REPL stdio; non-terminal: daemon ensure status | Errors only | Terminal may activate project; non-terminal writes pid/socket/log lifecycle files | None | `test/repl-default-test.lisp` |
+| `repl [--interactive|--non-interactive]` | Terminal/default or forced interactive: child Lisp REPL stdio; non-terminal/default or forced non-interactive: daemon ensure status | Errors only | Interactive may activate project; non-interactive writes pid/socket/log lifecycle files | None | `test/repl-default-test.lisp` |
 | `repl daemon` | Foreground server blocks; detach returns status line | Launch errors only | Writes pid/socket/log lifecycle files | None | `test/repl-cli-test.lisp` |
 | `repl daemon --status` | Human status | Errors only | Cleans stale pid/socket files | `--json` status object | `test/repl-cli-test.lisp` |
 | `repl daemon --stop` | Human stop/not-running status | Errors only | Removes daemon lifecycle state | None | `test/repl-cli-test.lisp` |
@@ -2711,6 +2712,12 @@ Law: "bare repl non-terminal default"
   not (terminal stdin ctx && terminal stdout ctx) =>
   denote (repl Default) ctx world = ensureDetachedDaemon ctx world
 
+Law: "bare repl explicit interactive"
+  denote (repl Interactive) ctx world = runProjectLisp ctx world
+
+Law: "bare repl explicit non-interactive"
+  denote (repl NonInteractive) ctx world = ensureDetachedDaemon ctx world
+
 Law: "sync/lock"
   denote (deps (sync Lock)) ctx world =
     resolve ctx world
@@ -2836,7 +2843,10 @@ Law: "jobs are realization-scoped"
 
 Law: "lisp selection is process-constructor-scoped"
   parse ["--lisp", impl, "help"] = Error
-  parse ["--lisp", impl, "repl"] = Error
+  parse ["--lisp", impl, "repl", "--interactive"] =
+    Right (repl Interactive with LispImplementation impl)
+  denote (parse ["--lisp", impl, "repl", "--non-interactive"]) ctx world =
+    FailedUsage
   parse ["--lisp", impl, "deps", "sync", "--to", "source"] = Error
   parse ["--lisp", impl, "project", "package"] =
     Right (project package with LispImplementation impl)
@@ -3230,7 +3240,7 @@ Failed-counterexample regressions:
 - `clpm --jobs 4 help`, `clpm -j 4 repl`, and
   `clpm --jobs 2 deps sync --to lock` are rejected; `--jobs` is only for
   parallel dependency realization.
-- `clpm --lisp sbcl help`, `clpm --lisp sbcl repl`, and
+- `clpm --lisp sbcl help`, `clpm --lisp sbcl repl --non-interactive`, and
   `clpm --lisp sbcl deps sync --to source` are rejected; `--lisp` is only for
   CLPM-owned Lisp process construction.
 - `clpm --package app help`, `clpm --package app doctor`, and

@@ -136,10 +136,15 @@ Error codes (string, stable):
 ## Subcommand surface
 
 ```
+clpm repl [--interactive|--non-interactive]
 clpm repl daemon [--detach] [--no-load] [--status] [--stop]
 clpm repl eval FORM [--package PKG] [--worker NAME] [--debug] ...
 clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
+
+Bare `clpm repl` chooses from stdin/stdout: foreground project Lisp on a
+terminal, detached daemon ensure otherwise. `--interactive` and
+`--non-interactive` override that detection.
 
 `daemon` owns lifecycle. Bare `daemon` runs the server in the foreground;
 `daemon --detach` starts it in the background, `daemon --status` inspects it,
@@ -261,6 +266,7 @@ A small client (`src/repl/client.lisp`) that connects to a socket path, sends on
 A new `cmd-repl` in `src/commands.lisp`, dispatching on the first arg:
 
 ```
+clpm repl [--interactive|--non-interactive]
 clpm repl daemon [--detach] [--no-load] [--status] [--stop]
 clpm repl eval FORM [--package PKG] [--worker NAME] [--debug] ...
 clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...
@@ -272,6 +278,8 @@ Help text (`print-command-help :repl`) with per-subcommand drilling per #017 of 
 
 - `clpm repl` with no args starts a human project Lisp on a terminal and
   ensures a detached daemon in non-interactive use.
+- `clpm repl --interactive` and `clpm repl --non-interactive` force the two
+  default meanings without consulting stdin/stdout.
 - `clpm help repl <subcommand>` prints the focused page.
 - Unknown subcommand prints "Unknown subcommand: X" and exits 1.
 - New test `test/repl-help-test.lisp` matches the existing per-subcommand help test pattern.

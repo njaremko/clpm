@@ -385,6 +385,8 @@
   (declare (ignore stderr))
   (assert-eql 0 code)
   (assert-contains stdout "clpm repl")
+  (assert-contains stdout "--interactive")
+  (assert-contains stdout "--non-interactive")
   (assert-contains stdout "stdin/stdout")
   (assert-contains stdout "detached project daemon")
   (assert-contains stdout "clpm repl daemon")
@@ -393,6 +395,7 @@
   (assert-contains stdout "[--json]")
   (assert-contains stdout "clpm repl call")
   (assert-contains stdout "public callable RPC")
+  (assert-contains stdout "--lisp")
   (assert-not-contains stdout "lists the RPC registry"
                        "repl help still suggests full internal RPC discovery:~%~A"
                        stdout))
@@ -439,6 +442,7 @@
   (declare (ignore stderr))
   (assert-eql 0 code)
   (assert-contains stdout "clpm repl eval <form>")
+  (assert-contains stdout "--interactive")
   (assert-contains stdout "[--json]")
   (assert-contains stdout "--debug [debug-options]"))
 

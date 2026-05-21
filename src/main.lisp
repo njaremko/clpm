@@ -289,6 +289,15 @@ Returns (values command command-args options)."
       ((member stage '("lock" "source") :test #'string=) nil)
       (t t))))
 
+(defun repl-default-mode-option-p (arg)
+  (and (stringp arg)
+       (member arg '("--interactive" "--non-interactive") :test #'string=)))
+
+(defun repl-default-command-start-p (args)
+  "Return true when ARGS begin as bare `clpm repl' mode selection."
+  (or (null args)
+      (repl-default-mode-option-p (first args))))
+
 (defun artifact-cache-command-p (command command-args)
   "Return true when COMMAND may consult artifact cache/offline realization."
   (case command
@@ -324,7 +333,7 @@ Returns (values command command-args options)."
           nil)
          (t t))))
     (:repl
-     (null (first command-args)))
+     (repl-default-command-start-p command-args))
     (t nil)))
 
 (defun optional-dependency-command-p (command command-args)
@@ -388,7 +397,7 @@ Returns (values command command-args options)."
                    '("exec" "test" "script" "scripts")
                    :test #'string=)))
       (:repl
-       (or (null subcommand)
+       (or (repl-default-command-start-p command-args)
            (and (stringp subcommand)
                 (member subcommand '("daemon" "eval" "call")
                         :test #'string=))))
@@ -427,7 +436,7 @@ Returns (values command command-args options)."
              (not (lisp-selection-command-p command command-args)))
     (clpm.errors:signal-error
      'clpm.errors:clpm-user-error
-     "--lisp only applies where CLPM selects a Lisp implementation: clpm deps sync --to build|active, clpm deps sync, clpm project package, or clpm run ..."))
+     "--lisp only applies where CLPM selects a Lisp implementation: clpm deps sync --to build|active, clpm deps sync, clpm project package, clpm run ..., or clpm repl --interactive"))
   (when (and (option-present-p :with-optional options)
              (not (optional-dependency-command-p command command-args)))
     (clpm.errors:signal-error

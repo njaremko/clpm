@@ -106,11 +106,15 @@ bare `clpm repl` starts a foreground project Lisp for a human. In
 non-interactive use, bare `clpm repl` ensures the persistent project-scoped
 SBCL daemon is running, so an LLM (or any non-Lisp tool) can drive a
 long-lived image — redefining one `defun` instead of reloading systems,
-capturing stdout/stderr per call, surfacing in-image drift from disk.
+capturing stdout/stderr per call, surfacing in-image drift from disk. Use
+`clpm repl --interactive` or `clpm repl --non-interactive` when a script,
+editor, or test harness needs to override stdin/stdout detection.
 
 ```bash
 clpm deps sync                                       # one-time setup
 clpm repl                                           # terminal: Lisp, non-terminal: daemon
+clpm repl --interactive                             # force foreground Lisp
+clpm repl --non-interactive                         # force daemon ensure
 clpm repl daemon --status --json                    # machine-readable status
 clpm repl eval '(asdf:load-system "my-app")'
 clpm repl eval '(my-app:hello)'
@@ -285,7 +289,7 @@ explicit resource operations.
 | `clpm run test` | Run project tests |
 | `clpm run script <name> [-- <args...>]` | Run a project script |
 | `clpm run scripts` | List project scripts |
-| `clpm repl` | Terminal: foreground project Lisp; non-terminal: ensure daemon |
+| `clpm repl [--interactive\|--non-interactive]` | Terminal: foreground project Lisp; non-terminal: ensure daemon; flags override detection |
 | `clpm repl daemon [--detach] [--no-load]` | Start a project REPL daemon |
 | `clpm repl daemon --status [--json]` | Inspect the project REPL daemon |
 | `clpm repl daemon --stop` | Stop the project REPL daemon |

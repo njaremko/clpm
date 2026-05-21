@@ -10,6 +10,8 @@ Lisp system. On a terminal it starts a foreground project Lisp for a human; in
 non-interactive tool use it ensures a persistent project-scoped SBCL daemon
 with loaded systems, package state, workers, debugger sessions, inspector
 sessions, watches, traces, and a self-describing RPC registry.
+Use `--interactive` or `--non-interactive` when stdin/stdout detection is not
+the behavior you want.
 
 Prefer it over fresh `sbcl` or one-off scripts for bug investigation, local
 redefinition, source navigation, frame inspection, timing, tracing, and
@@ -21,7 +23,7 @@ end-to-end tests, dependency graph changes, packaging, and CI gates.
 The CLI has one default plus three explicit semantic commands:
 
 ```sh
-clpm repl
+clpm repl [--interactive|--non-interactive]
 clpm repl daemon [--detach] [--no-load] [--status] [--stop]
 clpm repl eval FORM [--package P] [--worker W] [--debug] ...
 clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...
@@ -29,6 +31,8 @@ clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 
 - bare `clpm repl` starts a foreground project Lisp when stdin/stdout are
   terminals; otherwise it ensures a detached daemon and returns.
+- `--interactive` forces the foreground project Lisp; `--non-interactive`
+  forces the detached daemon ensure.
 - `daemon` owns lifecycle. Use `--detach` to start in the background,
   `--status` to check and clean stale pid/socket files, and `--stop` for
   normal shutdown.

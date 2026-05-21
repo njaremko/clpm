@@ -3241,14 +3241,6 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
 ;;; ----------------------------------------------------------------------------
 ;;; Dispatcher.
 
-(defparameter *bridge-repl-default-mode* :detect
-  "Default mode for bare `clpm repl'.
-
-One of:
-  :detect              choose from the current streams
-  :interactive-session run a foreground project Lisp
-  :daemon             ensure a detached project daemon")
-
 (defun %bridge-terminal-stream-p (stream)
   (and (streamp stream)
        (handler-case
@@ -3256,14 +3248,48 @@ One of:
          (error () nil))))
 
 (defun %bridge-detected-repl-default-mode ()
-  (ecase *bridge-repl-default-mode*
-    (:interactive-session :interactive-session)
-    (:daemon :daemon)
-    (:detect
-     (if (and (%bridge-terminal-stream-p *standard-input*)
-              (%bridge-terminal-stream-p *standard-output*))
-         :interactive-session
-         :daemon))))
+  (if (and (%bridge-terminal-stream-p *standard-input*)
+           (%bridge-terminal-stream-p *standard-output*))
+      :interactive-session
+      :daemon))
+
+(defun %bridge-default-mode-option-p (arg)
+  (and (stringp arg)
+       (member arg '("--interactive" "--non-interactive") :test #'string=)))
+
+(defun %bridge-parse-default-repl-mode (args)
+  "Return the explicit or detected mode for bare `clpm repl' ARGS."
+  (let ((mode :detect))
+    (dolist (arg args)
+      (cond
+        ((string= arg "--interactive")
+         (cond
+           ((eq mode :detect)
+            (setf mode :interactive-session))
+           ((eq mode :interactive-session)
+            (log-error "Duplicate option: --interactive")
+            (return-from %bridge-parse-default-repl-mode (values nil 1)))
+           (t
+            (log-error "Use only one of --interactive or --non-interactive")
+            (return-from %bridge-parse-default-repl-mode (values nil 1)))))
+        ((string= arg "--non-interactive")
+         (cond
+           ((eq mode :detect)
+            (setf mode :daemon))
+           ((eq mode :daemon)
+            (log-error "Duplicate option: --non-interactive")
+            (return-from %bridge-parse-default-repl-mode (values nil 1)))
+           (t
+            (log-error "Use only one of --interactive or --non-interactive")
+            (return-from %bridge-parse-default-repl-mode (values nil 1)))))
+        (t
+         (log-error "Unknown repl option: ~A" arg)
+         (log-error "Usage: clpm repl [--interactive|--non-interactive]")
+         (return-from %bridge-parse-default-repl-mode (values nil 1)))))
+    (values (if (eq mode :detect)
+                (%bridge-detected-repl-default-mode)
+                mode)
+            0)))
 
 (defun %bridge-lisp-kind-name (kind)
   (string-downcase (symbol-name kind)))
@@ -3271,7 +3297,7 @@ One of:
 (defun %bridge-interactive-repl (args)
   "Run a foreground project Lisp for human terminal use."
   (when args
-    (log-error "Usage: clpm repl")
+    (log-error "Usage: clpm repl [--interactive]")
     (return-from %bridge-interactive-repl 1))
   (multiple-value-bind (project-root manifest-path _lock-path workspace-root
                         _workspace-path)
@@ -3310,7 +3336,7 @@ One of:
 (defun %bridge-ensure-detached-daemon (args)
   "Ensure the selected project has a detached daemon for non-interactive use."
   (when args
-    (log-error "Usage: clpm repl")
+    (log-error "Usage: clpm repl [--non-interactive]")
     (return-from %bridge-ensure-detached-daemon 1))
   (when *lisp*
     (log-error "--lisp only applies to the interactive terminal form of `clpm repl`")
@@ -3343,13 +3369,14 @@ One of:
     (log-error "Usage: clpm repl [daemon|eval|call] ...")
     (return-from %bridge-help 1))
   (format t "Usage:~%")
-  (format t "  clpm repl~%")
+  (format t "  clpm repl [--interactive|--non-interactive]~%")
   (format t "  clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]~%")
   (format t "  clpm repl eval FORM [--package P] [--worker W] [--no-autostart] [--json]~%")
   (format t "  clpm repl eval FORM [--package P] [--worker W] [--no-autostart] --debug [debug-options]~%")
   (format t "  clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...~%~%")
   (format t "Bare `clpm repl` starts a human project Lisp on a terminal,~%")
   (format t "or ensures a detached daemon when stdin/stdout are not terminals.~%")
+  (format t "Use --interactive or --non-interactive to override detection.~%")
   (format t "Use `clpm repl call methods` to list callable daemon RPCs.~%")
   (format t "Use `clpm repl call help --method gc` for a callable method schema.~%")
   (format t "Use `clpm help repl` for CLI details.~%")
@@ -3359,17 +3386,25 @@ One of:
   "Dispatcher for `clpm repl <subcommand>'.
 
 See `clpm help repl' for the full surface."
-  (let ((sub (pop args)))
+  (let ((sub (first args)))
     (cond
-      ((null sub)
-       (ecase (%bridge-detected-repl-default-mode)
-         (:interactive-session (%bridge-interactive-repl args))
-         (:daemon (%bridge-ensure-detached-daemon args))))
+      ((or (null sub) (%bridge-default-mode-option-p sub))
+       (multiple-value-bind (mode rc)
+           (%bridge-parse-default-repl-mode args)
+         (if (not (zerop rc))
+             rc
+             (ecase mode
+               (:interactive-session (%bridge-interactive-repl nil))
+               (:daemon (%bridge-ensure-detached-daemon nil))))))
       ((or (string= sub "--help") (string= sub "-h"))
-       (%bridge-help args))
-      ((string= sub "daemon") (%bridge-daemon args))
-      ((string= sub "eval") (%bridge-eval args))
-      ((string= sub "call") (%bridge-call args))
+       (%bridge-help (rest args)))
+      ((string= sub "daemon") (%bridge-daemon (rest args)))
+      ((string= sub "eval") (%bridge-eval (rest args)))
+      ((string= sub "call") (%bridge-call (rest args)))
+      ((and (plusp (length sub)) (char= (char sub 0) #\-))
+       (log-error "Unknown repl option: ~A" sub)
+       (log-error "Usage: clpm repl [--interactive|--non-interactive]")
+       1)
       (t
        (log-error "Unknown subcommand: ~A (expected daemon, eval, or call)" sub)
        1))))
@@ -6575,7 +6610,7 @@ sub-subcommand=\"set\")."
            0)
            (t
             (p "Usage:")
-            (p "  clpm repl")
+            (p "  clpm repl [--interactive|--non-interactive]")
             (p "  clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]")
             (p "  clpm repl eval <form> [--package <pkg>] [--worker <name>] [--no-autostart] [--json]")
             (p "  clpm repl eval <form> [--package <pkg>] [--worker <name>] [--no-autostart] --debug [debug-options]")
@@ -6583,6 +6618,7 @@ sub-subcommand=\"set\")."
             (p "")
             (p "Bare `clpm repl` starts a foreground project Lisp when stdin/stdout")
             (p "are terminals; otherwise it ensures a detached project daemon.")
+            (p "Use --interactive or --non-interactive to override that detection.")
             (p "`call methods` lists the public callable RPC registry, and")
             (p "`call help --method NAME` returns the exact parameter schema")
             (p "for a method. `call` requires an existing daemon; use bare")
@@ -6592,6 +6628,7 @@ sub-subcommand=\"set\")."
             (p "")
             (p "Scoped options:")
             (p "  -p, --package <member>  Workspace member target from a workspace root.")
+            (p "  --lisp <impl>           Lisp implementation for the interactive form.")
             0))))
       (:run
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
