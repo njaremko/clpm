@@ -61,6 +61,18 @@
                  option
                  stderr)))
 
+(defun assert-missing-value (args option)
+  (multiple-value-bind (code stdout stderr)
+      (run-cli-captured args)
+    (declare (ignore stdout))
+    (assert-eql 1 code)
+    (assert-true (search (format nil "Missing value for ~A" option)
+                         stderr
+                         :test #'char-equal)
+                 "Expected missing value for ~A, got:~%~A"
+                 option
+                 stderr)))
+
 (defun tar-list (tarball)
   (let ((tar (clpm.platform:find-tar)))
     (unless tar
@@ -176,6 +188,14 @@
                   "--tarball-out" (namestring tarballs-dir)
                   "--tarball-out" (namestring (merge-pathnames "other-tarballs/" tmp)))
             "--tarball-out")
+           (dolist (case '((("registry" "publish" "--registry") "--registry")
+                           (("registry" "publish" "--key-id") "--key-id")
+                           (("registry" "publish" "--keys-dir") "--keys-dir")
+                           (("registry" "publish" "--project") "--project")
+                           (("registry" "publish" "--tarball-url") "--tarball-url")
+                           (("registry" "publish" "--tarball-out") "--tarball-out")))
+             (destructuring-bind (args option) case
+               (assert-missing-value args option)))
            (assert-true
             (not (uiop:file-exists-p
                   (merge-pathnames "registry/packages/mylib/0.1.0/release.sxp" reg-root)))

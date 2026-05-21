@@ -55,6 +55,13 @@
     (assert-eql 1 code)
     (assert-contains stderr (format nil "Duplicate option: ~A" option))))
 
+(defun assert-missing-value (args option)
+  (multiple-value-bind (code stdout stderr)
+      (run-cli-captured args)
+    (declare (ignore stdout))
+    (assert-eql 1 code)
+    (assert-contains stderr (format nil "Missing value for ~A" option))))
+
 (defun write-text (path text)
   (ensure-directories-exist path)
   (with-open-file (s path :direction :output
@@ -112,6 +119,11 @@
                   "--keys-dir" (namestring keys-dir)
                   "--keys-dir" (namestring (merge-pathnames "other-keys/" tmp)))
             "--keys-dir")
+           (dolist (case '((("registry" "init" "--dir") "--dir")
+                           (("registry" "init" "--key-id") "--key-id")
+                           (("registry" "init" "--keys-dir") "--keys-dir")))
+             (destructuring-bind (args option) case
+               (assert-missing-value args option)))
 
            (assert-eql
             0

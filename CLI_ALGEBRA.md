@@ -2504,6 +2504,35 @@ but output kind and machine-readable shape are semantic.
     booleans and strings. The public syntax is now closed; an internal parser
     value can be introduced later without changing the CLI algebra.
 
+### Iteration 80: Registry Operator Flags Are Strict Value Constructors
+
+- Commands deleted:
+  - Missing-value registry operator forms such as
+    `registry init --dir`, `registry key list --keys-dir`,
+    `registry key import --id`, and `registry publish --tarball-out`.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Optional value flags no longer fall back to defaults when the user writes
+    the flag without a value. Absence and malformed presence are different
+    observations.
+- Commands that survived and why:
+  - `registry init`, `registry key generate/list/import/verify`, and
+    `registry publish` survive because they construct or observe registry
+    operator artifacts. Their value flags are now proper unary constructors:
+    each consumes exactly one following argv value.
+- Laws/protocol invariants added:
+  - For every registry operator value flag, `parse [..., flag] =
+    FailedMissingValue flag`.
+  - A failed missing-value parse does not read key files, inspect registry
+    directories, write release metadata, or create tarballs.
+  - Duplicate-value rejection and missing-value rejection happen before any
+    filesystem side effect.
+- Remaining discomfort:
+  - The parsers still implement the same law locally in several command
+    leaves. A future parser combinator could encode "required value flag" once
+    and eliminate this repetition.
+
 ## Constructors
 
 Terminal constructors:

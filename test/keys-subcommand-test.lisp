@@ -50,6 +50,13 @@
     (assert-eql 1 code)
     (assert-contains stderr (format nil "Duplicate option: ~A" option))))
 
+(defun assert-missing-value (args option)
+  (multiple-value-bind (code stdout stderr)
+      (run-cli-captured args)
+    (declare (ignore stdout))
+    (assert-eql 1 code)
+    (assert-contains stderr (format nil "Missing value for ~A" option))))
+
 (defun read-bytes (path)
   (with-open-file (s path :element-type '(unsigned-byte 8))
     (let ((data (make-array (file-length s) :element-type '(unsigned-byte 8))))
@@ -133,6 +140,17 @@
                   "--sig" (namestring sig-path)
                   "--sig" (namestring (merge-pathnames "other.sig" tmp)))
             "--sig")
+           (dolist (case '((("registry" "key" "generate" "--out") "--out")
+                           (("registry" "key" "generate" "--id") "--id")
+                           (("registry" "key" "list" "--keys-dir") "--keys-dir")
+                           (("registry" "key" "import" "--pub") "--pub")
+                           (("registry" "key" "import" "--id") "--id")
+                           (("registry" "key" "import" "--keys-dir") "--keys-dir")
+                           (("registry" "key" "verify" "--pub") "--pub")
+                           (("registry" "key" "verify" "--file") "--file")
+                           (("registry" "key" "verify" "--sig") "--sig")))
+             (destructuring-bind (args option) case
+               (assert-missing-value args option)))
 
            ;; --- generate a key into a private dir.
            (assert-eql 0 (clpm:run-cli (list "registry" "key" "generate"

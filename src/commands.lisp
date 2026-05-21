@@ -4384,31 +4384,37 @@ Default: remove the project's .clpm/ activation cache.
              (dir-seen nil)
              (key-id-seen nil)
              (keys-dir-seen nil))
-         (loop while rest do
-           (let ((arg (pop rest)))
-             (cond
-               ((string= arg "--dir")
-                (when dir-seen
-                  (log-error "Duplicate option: --dir")
-                  (return-from cmd-registry 1))
-                (setf dir-seen t
-                      dir (pop rest)))
-               ((string= arg "--key-id")
-                (when key-id-seen
-                  (log-error "Duplicate option: --key-id")
-                  (return-from cmd-registry 1))
-                (setf key-id-seen t
-                      key-id (pop rest)))
-               ((string= arg "--keys-dir")
-                (when keys-dir-seen
-                  (log-error "Duplicate option: --keys-dir")
-                  (return-from cmd-registry 1))
-                (setf keys-dir-seen t
-                      keys-dir (pop rest)))
-               (t
-                (log-error "Unknown option: ~A" arg)
-                (log-error "Usage: clpm registry init --dir <path> --key-id <id> --keys-dir <dir>")
-                (return-from cmd-registry 1)))))
+         (labels ((pop-value (option)
+                    (let ((value (pop rest)))
+                      (unless (and (stringp value) (plusp (length value)))
+                        (log-error "Missing value for ~A" option)
+                        (return-from cmd-registry 1))
+                      value)))
+           (loop while rest do
+             (let ((arg (pop rest)))
+               (cond
+                 ((string= arg "--dir")
+                  (when dir-seen
+                    (log-error "Duplicate option: --dir")
+                    (return-from cmd-registry 1))
+                  (setf dir-seen t
+                        dir (pop-value "--dir")))
+                 ((string= arg "--key-id")
+                  (when key-id-seen
+                    (log-error "Duplicate option: --key-id")
+                    (return-from cmd-registry 1))
+                  (setf key-id-seen t
+                        key-id (pop-value "--key-id")))
+                 ((string= arg "--keys-dir")
+                  (when keys-dir-seen
+                    (log-error "Duplicate option: --keys-dir")
+                    (return-from cmd-registry 1))
+                  (setf keys-dir-seen t
+                        keys-dir (pop-value "--keys-dir")))
+                 (t
+                  (log-error "Unknown option: ~A" arg)
+                  (log-error "Usage: clpm registry init --dir <path> --key-id <id> --keys-dir <dir>")
+                  (return-from cmd-registry 1))))))
          (unless (and (stringp dir) (plusp (length dir)))
            (log-error "Missing --dir <path>")
            (return-from cmd-registry 1))
@@ -4700,7 +4706,12 @@ in PATH, or NIL if the file isn't a recognizable Ed25519 public key."
                (log-error "  clpm registry key list [--keys-dir <dir>]")
                (log-error "  clpm registry key import --pub <path> [--id <id>] [--keys-dir <dir>]")
                (log-error "  clpm registry key verify --pub <path> --file <path> --sig <path>")
-               (return-from cmd-keys 1)))
+               (return-from cmd-keys 1))
+             (pop-value (option)
+               (let ((value (pop rest)))
+                 (unless (and (stringp value) (plusp (length value)))
+                   (usage-error "Missing value for ~A" option))
+                 value)))
       (cond
         ((or (null subcommand) (string= subcommand "help"))
          (usage-error "Missing keys subcommand"))
@@ -4716,12 +4727,12 @@ in PATH, or NIL if the file isn't a recognizable Ed25519 public key."
                   (when out-seen
                     (usage-error "Duplicate option: --out"))
                   (setf out-seen t
-                        out (pop rest)))
+                        out (pop-value "--out")))
                  ((string= arg "--id")
                   (when id-seen
                     (usage-error "Duplicate option: --id"))
                   (setf id-seen t
-                        id (pop rest)))
+                        id (pop-value "--id")))
                  (t
                   (usage-error "Unknown option: ~A" arg)))))
            (unless (and (stringp out) (plusp (length out)))
@@ -4766,7 +4777,7 @@ in PATH, or NIL if the file isn't a recognizable Ed25519 public key."
                   (when keys-dir-seen
                     (usage-error "Duplicate option: --keys-dir"))
                   (setf keys-dir-seen t
-                        keys-dir (pop rest)))
+                        keys-dir (pop-value "--keys-dir")))
                  (t (usage-error "Unknown option: ~A" arg)))))
            (let* ((dir (%keys-dir-or-default keys-dir)))
              (unless (uiop:directory-exists-p dir)
@@ -4801,17 +4812,17 @@ in PATH, or NIL if the file isn't a recognizable Ed25519 public key."
                   (when pub-seen
                     (usage-error "Duplicate option: --pub"))
                   (setf pub-seen t
-                        pub-path (pop rest)))
+                        pub-path (pop-value "--pub")))
                  ((string= arg "--id")
                   (when id-seen
                     (usage-error "Duplicate option: --id"))
                   (setf id-seen t
-                        id (pop rest)))
+                        id (pop-value "--id")))
                  ((string= arg "--keys-dir")
                   (when keys-dir-seen
                     (usage-error "Duplicate option: --keys-dir"))
                   (setf keys-dir-seen t
-                        keys-dir (pop rest)))
+                        keys-dir (pop-value "--keys-dir")))
                  (t (usage-error "Unknown option: ~A" arg)))))
            (unless (and (stringp pub-path) (plusp (length pub-path)))
              (usage-error "Missing --pub <path>"))
@@ -4861,17 +4872,17 @@ in PATH, or NIL if the file isn't a recognizable Ed25519 public key."
                   (when pub-seen
                     (usage-error "Duplicate option: --pub"))
                   (setf pub-seen t
-                        pub-path (pop rest)))
+                        pub-path (pop-value "--pub")))
                  ((string= arg "--file")
                   (when file-seen
                     (usage-error "Duplicate option: --file"))
                   (setf file-seen t
-                        file-path (pop rest)))
+                        file-path (pop-value "--file")))
                  ((string= arg "--sig")
                   (when sig-seen
                     (usage-error "Duplicate option: --sig"))
                   (setf sig-seen t
-                        sig-path (pop rest)))
+                        sig-path (pop-value "--sig")))
                  (t (usage-error "Unknown option: ~A" arg)))))
            (unless (and (stringp pub-path) (plusp (length pub-path)))
              (usage-error "Missing --pub <path>"))
@@ -4959,7 +4970,12 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
     (labels ((usage-error (fmt &rest fmt-args)
                (apply #'log-error fmt fmt-args)
                (log-error "Usage: clpm registry publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>]")
-               (return-from cmd-publish 1)))
+               (return-from cmd-publish 1))
+             (pop-value (option)
+               (let ((value (pop args)))
+                 (unless (and (stringp value) (plusp (length value)))
+                   (usage-error "Missing value for ~A" option))
+                 value)))
       ;; Parse args.
       (loop while args do
         (let ((arg (pop args)))
@@ -4968,32 +4984,32 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
              (when registry-seen
                (usage-error "Duplicate option: --registry"))
              (setf registry-seen t
-                   registry (pop args)))
+                   registry (pop-value "--registry")))
             ((string= arg "--key-id")
              (when key-id-seen
                (usage-error "Duplicate option: --key-id"))
              (setf key-id-seen t
-                   key-id (pop args)))
+                   key-id (pop-value "--key-id")))
             ((string= arg "--keys-dir")
              (when keys-dir-seen
                (usage-error "Duplicate option: --keys-dir"))
              (setf keys-dir-seen t
-                   keys-dir (pop args)))
+                   keys-dir (pop-value "--keys-dir")))
             ((string= arg "--project")
              (when project-seen
                (usage-error "Duplicate option: --project"))
              (setf project-seen t
-                   project-dir (pop args)))
+                   project-dir (pop-value "--project")))
             ((string= arg "--tarball-url")
              (when tarball-url-seen
                (usage-error "Duplicate option: --tarball-url"))
              (setf tarball-url-seen t
-                   tarball-url (pop args)))
+                   tarball-url (pop-value "--tarball-url")))
             ((string= arg "--tarball-out")
              (when tarball-out-seen
                (usage-error "Duplicate option: --tarball-out"))
              (setf tarball-out-seen t
-                   tarball-out (pop args)))
+                   tarball-out (pop-value "--tarball-out")))
             (t
              (usage-error "Unknown option: ~A" arg)))))
 
