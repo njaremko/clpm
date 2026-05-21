@@ -1,9 +1,5 @@
 ;;;; test/repl-bridge-cli-subcommands-test.lisp -- end-to-end test for the
-;;;; expanded `clpm repl-bridge ...' surface: image-info, apropos, find-
-;;;; definition, arglist, doc, function-info, list-packages, package-info,
-;;;; loaded-systems, current-package, set-package, gc, time-eval, trace/
-;;;; untrace/list-traced, workers/reset, macroexpand, compile-file,
-;;;; inspect (with --path traversal), debug (with --restart and --arg).
+;;;; small repl-bridge CLI algebra: daemon, eval, and call.
 
 (require :asdf)
 
@@ -59,20 +55,13 @@
     (uiop:with-current-directory (proj)
       (let ((srv (sb-thread:make-thread
                   (lambda ()
-                    ;; serve runs the daemon loop; surface any startup
-                    ;; failure so the test thread doesn't silently wait
-                    ;; out the socket-poll timeout.
-                    (handler-case (run-cli-captured '("repl-bridge" "serve"))
+                    (handler-case (run-cli-captured '("repl-bridge" "daemon"))
                       (error (c)
-                        (format *error-output* "serve thread died: ~A~%" c)
+                        (format *error-output* "daemon thread died: ~A~%" c)
                         (force-output *error-output*))))
-                  :name "test-cli-sub-serve"))
+                  :name "test-cli-small-daemon"))
             (sock (namestring (merge-pathnames ".clpm/repl-bridge.sock" proj))))
         (declare (ignorable srv))
-        ;; Yield once so the daemon thread gets scheduled before we
-        ;; start polling. sbcl --script otherwise sometimes lets the
-        ;; polling loop hog the cpu long enough to time out before the
-        ;; serve thread reaches accept().
         (sleep 0.05)
         (unwind-protect
              (progn
@@ -83,457 +72,173 @@
                             "daemon socket did not appear: ~A" sock)
                (format t "  daemon up~%")
 
-               (format t "Test: image-info~%")
+               (format t "Test: call methods + help expose registry schema~%")
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "image-info"))
+                   (run-cli-captured '("repl-bridge" "call" "methods"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "pid:")
-                 (assert-contains stdout "lisp:"))
-               (format t "  image-info OK~%")
-
-               (format t "Test: image-info --json~%")
+                 (assert-contains stdout "\"eval\"")
+                 (assert-contains stdout "\"methods\""))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "image-info" "--json"))
+                   (run-cli-captured '("repl-bridge" "call" "help"
+                                       "--method" "eval"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "\"pid\":")
-                 (assert-contains stdout "\"features\":"))
-               (format t "  image-info --json OK~%")
-
-               (format t "Test: apropos~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "apropos" "mapcar"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "COMMON-LISP:MAPCAR"))
-               (format t "  apropos OK~%")
-
-               (format t "Test: arglist~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "arglist" "mapcar"))
-                 (assert-eql 0 rc)
-                 (assert-true (or (search "FUNCTION" stdout)
-                                  (search "function" stdout))
-                              "expected function in arglist, got ~A" stdout))
-               (format t "  arglist OK~%")
-
-               (format t "Test: find-definition~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "find-definition" "car"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "function"))
-               (format t "  find-definition OK~%")
-
-               (format t "Test: list-packages~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "list-packages"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "packages"))
-               (format t "  list-packages OK~%")
-
-               (format t "Test: loaded-systems~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "loaded-systems"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "clpm"))
-               (format t "  loaded-systems OK~%")
-
-               (format t "Test: current-package~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "current-package"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "COMMON-LISP-USER"))
-               (format t "  current-package OK~%")
-
-               (format t "Test: set-package + current-package~%")
-               (run-cli-captured '("repl-bridge" "set-package" "COMMON-LISP"))
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "current-package"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "COMMON-LISP"))
-               (run-cli-captured '("repl-bridge" "set-package" "COMMON-LISP-USER"))
-               (format t "  set-package OK~%")
-
-               (format t "Test: workers shows default~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "workers"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "default"))
-               (format t "  workers OK~%")
-
-               (format t "Test: gc~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "gc"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "consed before"))
-               (format t "  gc OK~%")
-
-               (format t "Test: time-eval~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "time-eval" "(+ 1 2)"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "value:")
-                 (assert-contains stdout "real_ms:"))
-               (format t "  time-eval OK~%")
-
-               (format t "Test: macroexpand~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "macroexpand"
-                                       "(when t :ok)"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "IF"))
-               (format t "  macroexpand OK~%")
-
-               (format t "Test: trace / list-traced / untrace~%")
-               ;; trace + list-traced are per-thread on SBCL, so we don't
-               ;; require list-traced to *see* the trace -- we just verify
-               ;; both invocations return successfully and untrace clears.
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "trace" "identity"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "traced:"))
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "list-traced"))
-                 (declare (ignore stdout))
-                 (assert-eql 0 rc))
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "untrace"))
-                 (declare (ignore stdout))
-                 (assert-eql 0 rc))
-               (format t "  trace flow OK~%")
-
-               (format t "Test: inspect single-shot~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "inspect"
-                                       "(list 100 200 300)"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "value:")
-                 (assert-contains stdout "100"))
-               (format t "  inspect OK~%")
-
-               (format t "Test: inspect with --path~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "inspect"
-                                       "(list :a :b :c)" "--path" "1"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "depth: 2"))
-               (format t "  inspect --path OK~%")
-
-               (format t "Test: inspect --eval evaluates with * bound to focus~%")
+                 (assert-contains stdout "\"params\"")
+                 (assert-contains stdout "\"form\""))
                (multiple-value-bind (rc stdout)
                    (run-cli-captured
-                    '("repl-bridge" "inspect" "(list 10 20 30)"
-                      "--path" "1,0"
-                      "--eval" "(+ * 100)"))
+                    '("repl-bridge" "call" "help"
+                      "--params-json" "{\"method\":\"eval\"}"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "value: 20")
-                 (assert-contains stdout "=> 120"))
-               (format t "  inspect --eval OK~%")
+                 (assert-contains stdout "\"params\"")
+                 (assert-contains stdout "\"form\""))
+               (format t "  registry discovery OK~%")
 
-               (format t "Test: inspect handles atomic values~%")
-               ;; Used to fail because (type-of 42) returns the *list*
-               ;; (INTEGER 0 ...) and the inspector's fallthrough called
-               ;; STRING on that list, signalling a TYPE-ERROR.
+               (format t "Test: call dispatches ordinary RPCs~%")
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "inspect" "42"))
+                   (run-cli-captured '("repl-bridge" "call" "image-info"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "value: 42"))
+                 (assert-contains stdout "\"pid\"")
+                 (assert-contains stdout "\"lisp\""))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "inspect"
-                                       "(list 10 20 30)" "--path" "0"))
+                   (run-cli-captured '("repl-bridge" "call" "current-package"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "value: 10"))
-               (format t "  inspect atomic OK~%")
-
-               (format t "Test: macroexpand non-macro flags it~%")
-               (multiple-value-bind (rc stdout stderr)
-                   (run-cli-captured '("repl-bridge" "macroexpand"
-                                       "(+ 1 2)"))
+                 (assert-contains stdout "COMMON-LISP-USER"))
+               (run-cli-captured '("repl-bridge" "call" "set-package"
+                                   "--name" "COMMON-LISP"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "call" "current-package"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "(+ 1 2)")
-                 (assert-contains stderr "not a macro"))
-               (format t "  macroexpand non-macro OK~%")
+                 (assert-contains stdout "COMMON-LISP"))
+               (run-cli-captured '("repl-bridge" "call" "set-package"
+                                   "--name" "COMMON-LISP-USER"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "call" "list-workers"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "default"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "call" "gc"
+                                       "--full" "true"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "\"result\""))
+               (format t "  ordinary RPC call OK~%")
 
-               (format t "Test: debug returns rc=3 + frames~%")
+               (format t "Test: eval remains human-readable and persistent~%")
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "eval" "(+ 1 2)"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "=> 3")
+                 (assert-true (not (search "\"result\"" stdout))
+                              "default eval should not be JSON: ~A" stdout))
+               (run-cli-captured '("repl-bridge" "eval"
+                                   "(defparameter *cli-x* 41)"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl-bridge" "eval" "*cli-x*"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "=> 41"))
+               (format t "  eval OK~%")
+
+               (format t "Test: eval --debug handles debugger continuations~%")
                (multiple-value-bind (rc stdout stderr)
-                   (run-cli-captured '("repl-bridge" "debug"
-                                       "(error \"boom\")"))
+                   (run-cli-captured '("repl-bridge" "eval"
+                                       "(error \"boom\")" "--debug"))
                  (declare (ignore stdout))
                  (assert-eql 3 rc)
                  (assert-contains stderr "debugger entered"))
-               (format t "  debug default OK~%")
-
-               (format t "Test: debug --restart USE-VALUE --arg 42~%")
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "debug"
+                   (run-cli-captured '("repl-bridge" "eval"
                                        "(restart-case (/ 1 0) (use-value (v) v))"
-                                       "--restart" "USE-VALUE"
+                                       "--debug" "--restart" "USE-VALUE"
                                        "--arg" "42"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "=> 42"))
-               (format t "  debug --restart with arg OK~%")
+               (format t "  eval --debug OK~%")
 
-               (format t "Test: debug --keep then fresh frame eval and abort~%")
+               (format t "Test: kept debug sessions are managed through call~%")
                (multiple-value-bind (rc stdout stderr)
                    (run-cli-captured
-                    '("repl-bridge" "debug"
+                    '("repl-bridge" "eval"
                       "(progn
                          (declaim (optimize (debug 3) (safety 3) (speed 0)))
                          (defun rb-cli-debug-keep-target (x)
                            (error \"x=~A\" x))
                          (rb-cli-debug-keep-target 7))"
-                      "--keep"))
+                      "--debug" "--keep"))
                  (declare (ignore stdout))
                  (assert-eql 3 rc)
                  (assert-contains stderr "session:")
                  (assert-contains stderr "RB-CLI-DEBUG-KEEP-TARGET"))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge"
+                   (run-cli-captured '("repl-bridge" "call"
                                        "list-debug-sessions"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "debug session"))
+                 (assert-contains stdout "\"sessions\""))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge"
+                   (run-cli-captured '("repl-bridge" "call"
                                        "debug-eval-in-frame"
-                                       "4"
-                                       "(* x 2)"))
+                                       "--frame" "4"
+                                       "--form" "(* x 2)"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "frame 4 => 14"))
+                 (assert-contains stdout "14"))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "debug-abort"))
+                   (run-cli-captured '("repl-bridge" "call" "debug-abort"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "aborted"))
-               (format t "  debug --keep flow OK~%")
+               (format t "  kept debug session OK~%")
 
-               (format t "Test: --json on a leaf command~%")
+               (format t "Test: source RPCs and redefinition drift use call~%")
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "current-package" "--json"))
+                   (run-cli-captured '("repl-bridge" "call" "macroexpand"
+                                       "--form" "(when t :ok)"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "\"package\""))
-               (format t "  --json flag OK~%")
-
-               (format t "Test: unknown subcommand~%")
-               (multiple-value-bind (rc stdout stderr)
-                   (run-cli-captured '("repl-bridge" "nonexistent"))
-                 (declare (ignore stdout))
-                 (assert-true (not (zerop rc)) "expected nonzero rc")
-                 (assert-contains stderr "Unknown subcommand"))
-               (format t "  unknown-subcommand OK~%")
-
-               (format t "Test: complete-symbol prints candidates~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "complete-symbol"
-                                       "def" "--limit" "5"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "DEF"))
-               (format t "  complete-symbol OK~%")
-
-               (format t "Test: class-info renders precedence~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "class-info"
-                                       "standard-object"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "name: STANDARD-OBJECT")
-                 (assert-contains stdout "precedence:"))
-               (format t "  class-info OK~%")
-
-               (format t "Test: package-info renders exports~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "package-info"
-                                       "clpm.io.json"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "exports:"))
-               (format t "  package-info OK~%")
-
-               (format t "Test: describe-system renders fields~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "describe-system" "clpm"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "name: clpm")
-                 (assert-contains stdout "version:"))
-               (format t "  describe-system OK~%")
-
-               (format t "Test: disassemble renders asm~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "disassemble"
-                                       "identity"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "disassembly"))
-               (format t "  disassemble OK~%")
-
-               (format t "Test: compile-file + load-file~%")
+                 (assert-contains stdout "IF"))
                (let ((src (merge-pathnames "hello.lisp" proj)))
                  (with-open-file (s src :direction :output
                                         :if-exists :supersede)
                    (write-string "(defun hello () \"hi\")" s))
                  (multiple-value-bind (rc stdout)
-                     (run-cli-captured (list "repl-bridge" "compile-file"
-                                             (namestring src)))
+                     (run-cli-captured (list "repl-bridge" "call"
+                                             "compile-file"
+                                             "--path" (namestring src)))
                    (assert-eql 0 rc)
-                   (assert-contains stdout "compiled"))
+                   (assert-contains stdout "\"result\""))
                  (multiple-value-bind (rc stdout)
-                     (run-cli-captured (list "repl-bridge" "load-file"
-                                             (namestring src)))
+                     (run-cli-captured (list "repl-bridge" "call"
+                                             "load-file"
+                                             "--path" (namestring src)))
                    (assert-eql 0 rc)
-                   (assert-contains stdout "loaded"))
+                   (assert-contains stdout "\"result\""))
                  (multiple-value-bind (rc stdout)
-                     (run-cli-captured '("repl-bridge" "eval" "(hello)"
-                                          "--no-autostart"))
-                   (declare (ignore rc))
+                     (run-cli-captured '("repl-bridge" "eval" "(hello)"))
+                   (assert-eql 0 rc)
                    (assert-contains stdout "hi")))
-               (format t "  compile-file/load-file flow OK~%")
-
-               (format t "Test: compile-file failure surfaces flags + rc=1~%")
-               (let ((broken (merge-pathnames "broken.lisp" proj)))
-                 (with-open-file (s broken :direction :output
-                                           :if-exists :supersede)
-                   ;; unbalanced paren forces a hard failure
-                   (write-string "(defun broken () (+ 1 " s))
-                 (multiple-value-bind (rc stdout stderr)
-                     (run-cli-captured (list "repl-bridge" "compile-file"
-                                             (namestring broken)))
-                   (declare (ignore stdout))
-                   (assert-eql 1 rc)
-                   (assert-true (or (search "FAILED" stderr)
-                                    (search "failures" stderr))
-                                "expected failure marker, got: ~A" stderr)))
-               (format t "  compile-file failure OK~%")
-
-               (format t "Test: eval default is human-readable~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "eval" "(+ 1 2)"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "=> 3")
-                 ;; Should not contain raw JSON envelope by default.
-                 (assert-true (not (search "\"result\"" stdout))
-                              "default eval should not be JSON: ~A" stdout))
-               (format t "  eval default OK~%")
-
-               (format t "Test: eval error shows restarts + user frames~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "eval"
-                                       "(unknown-function-xyz 1)"))
-                 (declare (ignore rc))
-                 (assert-contains stdout "error:")
-                 (assert-contains stdout "restarts")
-                 ;; Daemon scaffolding should be stripped.
-                 (assert-true (not (search "%WORKER-LOOP" stdout))
-                              "should not show daemon frames: ~A" stdout)
-                 (assert-true (not (search "%EVAL-ONE" stdout))
-                              "should not show daemon frames: ~A" stdout))
-               (format t "  eval error layout OK~%")
-
-               (format t "Test: ping renders human-readable~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "ping"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "pid:")
-                 (assert-contains stdout "uptime:"))
-               (format t "  ping renderer OK~%")
-
-               (format t "Test: diff renders kind+name~%")
                (run-cli-captured '("repl-bridge" "eval"
                                    "(defun diff-fn-x () 1)"))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "diff"))
+                   (run-cli-captured '("repl-bridge" "call"
+                                       "list-redefinitions"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "defun")
                  (assert-contains stdout "DIFF-FN-X"))
-               (format t "  diff renderer OK~%")
+               (format t "  source RPCs OK~%")
 
-               (format t "Test: who-calls finds a live caller~%")
-               (run-cli-captured
-                '("repl-bridge" "eval"
-                  "(progn (defun cli-xref-callee () :inner)
-                          (defun cli-xref-caller () (cli-xref-callee))
-                          :ok)"))
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured
-                    '("repl-bridge" "who-calls" "cli-xref-callee"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "CLI-XREF-CALLER"))
-               (format t "  who-calls OK~%")
-
-               (format t "Test: xref --direction calls aliases to callers~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured
-                    '("repl-bridge" "xref" "cli-xref-callee"
-                      "--direction" "calls"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "CLI-XREF-CALLER"))
-               (format t "  xref --direction calls OK~%")
-
-               (format t "Test: eval --handler declarative recovery~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured
-                    '("repl-bridge" "eval"
-                      "(restart-case (/ 1 0) (use-value (v) v))"
-                      "--handler" "division-by-zero=use-value:999"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "=> 999"))
-               (format t "  eval --handler OK~%")
-
-               (format t "Test: eval --handler with no args~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured
-                    '("repl-bridge" "eval"
-                      "(restart-case (signal 'simple-error :format-control \"x\") (continue () :went-on))"
-                      "--handler" "simple-error=continue"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "=> :WENT-ON"))
-               (format t "  eval --handler (no args) OK~%")
-
-               (format t "Test: eval --handler exposes matched-but-no-restart~%")
-               ;; `(/ 1 0)` raises DIVISION-BY-ZERO but has no surrounding
-               ;; `restart-case', so USE-VALUE isn't bound. The handler
-               ;; should still record an attempt so the failure mode is
-               ;; visible -- without this the call looks indistinguishable
-               ;; from "no --handler matched".
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured
-                    '("repl-bridge" "eval" "(/ 1 0)"
-                      "--handler" "division-by-zero=use-value:42"))
-                 (assert-eql 1 rc)
-                 (assert-contains stdout "handlers tried")
-                 (assert-contains stdout "DIVISION-BY-ZERO")
-                 (assert-contains stdout "USE-VALUE")
-                 (assert-contains stdout "no such restart"))
-               (format t "  eval --handler matched-no-restart OK~%")
-
-               (format t "Test: diff --worker scopes per worker~%")
-               ;; Define different things in two distinct named workers.
-               (run-cli-captured '("repl-bridge" "eval"
-                                   "(defun diff-only-in-a () :a)"
-                                   "--worker" "wa"))
-               (run-cli-captured '("repl-bridge" "eval"
-                                   "(defun diff-only-in-b () :b)"
-                                   "--worker" "wb"))
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "diff" "--worker" "wa"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "DIFF-ONLY-IN-A")
-                 (assert-true (not (search "DIFF-ONLY-IN-B" stdout))
-                              "wa diff leaked wb's redefinition: ~A" stdout))
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "diff" "--worker" "wb"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "DIFF-ONLY-IN-B")
-                 (assert-true (not (search "DIFF-ONLY-IN-A" stdout))
-                              "wb diff leaked wa's redefinition: ~A" stdout))
-               (format t "  diff --worker OK~%")
-
-               (format t "Test: help text~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "help"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "introspection")
-                 (assert-contains stdout "debug"))
-               (format t "  help OK~%"))
-          ;; cleanup
-          (ignore-errors (run-cli-captured '("repl-bridge" "stop")))
+               (format t "Test: legacy wrappers are gone~%")
+               (multiple-value-bind (rc stdout stderr)
+                   (run-cli-captured '("repl-bridge" "ping"))
+                 (declare (ignore stdout))
+                 (assert-true (not (zerop rc)) "expected nonzero rc")
+                 (assert-contains stderr "Unknown subcommand"))
+               (multiple-value-bind (rc stdout stderr)
+                   (run-cli-captured '("repl-bridge" "debug"
+                                       "(error \"x\")"))
+                 (declare (ignore stdout))
+                 (assert-true (not (zerop rc)) "expected nonzero rc")
+                 (assert-contains stderr "Unknown subcommand"))
+               (format t "  legacy wrappers rejected OK~%"))
+          (ignore-errors (run-cli-captured '("repl-bridge" "daemon" "--stop")))
           (loop for i from 0 below 30
                 while (sb-thread:thread-alive-p srv)
                 do (sleep 0.1))
           (when (sb-thread:thread-alive-p srv)
             (ignore-errors (sb-thread:terminate-thread srv))))))))
 
-(format t "~%REPL-bridge CLI subcommand tests PASSED!~%")
+(format t "~%REPL-bridge small CLI tests PASSED!~%")
 (sb-ext:exit :code 0)

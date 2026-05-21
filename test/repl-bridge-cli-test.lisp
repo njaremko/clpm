@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-cli-test.lisp - end-to-end CLI: serve, eval, status, stop
+;;;; test/repl-bridge-cli-test.lisp - end-to-end CLI: daemon, eval, call
 
 (require :asdf)
 
@@ -60,19 +60,19 @@
       (write-string ";; empty for test~%" s))
 
     (uiop:with-current-directory (proj)
-      (format t "Test: serve (no --detach) blocks; we run it in a thread~%")
+      (format t "Test: daemon (no --detach) blocks; we run it in a thread~%")
       (let ((srv (sb-thread:make-thread
                   (lambda ()
                     ;; Surface daemon-startup failures instead of letting
                     ;; them disappear behind a captured *error-output*.
                     (handler-case
-                        (run-cli-captured '("repl-bridge" "serve"))
+                        (run-cli-captured '("repl-bridge" "daemon"))
                       (error (c)
-                        (format *error-output* "serve thread died: ~A~%" c)
+                        (format *error-output* "daemon thread died: ~A~%" c)
                         (force-output *error-output*))))
-                  :name "test-serve")))
+                  :name "test-daemon")))
         (declare (ignorable srv))
-        ;; Yield once so the serve thread reaches accept() before we
+        ;; Yield once so the daemon thread reaches accept() before we
         ;; start polling. Without this, sbcl --script can hand the
         ;; polling loop most of the cpu and time us out.
         (sleep 0.05)
@@ -112,17 +112,17 @@
             (assert-contains stdout "=> 41"))
           (format t "  state persistence OK~%")
 
-          (format t "Test: ping returns daemon info~%")
+          (format t "Test: call ping returns daemon info~%")
           (multiple-value-bind (rc stdout)
-              (run-cli-captured '("repl-bridge" "ping"))
+              (run-cli-captured '("repl-bridge" "call" "ping"))
             (assert-eql 0 rc)
-            (assert-contains stdout "pid:")
-            (assert-contains stdout "uptime:"))
-          (format t "  ping OK~%")
+            (assert-contains stdout "\"pid\"")
+            (assert-contains stdout "\"uptime_ms\""))
+          (format t "  call ping OK~%")
 
-          (format t "Test: status reports running~%")
+          (format t "Test: daemon --status reports running~%")
           (multiple-value-bind (rc stdout)
-              (run-cli-captured '("repl-bridge" "status"))
+              (run-cli-captured '("repl-bridge" "daemon" "--status"))
             (assert-eql 0 rc)
             (assert-contains stdout "running")
             (assert-contains stdout "pid"))
@@ -130,7 +130,7 @@
 
           (format t "Test: eval --no-autostart fails after stop~%")
           (multiple-value-bind (rc stdout stderr)
-              (run-cli-captured '("repl-bridge" "stop"))
+              (run-cli-captured '("repl-bridge" "daemon" "--stop"))
             (declare (ignore stderr stdout))
             (assert-eql 0 rc))
           ;; Wait for daemon thread to finish.
@@ -146,9 +146,9 @@
             (assert-contains stderr "No daemon"))
           (format t "  no-daemon path OK~%")
 
-          (format t "Test: status reports not running after stop~%")
+          (format t "Test: daemon --status reports not running after stop~%")
           (multiple-value-bind (rc stdout)
-              (run-cli-captured '("repl-bridge" "status"))
+              (run-cli-captured '("repl-bridge" "daemon" "--status"))
             (assert-eql 0 rc)
             (assert-contains stdout "not running"))
           (format t "  status-after-stop OK~%"))))))

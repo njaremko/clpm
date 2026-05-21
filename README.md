@@ -96,50 +96,49 @@ from disk.
 
 ```bash
 clpm install                                          # one-time setup
-clpm repl-bridge serve --detach                       # background daemon
+clpm repl-bridge daemon --detach                      # background daemon
 clpm repl-bridge eval '(asdf:load-system "my-app")'
 clpm repl-bridge eval '(my-app:hello)'
-clpm repl-bridge methods                              # list every RPC
-clpm repl-bridge stop
+clpm repl-bridge call methods                         # list every RPC
+clpm repl-bridge daemon --stop
 ```
 
 State persists across `eval` calls. Hung evals are unwound with
-`clpm repl-bridge interrupt` (daemon stays up); a wedged worker is recovered
-with `reset`.
+`clpm repl-bridge call interrupt` (daemon stays up); a wedged worker is
+recovered with `clpm repl-bridge call reset`.
 
 ### Capabilities
 
-- **Interactive debugger.** `eval` with `debug: true` pauses on the first
+- **Interactive debugger.** `eval --debug` pauses on the first
   unhandled condition, emits a live restart chain, and accepts
-  `debug-invoke-restart` / `debug-eval-in-frame` / `debug-continue` /
-  `debug-abort` continuations on the same request id.
-- **Inspector sessions.** `inspect FORM` returns paginated parts of any
+  restart and frame-selection flags. Kept sessions are driven with
+  `call debug-invoke-restart`, `call debug-eval-in-frame`,
+  `call debug-continue`, and `call debug-abort`.
+- **Inspector sessions.** `call inspect --form FORM` returns paginated parts of any
   value; `inspect-into` / `inspect-pop` walk the structure; `inspect-eval`
   binds `*` to the focus; `inspect-mutate` replaces an element.
-- **Compile diagnostics.** `compile-file PATH` returns warnings/errors with
+- **Compile diagnostics.** `call compile-file --path PATH` returns warnings/errors with
   file + line positions, suitable for surfacing in an editor.
 - **Source navigation.** `find-definitions`, `who-calls`, `apropos`,
   `documentation`, `arglist`, `complete-symbol`, `disassemble`,
-  `describe-system`.
+  `describe-system`, all through `call METHOD`.
 - **Named workers.** `eval --worker NAME` runs on an isolated worker with
-  its own `*package*`, history, and redefinition log; `--concurrent`
-  spawns a one-shot disposable worker. `list-workers` / `kill-worker`
-  manage them.
-- **Trace / time / profile.** `trace SYMBOLS`, `time-eval FORM`,
-  `profile-eval FORM`.
-- **File watching.** `watch DIR --glob '*.lisp' --auto-revert` polls and
+  its own `*package*`, history, and redefinition log. `call list-workers`
+  and `call kill-worker --name NAME` manage them.
+- **Trace / time / profile.** `call trace`, `call time-eval`,
+  `call profile-eval`.
+- **File watching.** `call watch --dir DIR --glob '*.lisp' --auto-revert true` polls and
   re-LOADs matching files on mtime change, streaming `file-reloaded` /
   `reload-failed` / `revert-applied` events.
 - **Image introspection.** `image-info`, `loaded-systems`, `list-packages`,
-  `gc [--full]`.
+  `gc`, all through `call METHOD`.
 - **Self-documenting.** Every method is published in the registry the
-  dispatcher reads. `methods` lists them; `help METHOD` returns the long
-  doc + parameter schema; `explain: true` on any call echoes a `plan`
-  event so you can debug protocol misuse.
+  dispatcher reads. `call methods` lists them; `call help --method METHOD`
+  returns the long doc + parameter schema.
 
 A Claude Code skill at [`.claude/skills/clpm-repl-bridge.md`](.claude/skills/clpm-repl-bridge.md)
-documents the v2 operating model as recipes. Run
-`clpm help repl-bridge <subcommand>` for per-subcommand flags.
+documents the operating model as recipes. Run `clpm help repl-bridge` for the
+three-command CLI surface.
 
 ## Project File Format
 

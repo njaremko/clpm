@@ -1633,8 +1633,8 @@ deps don't churn)."
 ;;;   .clpm/repl-bridge.pid    decimal PID of the running daemon
 ;;;   .clpm/repl-bridge.log    daemon stdout+stderr in --detach mode
 ;;;
-;;; `serve' loads the project (via .clpm/asdf-config.lisp) and enters the
-;;; accept loop. `eval' auto-spawns a `serve --detach' child if no daemon is
+;;; `daemon' loads the project (via .clpm/asdf-config.lisp) and enters the
+;;; accept loop. `eval' auto-spawns a `daemon --detach' child if no daemon is
 ;;; running, then sends one eval request.
 
 (defun %bridge-windows-p ()
@@ -1722,13 +1722,13 @@ workflows, not the runtime image."
         (error (c)
           (log-error "Failed to parse project manifest: ~A" c))))))
 
-;; Foreground `serve' never touches stdio. Detachment is done by the parent
+;; Foreground `daemon' never touches stdio. Detachment is done by the parent
 ;; via `uiop:launch-program` which inherits the right file descriptors --
 ;; we don't need fork/setsid/dup2 from inside the daemon.
 
 (defun %bridge-maybe-autostart (project-root)
   "If the manifest sets `:repl-bridge (:autostart t ...)`, ensure a daemon is
-running for PROJECT-ROOT by launching `serve --detach' when one is not.
+running for PROJECT-ROOT by launching `daemon --detach' when one is not.
 
 Idempotent: if the existing pidfile points at a live process, do nothing.
 Failures are logged but never propagate -- `clpm install' must not fail
@@ -1749,7 +1749,7 @@ because the daemon couldn't come up."
           (log-info "repl-bridge: starting daemon (autostart from manifest)")
           (handler-case
               (uiop:with-current-directory (project-root)
-                (uiop:launch-program (list clpm-bin "repl-bridge" "serve"
+                (uiop:launch-program (list clpm-bin "repl-bridge" "daemon"
                                            "--detach")
                                      :output nil :error-output nil :input nil))
             (error (c)
@@ -1769,8 +1769,8 @@ because the daemon couldn't come up."
     (multiple-value-bind (sock pid log) (%bridge-paths project-root)
       (values project-root sock pid log))))
 
-(defun %bridge-serve (args)
-  "Handle `clpm repl-bridge serve [--detach] [--no-load] [-p MEMBER]'."
+(defun %bridge-daemon-start (args)
+  "Start `clpm repl-bridge daemon [--detach] [--no-load]'."
   (let ((detach nil)
         (no-load nil))
     (loop while args do
@@ -1779,25 +1779,25 @@ because the daemon couldn't come up."
           ((string= arg "--detach") (setf detach t))
           ((string= arg "--no-load") (setf no-load t))
           (t
-           (log-error "Unknown serve option: ~A" arg)
-           (return-from %bridge-serve 1)))))
+           (log-error "Unknown daemon option: ~A" arg)
+           (return-from %bridge-daemon-start 1)))))
     (multiple-value-bind (project-root sock pid log)
         (%bridge-resolve-project)
-      (unless project-root (return-from %bridge-serve 1))
+      (unless project-root (return-from %bridge-daemon-start 1))
       ;; If a live daemon is already running, refuse.
       (%bridge-clean-stale sock pid)
       (let ((existing (%bridge-read-pidfile pid)))
         (when (and existing (%bridge-pid-alive-p existing))
           (log-error "Daemon already running (pid ~D, socket ~A)" existing sock)
-          (return-from %bridge-serve 1)))
+          (return-from %bridge-daemon-start 1)))
       (cond
         (detach
          (let ((clpm-bin (uiop:argv0)))
            (unless (and clpm-bin (probe-file clpm-bin))
              (log-error "Could not find clpm binary at ~S; --detach unavailable"
                         clpm-bin)
-             (return-from %bridge-serve 1))
-           (let ((argv (append (list clpm-bin "repl-bridge" "serve")
+             (return-from %bridge-daemon-start 1))
+           (let ((argv (append (list clpm-bin "repl-bridge" "daemon")
                                (when no-load (list "--no-load")))))
              (ensure-directories-exist log)
              (handler-case
@@ -1811,7 +1811,7 @@ because the daemon couldn't come up."
                                         :input nil))
                (error (c)
                  (log-error "Failed to launch daemon: ~A" c)
-                 (return-from %bridge-serve 1)))
+                 (return-from %bridge-daemon-start 1)))
              (loop for i from 0 below 50
                    while (not (probe-file sock))
                    do (sleep 0.1))
@@ -1980,7 +1980,7 @@ backtrace. Long internal `vars' dumps are dropped."
           (format stream "restarts (~D):~%" (length restarts))
           (dolist (r restarts)
             (%bridge-print-restart stream (cadr r)))
-          (format stream "  -> rerun with: clpm repl-bridge debug FORM --restart NAME [--arg V]~%"))
+          (format stream "  -> rerun with: clpm repl-bridge eval FORM --debug --restart NAME [--arg V]~%"))
         (let ((user (%bridge-user-frames (list :array frames))))
           (when user
             (%bridge-print-frames stream user)))))
@@ -2030,23 +2030,25 @@ own renderer so this fallback is rarely hit."
             (terpri stream)))))))
 
 (defun %bridge-send-or-autostart (sock pid project-root method
-                                  &key params (autostart t))
+                                  &key params (autostart t) on-event)
   "Send a request, auto-starting the daemon on connect failure."
   (declare (ignore pid project-root))
   (let ((resp (clpm.repl-bridge:send-request sock method
                                              :params params
-                                             :connect-timeout 1)))
+                                             :connect-timeout 1
+                                             :on-event on-event)))
     (cond
       ((eq resp :no-daemon)
        (cond
          ((not autostart)
-          (log-error "No daemon running. Start one with `clpm repl-bridge serve` or drop --no-autostart.")
+          (log-error "No daemon running. Start one with `clpm repl-bridge daemon --detach` or drop --no-autostart.")
           (return-from %bridge-send-or-autostart nil))
          (t
-          (let ((rc (%bridge-serve (list "--detach"))))
+          (let ((rc (%bridge-daemon-start (list "--detach"))))
             (declare (ignore rc))
             (clpm.repl-bridge:send-request sock method :params params
-                                           :connect-timeout 5)))))
+                                           :connect-timeout 5
+                                           :on-event on-event)))))
       (t resp))))
 
 (defun %bridge-split-on (char string)
@@ -2083,21 +2085,34 @@ JSON object `{type, restart, args}'. Returns NIL on a malformed spec."
 (defun %bridge-eval (args)
   "Handle `clpm repl-bridge eval FORM [--package PKG] [--worker W]
                                  [--handler TYPE=RESTART[:ARG,...]]...
-                                 [--debug] [--no-autostart] [--json]'.
+                                 [--debug] [--restart NAME] [--frame N]
+                                 [--frame-eval FORM] [--keep]
+                                 [--no-autostart] [--json]'.
 
 Default rendering is human-readable; pass `--json' (or rely on the
-global `--json' flag) for the raw JSON line. `--pretty' is accepted as
-a no-op for backward compatibility.
+global `--json' flag) for the raw JSON line.
 
 `--handler' may appear multiple times -- each spec is applied as a
 declarative restart for any condition matching TYPE. ARGS, if given,
-are read+evaluated daemon-side at recovery time."
+are read+evaluated daemon-side at recovery time.
+
+`--debug' switches to the continuation-aware path. With no selector it
+prints the first debugger stop and aborts it; with `--keep' it leaves a
+server-owned session for later `call debug-* ...' requests."
   (let ((form nil)
         (package nil)
         (worker nil)
         (autostart t)
         (json nil)
         (debug nil)
+        (restart nil)
+        (restart-args '())
+        (frame nil)
+        (frame-eval nil)
+        (abort nil)
+        (keep nil)
+        (break-on nil)
+        (timeout-ms nil)
         (handlers '()))
     (loop while args do
       (let ((arg (pop args)))
@@ -2123,7 +2138,52 @@ are read+evaluated daemon-side at recovery time."
           ((string= arg "--no-autostart") (setf autostart nil))
           ((string= arg "--json") (setf json t))
           ((string= arg "--debug") (setf debug t))
-          ((string= arg "--pretty"))   ; no-op: human is the default
+          ((string= arg "--restart")
+           (setf debug t
+                 restart (pop args))
+           (unless (stringp restart)
+             (log-error "Missing value for --restart")
+             (return-from %bridge-eval 1)))
+          ((string= arg "--arg")
+           (setf debug t)
+           (let ((value (pop args)))
+             (unless (stringp value)
+               (log-error "Missing value for --arg")
+               (return-from %bridge-eval 1))
+             (push value restart-args)))
+          ((string= arg "--frame")
+           (setf debug t)
+           (let* ((raw (pop args))
+                  (n (and raw (ignore-errors
+                               (parse-integer raw :junk-allowed nil)))))
+             (unless (integerp n)
+               (log-error "Invalid integer for --frame: ~A" raw)
+               (return-from %bridge-eval 1))
+             (setf frame n)))
+          ((string= arg "--frame-eval")
+           (setf debug t
+                 frame-eval (pop args))
+           (unless (stringp frame-eval)
+             (log-error "Missing value for --frame-eval")
+             (return-from %bridge-eval 1)))
+          ((string= arg "--keep") (setf debug t keep t))
+          ((string= arg "--abort") (setf debug t abort t))
+          ((string= arg "--break-on")
+           (setf debug t
+                 break-on (pop args))
+           (unless (stringp break-on)
+             (log-error "Missing value for --break-on")
+             (return-from %bridge-eval 1)))
+          ((string= arg "--timeout-ms")
+           (setf debug t)
+           (let* ((raw (pop args))
+                  (n (and raw (ignore-errors
+                               (parse-integer raw :junk-allowed nil)))))
+             (unless (integerp n)
+               (log-error "Invalid integer for --timeout-ms: ~A" raw)
+               (return-from %bridge-eval 1))
+             (setf timeout-ms n)))
+          ((string= arg "--pretty"))   ; human is the default
           ((null form) (setf form arg))
           (t
            (log-error "Unknown eval option: ~A" arg)
@@ -2134,158 +2194,63 @@ are read+evaluated daemon-side at recovery time."
     (multiple-value-bind (project-root sock pid)
         (%bridge-resolve-project)
       (unless project-root (return-from %bridge-eval 1))
-      (let* ((params (%bridge-make-params
-                      (list (cons "form" form)
-                            (cons "package" package)
-                            (cons "worker" worker)
-                            (cons "debug" (when debug t))
-                            (cons "handlers"
-                                  (when handlers
-                                    (list :array (nreverse handlers)))))))
-             (resp (%bridge-send-or-autostart sock pid project-root
-                                              "eval"
-                                              :params params
-                                              :autostart autostart)))
-        (cond
-          ((null resp) 2)
-          ((eq resp :no-daemon)
-           (log-error "Could not start daemon")
-           2)
-          ((eq resp :io-error)
-           (log-error "I/O error talking to daemon")
-           2)
-          (t
-           (cond
-             ((or json *bridge-cli-json*)
-              (%bridge-emit-json resp))
-             (t
-              (%bridge-pretty-print resp *standard-output*)))
-           (if (assoc "error" (cadr resp) :test #'string=) 1 0)))))))
-
-(defun %bridge-render-ping (obj)
-  "Render a ping result obj to *standard-output*."
-  (format t "pid:    ~A~%lisp:   ~A~%uptime: ~,1Fs~%evals:  ~A~%recent errors: ~A~%"
-          (%bridge-field obj "pid")
-          (%bridge-field obj "lisp")
-          (/ (or (%bridge-field obj "uptime_ms") 0) 1000.0)
-          (%bridge-field obj "eval_count")
-          (%bridge-field obj "recent_error_count"))
-  (let* ((counts (%bridge-unwrap (%bridge-field obj "method_counts"))))
-    (when counts
-      (format t "method counts:~%")
-      (dolist (cell (sort (copy-list counts) #'string< :key #'car))
-        (let* ((name (car cell))
-               (mobj (%bridge-unwrap (cdr cell)))
-               (total (%bridge-field mobj "total"))
-               (errors (%bridge-field mobj "errors")))
-          (format t "  ~24A total=~A errors=~A~%"
-                  name (or total 0) (or errors 0)))))))
-
-(defun %bridge-simple-method (method &key (renderer nil) params)
-  "Send a request and print the response. Returns rc.
-
-PARAMS, when supplied, is a JSON object (`(:object ...)') forwarded as
-the request `params'. RENDERER, when supplied, is called with the
-parsed result object to emit human output (overriding the default JSON
-dump)."
-  (multiple-value-bind (project-root sock)
-      (%bridge-resolve-project)
-    (unless project-root (return-from %bridge-simple-method 1))
-    (let ((resp (clpm.repl-bridge:send-request sock method
-                                               :params params
-                                               :connect-timeout 1)))
       (cond
-        ((eq resp :no-daemon)
-         (log-error "No daemon running")
-         2)
-        ((eq resp :io-error)
-         (log-error "I/O error talking to daemon")
-         2)
-        (*bridge-cli-json*
-         (%bridge-emit-json resp)
-         (if (%bridge-err resp) 1 0))
-        ((%bridge-err resp) (%bridge-render-error resp))
-        (renderer
-         (funcall renderer (%bridge-obj resp))
-         0)
-        (t
-         (%bridge-emit-json resp)
-         0)))))
-
-(defun %bridge-methods (args)
-  "Print the daemon's RPC method table as a human-readable list. With
-no args, just prints names + summaries. With one arg (a method name),
-prints the long-form doc plus its parameters."
-  (let ((wanted (first args)))
-    (multiple-value-bind (project-root sock)
-        (%bridge-resolve-project)
-      (unless project-root (return-from %bridge-methods 1))
-      (cond
-        (wanted
-         (let ((resp (clpm.repl-bridge:send-request
-                      sock "help"
-                      :params (list :object (list (cons "method" wanted)))
-                      :connect-timeout 1)))
+        (debug
+         (let ((*bridge-cli-json* (or *bridge-cli-json* json))
+               (conn (clpm.repl-bridge:open-connection sock :connect-timeout 5)))
+           (when (and (eq conn :no-daemon) autostart)
+             (let ((rc (%bridge-daemon-start (list "--detach"))))
+               (declare (ignore rc))
+               (setf conn (clpm.repl-bridge:open-connection
+                           sock :connect-timeout 5))))
            (cond
-             ((eq resp :no-daemon) (log-error "No daemon running") 2)
-             ((eq resp :io-error) (log-error "I/O error talking to daemon") 2)
-             ((assoc "error" (cadr resp) :test #'string=)
-              (when *bridge-cli-json* (%bridge-emit-json resp))
-              (let ((err (cdr (assoc "error" (cadr resp) :test #'string=))))
-                (unless *bridge-cli-json*
-                  (format *error-output* "~A~%"
-                          (or (cdr (assoc "message" (cadr err)
-                                           :test #'string=))
-                              "unknown method"))))
-              1)
-             (*bridge-cli-json* (%bridge-emit-json resp) 0)
+             ((eq conn :no-daemon)
+              (log-error "No daemon running and autostart is disabled or failed")
+              2)
              (t
-              (let* ((result (cdr (assoc "result" (cadr resp) :test #'string=)))
-                     (outer (and result (cadr result)))
-                     (method-cell (and outer (cdr (assoc "method" outer :test #'string=))))
-                     (obj (and method-cell (cadr method-cell)))
-                     (name (and obj (cdr (assoc "name" obj :test #'string=))))
-                     (summary (and obj (cdr (assoc "summary" obj :test #'string=))))
-                     (doc (and obj (cdr (assoc "doc" obj :test #'string=))))
-                     (params (and obj (cdr (assoc "params" obj :test #'string=)))))
-                (format t "~A~@[ -- ~A~]~%" name summary)
-                (when (and doc (plusp (length doc)))
-                  (format t "~%~A~%" doc))
-                (when (and (consp params) (eq (car params) :array))
-                  (format t "~%parameters:~%")
-                  (dolist (p (cadr params))
-                    (let* ((pobj (cadr p))
-                           (pn (cdr (assoc "name" pobj :test #'string=)))
-                           (pt (cdr (assoc "type" pobj :test #'string=)))
-                           (req (cdr (assoc "required" pobj :test #'string=)))
-                           (pd (cdr (assoc "description" pobj :test #'string=))))
-                      (format t "  ~A: ~A~:[~; (required)~]~@[ -- ~A~]~%"
-                              pn (or pt "?") req pd))))
-                0)))))
+              (let ((opts (list :package package
+                                :worker worker
+                                :restart restart
+                                :arg (nreverse restart-args)
+                                :frame frame
+                                :frame-eval frame-eval
+                                :abort abort
+                                :keep keep
+                                :break-on break-on
+                                :timeout-ms timeout-ms
+                                :handlers (and handlers
+                                               (list :array
+                                                     (nreverse handlers))))))
+                (unwind-protect
+                     (%bridge-debug-on-connection conn opts form)
+                  (clpm.repl-bridge:close-connection conn)))))))
         (t
-         (let ((resp (clpm.repl-bridge:send-request
-                      sock "methods" :connect-timeout 1)))
+         (let* ((params (%bridge-make-params
+                         (list (cons "form" form)
+                               (cons "package" package)
+                               (cons "worker" worker)
+                               (cons "handlers"
+                                     (when handlers
+                                       (list :array (nreverse handlers)))))))
+                (resp (%bridge-send-or-autostart sock pid project-root
+                                                 "eval"
+                                                 :params params
+                                                 :autostart autostart)))
            (cond
-             ((eq resp :no-daemon) (log-error "No daemon running") 2)
-             ((eq resp :io-error) (log-error "I/O error talking to daemon") 2)
-             (*bridge-cli-json* (%bridge-emit-json resp) 0)
+             ((null resp) 2)
+             ((eq resp :no-daemon)
+              (log-error "Could not start daemon")
+              2)
+             ((eq resp :io-error)
+              (log-error "I/O error talking to daemon")
+              2)
              (t
-              (let* ((result (cdr (assoc "result" (cadr resp) :test #'string=)))
-                     (obj (and result (cadr result)))
-                     (entries (and obj (cdr (assoc "methods" obj
-                                                    :test #'string=))))
-                     (items (and (consp entries) (eq (car entries) :array)
-                                 (cadr entries)))
-                     (sorted (sort (copy-list items) #'string<
-                                   :key (lambda (e)
-                                          (cdr (assoc "name" (cadr e)
-                                                       :test #'string=))))))
-                (dolist (m sorted)
-                  (let* ((mobj (cadr m))
-                         (n (cdr (assoc "name" mobj :test #'string=)))
-                         (s (cdr (assoc "summary" mobj :test #'string=))))
-                    (format t "~A~:[~;: ~A~]~%" n s s)))
-                0)))))))))
+              (cond
+                ((or json *bridge-cli-json*)
+                 (%bridge-emit-json resp))
+                (t
+                 (%bridge-pretty-print resp *standard-output*)))
+              (if (assoc "error" (cadr resp) :test #'string=) 1 0)))))))))
 
 (defun %bridge-status (args)
   (declare (ignore args))
@@ -2347,7 +2312,7 @@ prints the long-form doc plus its parameters."
                    (emit-json "unresponsive" "pid" existing))
                   (t
                    (format t "running but unresponsive (pid ~D)~%" existing)
-                   (format t "  try: clpm repl-bridge stop~%")))
+                   (format t "  try: clpm repl-bridge daemon --stop~%")))
                 0)))))))))
 
 (defun %json-object* (kv-list)
@@ -2404,6 +2369,29 @@ are dropped, matching `%bridge-make-params'."
          (ignore-errors (delete-file sock))
          (format t "stopped~%")
          0)))))
+
+(defun %bridge-daemon (args)
+  "Lifecycle command for the repl-bridge daemon.
+
+`daemon' is the only public lifecycle constructor: bare `daemon' starts
+foreground, `--detach' starts background, `--status' observes state, and
+`--stop' requests shutdown."
+  (let ((status nil)
+        (stop nil)
+        (start-args '()))
+    (loop while args do
+      (let ((arg (pop args)))
+        (cond
+          ((string= arg "--status") (setf status t))
+          ((string= arg "--stop") (setf stop t))
+          (t (push arg start-args)))))
+    (when (and status stop)
+      (log-error "Use only one of --status or --stop")
+      (return-from %bridge-daemon 1))
+    (cond
+      (status (%bridge-status '()))
+      (stop (%bridge-stop '()))
+      (t (%bridge-daemon-start (nreverse start-args))))))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Generic helpers used by the new single-shot CLI surface.
@@ -2467,7 +2455,7 @@ can pass through optional flags safely)."
   "Wrap a Lisp list of strings as a JSON array for params."
   (list :array (coerce raw 'list)))
 
-(defun %bridge-rpc (method &key params (autostart t))
+(defun %bridge-rpc (method &key params (autostart t) on-event)
   "Project-aware RPC entry point.
 
 Resolves the project, optionally autostarts the daemon, sends METHOD
@@ -2482,7 +2470,8 @@ printing the appropriate user-visible error."
       (return-from %bridge-rpc (values nil nil nil nil nil)))
     (let ((resp (%bridge-send-or-autostart sock pid project-root method
                                             :params params
-                                            :autostart autostart)))
+                                            :autostart autostart
+                                            :on-event on-event)))
       (values resp project-root sock pid log))))
 
 (defun %bridge-render-error (resp)
@@ -2490,7 +2479,7 @@ printing the appropriate user-visible error."
   (cond
     ((null resp) 2)
     ((eq resp :no-daemon)
-     (log-error "No daemon running and could not auto-start (try `clpm repl-bridge serve')")
+     (log-error "No daemon running and could not auto-start (try `clpm repl-bridge daemon --detach')")
      2)
     ((eq resp :io-error)
      (log-error "I/O error talking to daemon")
@@ -2507,1036 +2496,118 @@ printing the appropriate user-visible error."
   (clpm.io.json:write-json resp *standard-output*)
   (terpri *standard-output*))
 
-(defun %bridge-finish (resp human-renderer)
-  "Common tail for subcommands.
+(defun %bridge-param-flag-name (flag)
+  "Map a CLI flag name to a daemon JSON parameter name."
+  (substitute #\_ #\- flag))
 
-If `*bridge-cli-json*' is bound, print raw JSON regardless. Otherwise
-invoke HUMAN-RENDERER on the parsed result object (or render the
-error). Returns the exit code."
+(defun %bridge-parse-call-value (text)
+  "Parse TEXT as JSON when possible, otherwise treat it as a string.
+
+This lets `call gc --full true' pass a boolean and
+`call eval --form \"(+ 1 2)\"' pass a plain string without requiring
+quotes around every non-JSON atom."
+  (handler-case
+      (clpm.io.json:read-json-from-string text)
+    (error () text)))
+
+(defun %bridge-object-alist-or-error (json label)
+  "Return JSON object's alist, or signal a user-facing parse error."
   (cond
-    ((or (null resp) (eq resp :no-daemon) (eq resp :io-error))
-     (%bridge-render-error resp))
-    ((%bridge-err resp)
-     (when *bridge-cli-json* (%bridge-emit-json resp))
-     (unless *bridge-cli-json* (%bridge-render-error resp))
-     1)
-    (*bridge-cli-json*
-     (%bridge-emit-json resp)
-     0)
+    ((null json) nil)
+    ((and (consp json) (eq (car json) :object))
+     (cadr json))
     (t
-     (let ((warning (%bridge-warning resp)))
-       (when (and warning (stringp warning))
-         (format *error-output* "warning: ~A~%" warning)))
-     (let ((obj (%bridge-obj resp)))
-       (funcall human-renderer obj))
-     0)))
+     (log-error "~A must be a JSON object" label)
+     :error)))
 
-(defmacro %bridge-with-call ((obj-var method &key params autostart) &body body)
-  "Run METHOD via `%bridge-rpc' and bind OBJ-VAR to the parsed result.
+(defun %bridge-put-param (alist name value)
+  "Return ALIST with NAME bound to VALUE, preserving first-insertion order."
+  (let ((cell (assoc name alist :test #'string=)))
+    (cond
+      (cell (setf (cdr cell) value) alist)
+      (t (append alist (list (cons name value)))))))
 
-If the call fails or returns an error, the macro short-circuits with
-the appropriate non-zero exit code; BODY only runs on success and is
-responsible for printing human output. JSON mode is honored
-automatically (raw JSON is emitted before BODY runs)."
-  (let ((resp (gensym "RESP"))
-        (block-name (gensym "BLOCK")))
-    `(block ,block-name
-       (let ((,resp (%bridge-rpc ,method
-                                  :params ,params
-                                  ,@(when autostart `(:autostart ,autostart)))))
-         (cond
-           ((or (null ,resp) (eq ,resp :no-daemon) (eq ,resp :io-error))
-            (return-from ,block-name (%bridge-render-error ,resp)))
-           ((%bridge-err ,resp)
-            (when *bridge-cli-json* (%bridge-emit-json ,resp))
-            (unless *bridge-cli-json* (%bridge-render-error ,resp))
-            (return-from ,block-name 1))
-           (*bridge-cli-json*
-            (%bridge-emit-json ,resp)
-            (return-from ,block-name 0))
-           (t
-            (let ((warning (%bridge-warning ,resp)))
-              (when (and warning (stringp warning))
-                (format *error-output* "warning: ~A~%" warning)))
-            (let ((,obj-var (%bridge-obj ,resp)))
-              ,@body
-              0)))))))
+(defun %bridge-call-params-object (alist)
+  "Build params for `call', preserving explicit JSON null values."
+  (when alist
+    (list :object alist)))
 
-;;; ----------------------------------------------------------------------------
-;;; Arg parsing helpers for subcommands.
+(defun %bridge-split-param-flag (arg)
+  "Return (values NAME VALUE HAS-INLINE-VALUE) for a --name or --name=value arg."
+  (let* ((body (subseq arg 2))
+         (eq-pos (position #\= body)))
+    (cond
+      (eq-pos
+       (values (subseq body 0 eq-pos)
+               (subseq body (1+ eq-pos))
+               t))
+      (t
+       (values body nil nil)))))
 
-(defun %bridge-collect-rest (args)
-  "Collect remaining positional arguments, skipping the first `--' sentinel."
-  (let ((seen-sep nil) (out '()))
+(defun %bridge-call (args)
+  "Generic typed method constructor for `clpm repl-bridge call METHOD ...'."
+  (let ((method (pop args))
+        (autostart t)
+        (params '()))
+    (unless method
+      (log-error "Usage: clpm repl-bridge call METHOD [--params-json JSON] [--PARAM VALUE]...")
+      (return-from %bridge-call 1))
     (loop while args do
       (let ((arg (pop args)))
         (cond
-          ((and (not seen-sep) (string= arg "--")) (setf seen-sep t))
-          (t (push arg out)))))
-    (nreverse out)))
-
-(defun %bridge-parse-flags (args specs)
-  "Tiny argument parser.
-
-SPECS is an alist of (FLAG . KIND); KIND is one of:
-  :flag        -- boolean, default NIL, set to T when present.
-  :string      -- takes the next arg as a string.
-  :integer     -- next arg parsed as integer.
-  :list-string -- repeated; accumulates into a list.
-Each FLAG is matched against `--name'. The function returns
-(values plist positional) where plist maps (intern FLAG) to its
-parsed value. Positional are everything that isn't a recognized flag,
-*including* anything after a `--' sentinel."
-  (let ((plist '()) (positional '()) (sep nil))
-    (loop while args do
-      (let* ((arg (pop args)))
-        (cond
-          ((and (not sep) (string= arg "--")) (setf sep t))
-          ((and (not sep) (> (length arg) 2) (string= "--" (subseq arg 0 2)))
-           (let* ((name (subseq arg 2))
-                  (cell (assoc name specs :test #'string=)))
-             (cond
-               ((null cell)
-                (push arg positional))
-               (t
-                (ecase (cdr cell)
-                  (:flag
-                   (setf (getf plist (intern (string-upcase name) :keyword)) t))
-                  (:string
-                   (when (null args)
-                     (log-error "Missing value for --~A" name)
-                     (return-from %bridge-parse-flags (values nil nil)))
-                   (setf (getf plist (intern (string-upcase name) :keyword))
-                         (pop args)))
-                  (:integer
-                   (when (null args)
-                     (log-error "Missing value for --~A" name)
-                     (return-from %bridge-parse-flags (values nil nil)))
-                   (let* ((raw (pop args))
-                          (n (ignore-errors (parse-integer raw :junk-allowed nil))))
-                     (unless (integerp n)
-                       (log-error "Invalid integer for --~A: ~A" name raw)
-                       (return-from %bridge-parse-flags (values nil nil)))
-                     (setf (getf plist (intern (string-upcase name) :keyword)) n)))
-                  (:list-string
-                   (when (null args)
-                     (log-error "Missing value for --~A" name)
-                     (return-from %bridge-parse-flags (values nil nil)))
-                   (let ((key (intern (string-upcase name) :keyword)))
-                     (setf (getf plist key)
-                           (append (getf plist key) (list (pop args)))))))))))
-          (t (push arg positional)))))
-    (values plist (nreverse positional))))
+          ((string= arg "--no-autostart")
+           (setf autostart nil))
+          ((string= arg "--params-json")
+           (let ((raw (pop args)))
+             (unless (stringp raw)
+               (log-error "Missing value for --params-json")
+               (return-from %bridge-call 1))
+             (let ((parsed (handler-case
+                               (clpm.io.json:read-json-from-string raw)
+                             (error (c)
+                               (log-error "Invalid --params-json: ~A" c)
+                               :error))))
+               (when (eq parsed :error)
+                 (return-from %bridge-call 1))
+               (let ((alist (%bridge-object-alist-or-error
+                             parsed "--params-json")))
+                 (when (eq alist :error)
+                   (return-from %bridge-call 1))
+                 (dolist (cell alist)
+                   (setf params (%bridge-put-param
+                                 params (car cell) (cdr cell))))))))
+          ((and (> (length arg) 2)
+                (string= "--" (subseq arg 0 2)))
+           (multiple-value-bind (name inline-value inline?)
+               (%bridge-split-param-flag arg)
+             (when (zerop (length name))
+               (log-error "Bad empty parameter flag")
+               (return-from %bridge-call 1))
+             (let ((raw (if inline? inline-value (pop args))))
+               (unless (stringp raw)
+                 (log-error "Missing value for --~A" name)
+                 (return-from %bridge-call 1))
+               (setf params
+                     (%bridge-put-param params
+                                        (%bridge-param-flag-name name)
+                                        (%bridge-parse-call-value raw))))))
+          (t
+           (log-error "Unexpected call argument: ~A" arg)
+           (return-from %bridge-call 1)))))
+    (multiple-value-bind (resp)
+        (%bridge-rpc method
+                     :params (%bridge-call-params-object params)
+                     :autostart autostart
+                     :on-event #'%bridge-emit-json)
+      (cond
+        ((or (null resp) (eq resp :no-daemon) (eq resp :io-error))
+         (%bridge-render-error resp))
+        (t
+         (%bridge-emit-json resp)
+         (if (%bridge-err resp) 1 0))))))
 
 ;;; ----------------------------------------------------------------------------
-;;; New CLI subcommand renderers.
-
-(defun %bridge-print-kv (obj keys &optional (stream *standard-output*))
-  "Render selected KEYS from a JSON object alist OBJ as `key: value' lines.
-
-KEYS is a list of (json-key human-label) or just a string (used both
-ways). Missing/NIL values are skipped. Numeric values are printed
-faithfully; nested objects/arrays fall back to JSON for now."
-  (dolist (k keys)
-    (let* ((json-key (if (stringp k) k (first k)))
-           (label    (if (stringp k) k (second k)))
-           (val (%bridge-field obj json-key)))
-      (cond
-        ((null val))
-        ((or (stringp val) (numberp val) (eq val t) (eq val nil))
-         (format stream "~A: ~A~%" label val))
-        (t
-         (format stream "~A: " label)
-         (clpm.io.json:write-json val stream)
-         (terpri stream))))))
-
-(defun %bridge-cmd-image-info (args)
-  "`clpm repl-bridge image-info' -- print daemon vitals."
-  (declare (ignore args))
-  (%bridge-with-call (obj "image-info")
-    (%bridge-print-kv obj
-                      '("pid" "lisp" "uptime_ms"
-                        "default_pathname" "working_directory"
-                        "bytes_consed" "gc_run_time" "eval_count"))
-    (let ((features (%bridge-field obj "features")))
-      (when (and (consp features) (eq (car features) :array))
-        (format t "features: ~D~%" (length (cadr features)))))))
-
-(defun %bridge-cmd-list-packages (args)
-  "`clpm repl-bridge list-packages [--limit N]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("limit" . :integer)))
-    (declare (ignore pos))
-    (%bridge-with-call (obj "list-packages")
-      (let* ((entries (%bridge-array-items (%bridge-field obj "entries")))
-             (limit (getf opts :limit))
-             (sorted (sort (copy-list entries) #'string<
-                           :key (lambda (e) (%bridge-field (cadr e) "name"))))
-             (rows (if limit (subseq sorted 0 (min (length sorted) limit)) sorted)))
-        (format t "~D packages~%" (length sorted))
-        (dolist (e rows)
-          (let* ((o (cadr e))
-                 (n (%bridge-field o "name"))
-                 (ext (%bridge-field o "external"))
-                 (int (%bridge-field o "internal"))
-                 (nicks (%bridge-array-items (%bridge-field o "nicknames"))))
-            (format t "  ~A (ext ~A, int ~A)~@[ aka ~{~A~^, ~}~]~%"
-                    n ext int
-                    (mapcar (lambda (x) (or x "?")) nicks))))))))
-
-(defun %bridge-cmd-loaded-systems (args)
-  "`clpm repl-bridge loaded-systems'."
-  (declare (ignore args))
-  (%bridge-with-call (obj "loaded-systems")
-    (let ((entries (%bridge-array-items (%bridge-field obj "entries"))))
-      (format t "~D systems loaded~%" (length entries))
-      (dolist (e entries)
-        (let ((o (cadr e)))
-          (format t "  ~A~@[ ~A~]~%"
-                  (%bridge-field o "name")
-                  (%bridge-field o "version")))))))
-
-(defun %bridge-cmd-describe-system (args)
-  "`clpm repl-bridge describe-system NAME'."
-  (let ((name (first args)))
-    (unless name
-      (log-error "Usage: clpm repl-bridge describe-system NAME")
-      (return-from %bridge-cmd-describe-system 1))
-    (%bridge-with-call (obj "describe-system"
-                            :params (%bridge-make-params
-                                     (list (cons "name" name))))
-      (%bridge-print-kv obj '("name" "version" "description"
-                              ("source_directory" "source")
-                              "license" "author"))
-      (let ((deps (%bridge-array-items (%bridge-field obj "depends_on"))))
-        (when deps
-          (format t "depends_on: ~{~A~^ ~}~%"
-                  (remove nil deps)))))))
-
-(defun %bridge-cmd-package-info (args)
-  "`clpm repl-bridge package-info NAME'."
-  (let ((name (first args)))
-    (unless name
-      (log-error "Usage: clpm repl-bridge package-info NAME")
-      (return-from %bridge-cmd-package-info 1))
-    (%bridge-with-call (obj "package-info"
-                            :params (%bridge-make-params
-                                     (list (cons "name" name))))
-      (%bridge-print-kv obj '("name"))
-      (let ((nicks (%bridge-array-items (%bridge-field obj "nicknames"))))
-        (when nicks (format t "nicknames: ~{~A~^, ~}~%" nicks)))
-      (let ((use (%bridge-array-items (%bridge-field obj "use"))))
-        (when use (format t "use: ~{~A~^, ~}~%" use)))
-      (let ((ub (%bridge-array-items (%bridge-field obj "used_by"))))
-        (when ub (format t "used_by: ~{~A~^, ~}~%" ub)))
-      (let ((ext (or (%bridge-field obj "export_count")
-                     (%bridge-field obj "external_count"))))
-        (when ext (format t "exports: ~A~%" ext)))
-      (let ((head (%bridge-array-items (%bridge-field obj "exports_head"))))
-        (when head (format t "exports_head: ~{~A~^, ~}~%" head))))))
-
-(defun %bridge-cmd-current-package (args)
-  "`clpm repl-bridge current-package [--worker NAME]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("worker" . :string)))
-    (declare (ignore pos))
-    (%bridge-with-call (obj "current-package"
-                            :params (%bridge-make-params
-                                     (list (cons "worker" (getf opts :worker)))))
-      (format t "~A~%" (%bridge-field obj "package")))))
-
-(defun %bridge-cmd-set-package (args)
-  "`clpm repl-bridge set-package NAME [--worker W]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("worker" . :string)))
-    (let ((name (first pos)))
-      (unless name
-        (log-error "Usage: clpm repl-bridge set-package NAME [--worker W]")
-        (return-from %bridge-cmd-set-package 1))
-      (%bridge-with-call (obj "set-package"
-                              :params (%bridge-make-params
-                                       (list (cons "name" name)
-                                             (cons "worker" (getf opts :worker)))))
-        (format t "package: ~A~%" (%bridge-field obj "package"))))))
-
-(defun %bridge-cmd-apropos (args)
-  "`clpm repl-bridge apropos PATTERN [--package P]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)))
-    (let ((pat (first pos)))
-      (unless pat
-        (log-error "Usage: clpm repl-bridge apropos PATTERN [--package P]")
-        (return-from %bridge-cmd-apropos 1))
-      (%bridge-with-call (obj "apropos"
-                              :params (%bridge-make-params
-                                       (list (cons "pattern" pat)
-                                             (cons "package" (getf opts :package)))))
-        (let ((entries (%bridge-array-items (%bridge-field obj "entries"))))
-          (format t "~D matches~%" (length entries))
-          (dolist (e entries)
-            (let* ((o (cadr e))
-                   (name (%bridge-field o "name"))
-                   (pkg (%bridge-field o "package"))
-                   (kinds (%bridge-array-items (%bridge-field o "kinds")))
-                   (external (%bridge-field o "external")))
-              (format t "  ~A:~A~@[ [~{~A~^,~}]~]~:[~; (ext)~]~%"
-                      pkg name kinds external))))))))
-
-(defun %bridge-cmd-complete-symbol (args)
-  "`clpm repl-bridge complete-symbol PREFIX [--package P] [--limit N]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)
-                                   ("limit" . :integer)))
-    (let ((pre (first pos)))
-      (unless pre
-        (log-error "Usage: clpm repl-bridge complete-symbol PREFIX [--package P] [--limit N]")
-        (return-from %bridge-cmd-complete-symbol 1))
-      (%bridge-with-call (obj "complete-symbol"
-                              :params (%bridge-make-params
-                                       (list (cons "prefix" pre)
-                                             (cons "package" (getf opts :package))
-                                             (cons "limit" (getf opts :limit)))))
-        (let ((cands (%bridge-array-items (%bridge-field obj "candidates")))
-              (total (%bridge-field obj "total"))
-              (truncated (%bridge-field obj "truncated")))
-          (cond
-            ((null cands)
-             ;; Mirror `apropos': a zero-match result must be observable
-             ;; on its own. Otherwise empty stdout is indistinguishable
-             ;; from "the CLI silently dropped the request".
-             (format t "0 candidates~%"))
-            (t
-             (dolist (s cands)
-               (when (stringp s) (format t "~A~%" s)))
-             (when (and total
-                        (or truncated
-                            (and (numberp total) (> total (length cands)))))
-               (format t "~&;; ~A total~:[~;, truncated~]~%" total truncated)))))))))
-
-(defun %bridge-cmd-arglist (args)
-  "`clpm repl-bridge arglist SYMBOL [--package P]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)))
-    (let ((sym (first pos)))
-      (unless sym
-        (log-error "Usage: clpm repl-bridge arglist SYMBOL [--package P]")
-        (return-from %bridge-cmd-arglist 1))
-      (%bridge-with-call (obj "arglist"
-                              :params (%bridge-make-params
-                                       (list (cons "symbol" sym)
-                                             (cons "package" (getf opts :package)))))
-        (format t "~A~%" (%bridge-render-arglist
-                          (%bridge-field obj "arglist")))))))
-
-(defun %bridge-render-arglist (raw)
-  "Normalize an arglist string for human output.
-Daemon returns the prin1'd lambda list; for zero-arg functions that's
-`\"NIL\"', which is technically correct but jarring. Map it to `()'."
-  (cond
-    ((null raw) "(no arglist)")
-    ((or (string= raw "NIL") (string= raw "nil")) "()")
-    (t raw)))
-
-(defun %bridge-cmd-doc (args)
-  "`clpm repl-bridge doc SYMBOL [--type T] [--package P]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)
-                                   ("type" . :string)))
-    (let ((sym (first pos))
-          (type (or (getf opts :type) "function")))
-      (unless sym
-        (log-error "Usage: clpm repl-bridge doc SYMBOL [--type T] [--package P]")
-        (return-from %bridge-cmd-doc 1))
-      (%bridge-with-call (obj "documentation"
-                              :params (%bridge-make-params
-                                       (list (cons "symbol" sym)
-                                             (cons "type" type)
-                                             (cons "package" (getf opts :package)))))
-        (let ((doc (or (%bridge-field obj "doc")
-                       (%bridge-field obj "documentation"))))
-          (format t "~A~%" (or doc "(no documentation)")))))))
-
-(defun %bridge-cmd-disassemble (args)
-  "`clpm repl-bridge disassemble SYMBOL [--package P]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)))
-    (let ((sym (first pos)))
-      (unless sym
-        (log-error "Usage: clpm repl-bridge disassemble SYMBOL [--package P]")
-        (return-from %bridge-cmd-disassemble 1))
-      (%bridge-with-call (obj "disassemble"
-                              :params (%bridge-make-params
-                                       (list (cons "symbol" sym)
-                                             (cons "package" (getf opts :package)))))
-        (format t "~A~%" (or (%bridge-field obj "output")
-                             (%bridge-field obj "text")
-                             ""))))))
-
-(defun %bridge-cmd-function-info (args)
-  "`clpm repl-bridge function-info SYMBOL [--package P]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)))
-    (let ((sym (first pos)))
-      (unless sym
-        (log-error "Usage: clpm repl-bridge function-info SYMBOL [--package P]")
-        (return-from %bridge-cmd-function-info 1))
-      (%bridge-with-call (obj "function-info"
-                              :params (%bridge-make-params
-                                       (list (cons "symbol" sym)
-                                             (cons "package" (getf opts :package)))))
-        (%bridge-print-kv obj '("name" "package"))
-        (let ((al (%bridge-field obj "arglist")))
-          (when al
-            (format t "arglist: ~A~%" (%bridge-render-arglist al))))
-        (%bridge-print-kv obj '("documentation"
-                                "ftype" "inline" "macro" "generic"))))))
-
-(defun %bridge-cmd-class-info (args)
-  "`clpm repl-bridge class-info NAME [--package P]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)))
-    (let ((name (first pos)))
-      (unless name
-        (log-error "Usage: clpm repl-bridge class-info NAME [--package P]")
-        (return-from %bridge-cmd-class-info 1))
-      (%bridge-with-call (obj "class-info"
-                              :params (%bridge-make-params
-                                       (list (cons "name" name)
-                                             (cons "package" (getf opts :package)))))
-        (%bridge-print-kv obj '("name" "package" "metaclass" "documentation"))
-        (let ((supers (%bridge-array-items
-                       (or (%bridge-field obj "direct_supers")
-                           (%bridge-field obj "direct_superclasses"))))
-              (subs (%bridge-array-items
-                     (or (%bridge-field obj "direct_subs")
-                         (%bridge-field obj "direct_subclasses"))))
-              (prec (%bridge-array-items (%bridge-field obj "precedence")))
-              (slots (%bridge-array-items (%bridge-field obj "slots"))))
-          (when supers (format t "supers: ~{~A~^, ~}~%" (remove nil supers)))
-          (when subs (format t "subs:   ~{~A~^, ~}~%" (remove nil subs)))
-          (when prec (format t "precedence: ~{~A~^, ~}~%" (remove nil prec)))
-          (when slots
-            (format t "slots:~%")
-            (dolist (s slots)
-              (let ((so (cadr s)))
-                (format t "  ~A :type ~A :alloc ~A~%"
-                        (%bridge-field so "name")
-                        (or (%bridge-field so "type") "t")
-                        (or (%bridge-field so "allocation") ":instance"))))))))))
-
-(defun %bridge-cmd-find-definition (args)
-  "`clpm repl-bridge find-definition SYMBOL [--package P] [--kind K]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)
-                                   ("kind" . :string)))
-    (let ((sym (first pos)))
-      (unless sym
-        (log-error "Usage: clpm repl-bridge find-definition SYMBOL [--package P] [--kind K]")
-        (return-from %bridge-cmd-find-definition 1))
-      (%bridge-with-call (obj "find-definition"
-                              :params (%bridge-make-params
-                                       (list (cons "symbol" sym)
-                                             (cons "package" (getf opts :package))
-                                             (cons "kind" (getf opts :kind)))))
-        (let ((entries (%bridge-array-items (%bridge-field obj "entries"))))
-          (cond
-            ((null entries) (format t "(no definitions)~%"))
-            (t
-             (dolist (e entries)
-               (let* ((o (cadr e))
-                      (kind (%bridge-field o "kind"))
-                      (loc (%bridge-field o "location"))
-                      (lobj (and (consp loc) (eq (car loc) :object) (cadr loc)))
-                      (file (%bridge-field lobj "file"))
-                      (line (%bridge-field lobj "line"))
-                      (char (%bridge-field lobj "char_offset")))
-                 (cond
-                   ((and (stringp file) (plusp (length file)))
-                    (format t "~A  ~A~@[:~A~]~@[ #~A~]~%"
-                            (or kind "?") file
-                            (and (integerp line) (plusp line) line)
-                            (and (integerp char) (plusp char) char)))
-                   (t
-                    (format t "~A  (no source location)~%"
-                            (or kind "?")))))))))))))
-
-(defun %bridge-canon-xref-dir (dir)
-  "Normalize a user-supplied xref direction to the daemon's keyword name.
-\"calls\" is a friendlier alias for \"callers\"; everything else passes
-through. Unknown directions go to the daemon which will reject them
-with a clear protocol error."
-  (cond
-    ((null dir) dir)
-    ((string= dir "calls") "callers")
-    (t dir)))
-
-(defun %bridge-cmd-xref (args)
-  "`clpm repl-bridge xref SYMBOL --direction DIR [--package P]'.
-
-Aliases: who-calls (direction=calls), who-references (direction=references)."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)
-                                   ("direction" . :string)))
-    (let ((sym (first pos))
-          (dir (getf opts :direction)))
-      (unless (and sym dir)
-        (log-error "Usage: clpm repl-bridge xref SYMBOL --direction calls|references|sets|binds|macroexpands [--package P]")
-        (return-from %bridge-cmd-xref 1))
-      (%bridge-with-call (obj "xref"
-                              :params (%bridge-make-params
-                                       (list (cons "symbol" sym)
-                                             (cons "direction"
-                                                   (%bridge-canon-xref-dir dir))
-                                             (cons "package" (getf opts :package)))))
-        (let ((entries (%bridge-array-items (%bridge-field obj "entries"))))
-          (cond
-            ((null entries) (format t "(no xref)~%"))
-            (t
-             (dolist (e entries)
-               (let* ((o (cadr e))
-                      (name (%bridge-field o "name"))
-                      (loc (%bridge-field o "location"))
-                      (lobj (and (consp loc) (eq (car loc) :object) (cadr loc)))
-                      (file (%bridge-field lobj "file"))
-                      (line (%bridge-field lobj "line")))
-                 (format t "~A~@[  ~A~@[:~A~]~]~%" name file line))))))))))
-
-(defun %bridge-cmd-macroexpand (args)
-  "`clpm repl-bridge macroexpand FORM [--full] [--package P]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)
-                                   ("full" . :flag)))
-    (let ((form (first pos)))
-      (unless form
-        (log-error "Usage: clpm repl-bridge macroexpand FORM [--full] [--package P]")
-        (return-from %bridge-cmd-macroexpand 1))
-      (%bridge-with-call (obj "macroexpand"
-                              :params (%bridge-make-params
-                                       (list (cons "form" form)
-                                             (cons "recursive" (and (getf opts :full) t))
-                                             (cons "package" (getf opts :package)))))
-        (let* ((expansion (or (%bridge-field obj "form")
-                              (%bridge-field obj "expansion")
-                              ""))
-               (ep (%bridge-field obj "expanded_p")))
-          (format t "~A~%" expansion)
-          (cond
-            ((eq ep t))                          ; expanded -- the form
-                                                 ; speaks for itself.
-            ((null ep)
-             (format *error-output* "(not a macro)~%"))
-            ((not (eq ep t))
-             ;; surface unexpected boolean shapes for debugging
-             (format *error-output* "expanded_p: ~A~%" ep))))))))
-
-(defun %bridge-cmd-compile-file (args)
-  "`clpm repl-bridge compile-file PATH'."
-  (let ((path (first args)))
-    (unless path
-      (log-error "Usage: clpm repl-bridge compile-file PATH")
-      (return-from %bridge-cmd-compile-file 1))
-    (%bridge-with-call (obj "compile-file"
-                            :params (%bridge-make-params
-                                     (list (cons "path" path))))
-      (let* ((success (%bridge-field obj "success"))
-             (fasl (or (%bridge-field obj "output_truename")
-                       (%bridge-field obj "fasl")))
-             (warnings (%bridge-field obj "warnings_p"))
-             (failure (%bridge-field obj "failure_p"))
-             (diags (%bridge-array-items (%bridge-field obj "diagnostics"))))
-        (cond
-          ((eq success t)
-           (format t "compiled ~A~%" (or fasl path)))
-          ((or failure (null success))
-           (format *error-output* "FAILED to compile ~A~%" path)))
-        (cond
-          (diags
-           (dolist (d diags)
-             (let* ((o (cadr d))
-                    (sev (%bridge-field o "severity"))
-                    (msg (%bridge-field o "message")))
-               (format t "  ~A: ~A~%" sev msg))))
-          (t
-           ;; Daemon doesn't (yet) stream individual diagnostics;
-           ;; surface the rolled-up flags so the user knows whether
-           ;; compile-file's *compile-warnings* / *compile-failure*
-           ;; were tripped.
-           (when warnings
-             (format *error-output* "  (compile produced warnings)~%"))
-           (when failure
-             (format *error-output* "  (compile produced failures)~%"))))
-        ;; Non-zero exit if compile failed.
-        (when (or failure (and (null success) (null (eq success t))))
-          (return-from %bridge-cmd-compile-file 1))))))
-
-(defun %bridge-cmd-load-file (args)
-  "`clpm repl-bridge load-file PATH'."
-  (let ((path (first args)))
-    (unless path
-      (log-error "Usage: clpm repl-bridge load-file PATH")
-      (return-from %bridge-cmd-load-file 1))
-    (%bridge-with-call (obj "load-file"
-                            :params (%bridge-make-params
-                                     (list (cons "path" path))))
-      (format t "loaded ~A~%" (or (%bridge-field obj "path") path)))))
-
-(defun %bridge-cmd-gc (args)
-  "`clpm repl-bridge gc [--full]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("full" . :flag)))
-    (declare (ignore pos))
-    (%bridge-with-call (obj "gc"
-                            :params (%bridge-make-params
-                                     (list (cons "full" (and (getf opts :full) t)))))
-      (let ((before (%bridge-field obj "before_bytes"))
-            (after  (%bridge-field obj "after_bytes")))
-        (format t "~A gc:~%  consed before: ~A~%  consed after:  ~A~%"
-                (if (getf opts :full) "full" "minor") before after)))))
-
-(defun %bridge-cmd-time-eval (args)
-  "`clpm repl-bridge time-eval FORM [--package P]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)))
-    (let ((form (first pos)))
-      (unless form
-        (log-error "Usage: clpm repl-bridge time-eval FORM [--package P]")
-        (return-from %bridge-cmd-time-eval 1))
-      (%bridge-with-call (obj "time-eval"
-                              :params (%bridge-make-params
-                                       (list (cons "form" form)
-                                             (cons "package" (getf opts :package)))))
-        (let* ((timing (%bridge-field obj "timing"))
-               (tobj (and (consp timing) (eq (car timing) :object) (cadr timing))))
-          (%bridge-print-kv obj '("value"))
-          (when tobj
-            (%bridge-print-kv tobj
-                              '(("real_ms" "real_ms")
-                                ("run_ms" "run_ms")
-                                ("gc_real_ms" "gc_real_ms")
-                                ("bytes_consed" "bytes_consed")))))))))
-
-(defun %bridge-cmd-profile-eval (args)
-  "`clpm repl-bridge profile-eval FORM [--top N] [--mode M] [--package P]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)
-                                   ("mode" . :string)
-                                   ("top" . :integer)))
-    (let ((form (first pos)))
-      (unless form
-        (log-error "Usage: clpm repl-bridge profile-eval FORM [--top N] [--mode cpu|alloc] [--package P]")
-        (return-from %bridge-cmd-profile-eval 1))
-      (%bridge-with-call (obj "profile-eval"
-                              :params (%bridge-make-params
-                                       (list (cons "form" form)
-                                             (cons "mode" (getf opts :mode))
-                                             (cons "top" (getf opts :top))
-                                             (cons "package" (getf opts :package)))))
-        (let* ((value (%bridge-field obj "value"))
-               (profile (%bridge-unwrap (%bridge-field obj "profile")))
-               (entries (%bridge-array-items (%bridge-field profile "entries"))))
-          (when value (format t "value: ~A~%" value))
-          (dolist (e entries)
-            (let* ((eo (cadr e))
-                   (raw (%bridge-field eo "raw_report")))
-              (when raw (format t "~A~%" raw))))
-          (unless entries
-            (format t "(no profile samples; try increasing the workload)~%")))))))
-
-(defun %bridge-cmd-trace (args)
-  "`clpm repl-bridge trace SYMBOL... [--package P]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)))
-    (unless pos
-      (log-error "Usage: clpm repl-bridge trace SYMBOL... [--package P]")
-      (return-from %bridge-cmd-trace 1))
-    (%bridge-with-call (obj "trace"
-                            :params (%bridge-make-params
-                                     (list (cons "symbols" (%bridge-string-list pos))
-                                           (cons "package" (getf opts :package)))))
-      (let ((traced (%bridge-array-items (%bridge-field obj "traced"))))
-        (format t "traced: ~{~A~^, ~}~%" (or (remove nil traced) '("(none)"))))
-      (let ((missing (%bridge-array-items (%bridge-field obj "missing"))))
-        (when missing
-          (format *error-output* "missing: ~{~A~^, ~}~%"
-                  (remove nil missing)))))))
-
-(defun %bridge-cmd-untrace (args)
-  "`clpm repl-bridge untrace [SYMBOL...] [--package P]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("package" . :string)))
-    (%bridge-with-call (obj "untrace"
-                            :params (%bridge-make-params
-                                     (list (cons "symbols"
-                                                 (and pos (%bridge-string-list pos)))
-                                           (cons "package" (getf opts :package)))))
-      (let ((untraced (%bridge-array-items (%bridge-field obj "untraced"))))
-        (format t "untraced: ~{~A~^, ~}~%"
-                (or (remove nil untraced) '("(none)")))))))
-
-(defun %bridge-cmd-list-traced (args)
-  (declare (ignore args))
-  (%bridge-with-call (obj "list-traced")
-    (let ((entries (%bridge-array-items (%bridge-field obj "entries"))))
-      (cond
-        ((null entries) (format t "(no functions traced)~%"))
-        (t (dolist (s entries) (format t "~A~%" s)))))))
-
-(defun %bridge-cmd-list-workers (args)
-  (declare (ignore args))
-  (%bridge-with-call (obj "list-workers")
-    (let ((entries (%bridge-array-items (%bridge-field obj "entries"))))
-      (format t "~D worker~:P~%" (length entries))
-      (dolist (e entries)
-        (let* ((o (cadr e))
-               (n (%bridge-field o "name"))
-               (state (%bridge-field o "state"))
-               (pkg (%bridge-field o "package"))
-               (alive (%bridge-field o "alive"))
-               (age (%bridge-field o "age_seconds"))
-               (last-active (%bridge-field o "last_active_seconds_ago")))
-          (format t "  ~A  state=~A pkg=~A alive=~A age=~As idle=~As~%"
-                  n state pkg alive age last-active))))))
-
-(defun %bridge-cmd-kill-worker (args)
-  (let ((name (first args)))
-    (unless name
-      (log-error "Usage: clpm repl-bridge kill-worker NAME")
-      (return-from %bridge-cmd-kill-worker 1))
-    (%bridge-with-call (obj "kill-worker"
-                            :params (%bridge-make-params
-                                     (list (cons "name" name))))
-      ;; The daemon already reports `killed: false' when no worker by
-      ;; that name exists; without honoring that the CLI would claim
-      ;; success for typo'd names.
-      (cond
-        ((%bridge-field obj "killed")
-         (format t "killed worker ~A~%" name))
-        (t
-         (format *error-output* "no such worker: ~A~%" name)
-         (return-from %bridge-cmd-kill-worker 1))))))
-
-(defun %bridge-cmd-reset (args)
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("worker" . :string)))
-    (declare (ignore pos))
-    (%bridge-with-call (obj "reset"
-                            :params (%bridge-make-params
-                                     (list (cons "worker" (getf opts :worker)))))
-      (let ((outcome (%bridge-field obj "outcome"))
-            (worker (or (%bridge-field obj "worker") "default")))
-        (cond
-          ((string= outcome "reset")
-           (format t "reset worker ~A~%" worker))
-          ((string= outcome "spawned")
-           (format t "spawned fresh default worker ~A~%" worker))
-          ((string= outcome "no-such-worker")
-           (format *error-output* "no such worker: ~A~%" worker)
-           (return-from %bridge-cmd-reset 1))
-          (t
-           (format t "reset outcome=~A worker=~A~%"
-                   (or outcome "?") worker)))))))
-
-(defun %bridge-cmd-list-watches (args)
-  (declare (ignore args))
-  (%bridge-with-call (obj "list-watches")
-    (let ((entries (%bridge-array-items (%bridge-field obj "entries"))))
-      (cond
-        ((null entries) (format t "(no active watchers)~%"))
-        (t
-         (dolist (e entries)
-           (let* ((o (cadr e))
-                  (auto-revert (%bridge-field o "auto_revert"))
-                  (alive (%bridge-field o "alive")))
-             (format t "id=~A dir=~A glob=~A alive=~A~@[ auto-revert=t~]~%"
-                     (%bridge-field o "id")
-                     (%bridge-field o "dir")
-                     (or (%bridge-field o "glob") "*")
-                     (if alive "yes" "no")
-                     auto-revert))))))))
-
-(defun %bridge-cmd-interrupt (args)
-  "`clpm repl-bridge interrupt [--worker W]'. The daemon now reports an
-outcome that distinguishes a real interrupt from a no-op against an idle
-or non-existent worker, so the rc and message reflect what happened."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("worker" . :string)))
-    (declare (ignore pos))
-    (%bridge-with-call (obj "interrupt"
-                            :params (%bridge-make-params
-                                     (list (cons "worker"
-                                                 (getf opts :worker)))))
-      (let ((outcome (%bridge-field obj "outcome"))
-            (worker (or (%bridge-field obj "worker") "default")))
-        (cond
-          ((string= outcome "interrupted")
-           (format t "interrupted worker ~A~%" worker))
-          ((string= outcome "idle")
-           (format t "worker ~A is idle; nothing to interrupt~%" worker))
-          ((string= outcome "no-such-worker")
-           (format *error-output* "no such worker: ~A~%" worker)
-           (return-from %bridge-cmd-interrupt 1))
-          (t
-           (format t "interrupt outcome=~A worker=~A~%"
-                   (or outcome "?") worker)))))))
-
-(defun %bridge-cmd-unwatch (args)
-  (let* ((raw (first args))
-         (id (and raw (ignore-errors
-                       (parse-integer raw :junk-allowed nil)))))
-    (cond
-      ((null raw)
-       (log-error "Usage: clpm repl-bridge unwatch ID")
-       (return-from %bridge-cmd-unwatch 1))
-      ((null id)
-       (log-error "unwatch ID must be the integer id from list-watches; got ~S" raw)
-       (return-from %bridge-cmd-unwatch 1)))
-    (%bridge-with-call (obj "unwatch"
-                            :params (%bridge-make-params
-                                     (list (cons "id" id))))
-      ;; The daemon's `unwatch' is idempotent: unknown ids return
-      ;; `stopped: false'. Without honoring that here the CLI would
-      ;; claim "unwatched 99999" for a watch that never existed.
-      (cond
-        ((%bridge-field obj "stopped")
-         (format t "unwatched ~A~%" id))
-        (t
-         (format *error-output* "no active watch with id ~A~%" id)
-         (return-from %bridge-cmd-unwatch 1))))))
-
-(defun %bridge-render-watch-event (event)
-  "Render one watch-event JSON object as a single human-readable line.
-Falls back to dumping the raw event when the shape is unrecognized."
-  (let* ((eo (%bridge-unwrap event))
-         (kind (%bridge-field eo "event"))
-         (file (%bridge-field eo "file"))
-         (diags (%bridge-array-items (%bridge-field eo "diagnostics"))))
-    (cond
-      ((string= kind "watch-acknowledged")
-       (format t "watching ~A (glob=~A~@[ auto-revert~])~%"
-               (%bridge-field eo "dir")
-               (or (%bridge-field eo "glob") "*")
-               (%bridge-field eo "auto_revert")))
-      ((string= kind "watch-started"))   ; redundant with -acknowledged
-      ((string= kind "file-reloaded")
-       (format t "reloaded ~A~@[ (~A diag~:P)~]~%"
-               file (and diags (length diags))))
-      ((string= kind "reload-failed")
-       (format *error-output* "FAILED to reload ~A: ~A~%"
-               file (or (%bridge-field eo "message") "")))
-      ((string= kind "file-removed")
-       (format t "removed ~A~%" file))
-      ((string= kind "revert-applied")
-       (format t "reverted definitions from ~A~%" file))
-      (t (%bridge-emit-json event)))))
-
-(defun %bridge-cmd-watch (args)
-  "`clpm repl-bridge watch DIR [--glob G] [--auto-revert]'.
-
-Streams watch events to stdout until SIGINT or the daemon closes the
-stream. Default rendering is human-readable, one line per event;
-`--json' emits the raw event frames instead (one JSON object per
-line) for programmatic consumption."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("glob" . :string)
-                                   ("auto-revert" . :flag)))
-    (let ((dir (first pos)))
-      (unless dir
-        (log-error "Usage: clpm repl-bridge watch DIR [--glob G] [--auto-revert]")
-        (return-from %bridge-cmd-watch 1))
-      (multiple-value-bind (project-root sock pid)
-          (%bridge-resolve-project)
-        (declare (ignore pid))
-        (unless project-root (return-from %bridge-cmd-watch 1))
-        (let ((resp (clpm.repl-bridge:send-request
-                     sock "watch"
-                     :params (%bridge-make-params
-                              (list (cons "dir" dir)
-                                    (cons "glob" (getf opts :glob))
-                                    (cons "auto_revert"
-                                          (and (getf opts :auto-revert) t))))
-                     :on-event (lambda (event)
-                                 (cond
-                                   (*bridge-cli-json*
-                                    (%bridge-emit-json event))
-                                   (t
-                                    (%bridge-render-watch-event event)))
-                                 (force-output))
-                     :connect-timeout 5)))
-          (cond
-            ((or (eq resp :no-daemon) (eq resp :io-error))
-             (%bridge-render-error resp))
-            (*bridge-cli-json* (%bridge-emit-json resp) 0)
-            (t
-             (let ((obj (%bridge-obj resp)))
-               (format t "stopped (id=~A)~%" (%bridge-field obj "id"))
-               0))))))))
-
-;;; ----------------------------------------------------------------------------
-;;; Single-shot inspect with --path traversal.
-
-(defun %bridge-render-inspect-view (view)
-  "Print one inspector-view JSON object as human text."
-  (format t "session: ~A  depth: ~A~%"
-          (%bridge-field view "session")
-          (%bridge-field view "depth"))
-  (format t "type: ~A  kind: ~A~%"
-          (%bridge-field view "type")
-          (%bridge-field view "kind"))
-  (format t "value: ~A~%" (%bridge-field view "value_repr"))
-  (let ((parts (%bridge-array-items (%bridge-field view "parts"))))
-    (when parts
-      (format t "parts:~%")
-      (dolist (p parts)
-        (let ((po (cadr p)))
-          (format t "  [~A] ~A => ~A~%"
-                  (%bridge-field po "i")
-                  (or (%bridge-field po "label") "?")
-                  (%bridge-field po "repr"))))))
-  (format t "actions: ~{~A~^, ~}~%"
-          (%bridge-array-items (%bridge-field view "actions"))))
-
-(defun %bridge-cmd-inspect (args)
-  "`clpm repl-bridge inspect FORM [--path 0,1,2] [--eval FORM2]
-                                 [--package P] [--keep]'.
-
-By default the inspector session is opened, traversed by the optional
-path, the resulting view is printed, and the session is closed.
-
-With `--eval FORM2', after the path-walk evaluates FORM2 with `*'
-bound to the current focus and prints both the focus view and the
-inspect-eval result. Useful when you want to peek at a computed
-property of the focus without descending into it (e.g. \"how many
-slots does this object expose?\")."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("path" . :string)
-                                   ("eval" . :string)
-                                   ("package" . :string)
-                                   ("keep" . :flag)))
-    (let ((form (first pos)))
-      (unless form
-        (log-error "Usage: clpm repl-bridge inspect FORM [--path 0,1,2] [--eval FORM2] [--package P] [--keep]")
-        (return-from %bridge-cmd-inspect 1))
-      (multiple-value-bind (project-root sock)
-          (%bridge-resolve-project)
-        (unless project-root (return-from %bridge-cmd-inspect 1))
-        (let* ((open-resp (clpm.repl-bridge:send-request
-                           sock "inspect"
-                           :params (%bridge-make-params
-                                    (list (cons "form" form)
-                                          (cons "package" (getf opts :package))))
-                           :connect-timeout 5)))
-          (cond
-            ((or (eq open-resp :no-daemon) (eq open-resp :io-error))
-             (return-from %bridge-cmd-inspect (%bridge-render-error open-resp)))
-            ((%bridge-err open-resp)
-             (return-from %bridge-cmd-inspect (%bridge-render-error open-resp))))
-          (let* ((obj (%bridge-obj open-resp))
-                 (session (%bridge-field obj "session"))
-                 (steps (and (getf opts :path)
-                             (mapcar (lambda (s)
-                                       (parse-integer s :junk-allowed nil))
-                                     (uiop:split-string (getf opts :path)
-                                                        :separator ", "))))
-                 (final-resp open-resp))
-            (unwind-protect
-                 (progn
-                   (dolist (i (or steps '()))
-                     (setf final-resp
-                           (clpm.repl-bridge:send-request
-                            sock "inspect-into"
-                            :params (%bridge-make-params
-                                     (list (cons "session" session)
-                                           (cons "i" i)))
-                            :connect-timeout 5))
-                     (cond
-                       ((or (eq final-resp :no-daemon)
-                            (eq final-resp :io-error))
-                        (return-from %bridge-cmd-inspect
-                          (%bridge-render-error final-resp)))
-                       ((%bridge-err final-resp)
-                        (return-from %bridge-cmd-inspect
-                          (%bridge-render-error final-resp)))))
-                   (let ((eval-resp
-                           (when (getf opts :eval)
-                             (clpm.repl-bridge:send-request
-                              sock "inspect-eval"
-                              :params (%bridge-make-params
-                                       (list (cons "session" session)
-                                             (cons "form" (getf opts :eval))
-                                             (cons "package"
-                                                   (getf opts :package))))
-                              :connect-timeout 5))))
-                     (cond
-                       (*bridge-cli-json*
-                        (%bridge-emit-json final-resp)
-                        (when eval-resp (%bridge-emit-json eval-resp)))
-                       (t
-                        (%bridge-render-inspect-view (%bridge-obj final-resp))
-                        (when eval-resp
-                          (cond
-                            ((%bridge-err eval-resp)
-                             (%bridge-render-error eval-resp))
-                            (t
-                             (let ((v (%bridge-field (%bridge-obj eval-resp)
-                                                     "value_repr")))
-                               (format t "=> ~A~%" (or v "(no value)")))))))))
-                   0)
-              (unless (getf opts :keep)
-                (ignore-errors
-                  (clpm.repl-bridge:send-request
-                   sock "inspect-close"
-                   :params (%bridge-make-params
-                            (list (cons "session" session)))
-                   :connect-timeout 2))))))))))
-
-;;; ----------------------------------------------------------------------------
-;;; Single-shot debug: run a form with debug:true and pick a restart inline.
-
-(defun %bridge-cmd-debug (args)
-  "`clpm repl-bridge debug FORM [--restart NAME] [--frame N] [--frame-eval F]
-                          [--keep] [--abort] [--package P] [--break-on K]'.
-
-Default action: run the form with `debug: true'. If a stop frame is
-reported, list it (frames + restarts) and abort the session, then
-exit non-zero with a parseable summary.
-
-`--restart NAME' immediately picks the named restart on the first
-stop. `--frame N --frame-eval FORM' evaluates FORM in frame N before
-acting. `--keep' leaves the debugger session registered in the daemon so
-follow-up one-shot commands can use its session id. `--abort' explicitly
-aborts. Without any selector the session is aborted at the end -- the LLM gets
-the frame/restart list and can re-run with `--restart' picked."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("restart" . :string)
-                                   ("arg" . :list-string)
-                                   ("frame" . :integer)
-                                   ("frame-eval" . :string)
-                                   ("abort" . :flag)
-                                   ("keep" . :flag)
-                                   ("package" . :string)
-                                   ("break-on" . :string)
-                                   ("worker" . :string)
-                                   ("timeout-ms" . :integer)))
-    (let ((form (first pos)))
-      (unless form
-        (log-error "Usage: clpm repl-bridge debug FORM [--restart NAME [--arg V...]] [--frame N --frame-eval F] [--keep] [--package P] [--break-on K]")
-        (return-from %bridge-cmd-debug 1))
-      (multiple-value-bind (project-root sock pid)
-          (%bridge-resolve-project)
-        (declare (ignore pid))
-        (unless project-root (return-from %bridge-cmd-debug 1))
-        (let ((conn (clpm.repl-bridge:open-connection sock :connect-timeout 5)))
-          (when (eq conn :no-daemon)
-            ;; Try to autostart once.
-            (let ((rc (%bridge-serve (list "--detach"))))
-              (declare (ignore rc))
-              (setf conn (clpm.repl-bridge:open-connection sock :connect-timeout 5))))
-          (when (eq conn :no-daemon)
-            (log-error "No daemon running and autostart failed")
-            (return-from %bridge-cmd-debug 2))
-          (unwind-protect
-               (%bridge-debug-on-connection conn opts form)
-            (clpm.repl-bridge:close-connection conn)))))))
+;;; Continuation-aware eval debugger.
 
 (defun %bridge-debug-on-connection (conn opts form)
   "The continuation-aware debugger loop, run on an open CONNECTION."
@@ -3549,7 +2620,8 @@ the frame/restart list and can re-run with `--restart' picked."
                         (cons "worker" (getf opts :worker))
                         (cons "debug" t)
                         (cons "break_on" (getf opts :break-on))
-                        (cons "max_real_ms" (getf opts :timeout-ms))))))
+                        (cons "max_real_ms" (getf opts :timeout-ms))
+                        (cons "handlers" (getf opts :handlers))))))
     (flet ((handle-stop (event)
              (let* ((cobj (%bridge-unwrap (%bridge-frame-field event "condition")))
                     (session (%bridge-frame-field event "session"))
@@ -3596,6 +2668,10 @@ the frame/restart list and can re-run with `--restart' picked."
                      (setf kept t
                            resolved :kept)
                      :stop)
+                    ((getf opts :abort)
+                     (clpm.repl-bridge:send-continuation-on-connection
+                      conn eval-id "debug-abort")
+                     (setf resolved :aborted))
                     (t
                      (clpm.repl-bridge:send-continuation-on-connection
                       conn eval-id "debug-abort")
@@ -3655,107 +2731,6 @@ the frame/restart list and can re-run with `--restart' picked."
               0)))))))))
 
 ;;; ----------------------------------------------------------------------------
-;;; Server-owned debugger sessions.
-
-(defun %bridge-parse-integer-arg (text label)
-  (handler-case
-      (parse-integer text :junk-allowed nil)
-    (error ()
-      (log-error "Invalid ~A: ~A" label text)
-      nil)))
-
-(defun %bridge-cmd-list-debug-sessions (args)
-  "`clpm repl-bridge list-debug-sessions'."
-  (declare (ignore args))
-  (%bridge-with-call (obj "list-debug-sessions")
-    (let ((sessions (%bridge-array-items (%bridge-field obj "sessions"))))
-      (cond
-        ((null sessions)
-         (format t "no active debug sessions~%"))
-        (t
-         (format t "~D debug session~:P:~%" (length sessions))
-         (dolist (entry sessions)
-           (let* ((e (cadr entry))
-                  (condition (%bridge-unwrap (%bridge-field e "condition"))))
-             (format t "  #~A worker=~A ~A~%"
-                     (or (%bridge-field e "session") "?")
-                     (or (%bridge-field e "worker") "?")
-                     (or (%bridge-field condition "message")
-                         (%bridge-field condition "report")
-                         "")))))))))
-
-(defun %bridge-cmd-debug-eval-in-frame (args)
-  "`clpm repl-bridge debug-eval-in-frame FRAME FORM [--session N]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("session" . :integer)))
-    (let* ((frame-text (first pos))
-           (form (second pos))
-           (frame (and frame-text
-                       (%bridge-parse-integer-arg frame-text "frame"))))
-      (unless (and frame form)
-        (log-error "Usage: clpm repl-bridge debug-eval-in-frame FRAME FORM [--session N]")
-        (return-from %bridge-cmd-debug-eval-in-frame 1))
-      (%bridge-with-call
-          (obj "debug-eval-in-frame"
-               :params (%bridge-make-params
-                        (list (cons "session" (getf opts :session))
-                              (cons "frame" frame)
-                              (cons "form" form))))
-        (format t "frame ~D => ~A~%"
-                frame
-                (or (%bridge-field obj "value")
-                    (%bridge-field obj "error_output")
-                    "?"))))))
-
-(defun %bridge-cmd-debug-abort (args)
-  "`clpm repl-bridge debug-abort [--session N]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("session" . :integer)))
-    (declare (ignore pos))
-    (%bridge-with-call
-        (obj "debug-abort"
-             :params (%bridge-make-params
-                      (list (cons "session" (getf opts :session)))))
-      (format t "~A session #~A~%"
-              (or (%bridge-field obj "outcome") "aborted")
-              (or (%bridge-field obj "session") "?")))))
-
-(defun %bridge-cmd-debug-continue (args)
-  "`clpm repl-bridge debug-continue [--session N]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("session" . :integer)))
-    (declare (ignore pos))
-    (%bridge-with-call
-        (obj "debug-continue"
-             :params (%bridge-make-params
-                      (list (cons "session" (getf opts :session)))))
-      (format t "~A session #~A~%"
-              (or (%bridge-field obj "outcome") "continued")
-              (or (%bridge-field obj "session") "?")))))
-
-(defun %bridge-cmd-debug-invoke-restart (args)
-  "`clpm repl-bridge debug-invoke-restart NAME [--arg FORM]... [--session N]'."
-  (multiple-value-bind (opts pos)
-      (%bridge-parse-flags args '(("session" . :integer)
-                                   ("arg" . :list-string)))
-    (let ((name (first pos)))
-      (unless name
-        (log-error "Usage: clpm repl-bridge debug-invoke-restart NAME [--arg FORM]... [--session N]")
-        (return-from %bridge-cmd-debug-invoke-restart 1))
-      (%bridge-with-call
-          (obj "debug-invoke-restart"
-               :params (%bridge-make-params
-                        (list (cons "session" (getf opts :session))
-                              (cons "name" name)
-                              (cons "args"
-                                    (and (getf opts :arg)
-                                         (%bridge-string-list
-                                          (getf opts :arg)))))))
-        (format t "~A session #~A~%"
-                (or (%bridge-field obj "outcome") "restart-invoked")
-                (or (%bridge-field obj "session") "?"))))))
-
-;;; ----------------------------------------------------------------------------
 ;;; Dispatcher (with JSON flag support, alias normalization, and help).
 
 (defun %bridge-strip-json-flag (args)
@@ -3766,183 +2741,36 @@ the frame/restart list and can re-run with `--restart' picked."
                    (t (push a out))))
     (values j (nreverse out))))
 
-(defparameter +bridge-cli-only-help+
-  ;; CLI-only verbs (no underlying daemon method) and their one-liners.
-  ;; Anything not listed here is delegated to `methods <name>'.
-  '(("serve"   . "Run the daemon in this directory. Use --detach to background; --no-load to skip preload.")
-    ("status"  . "Show whether the project's daemon is up and its pid/uptime.")
-    ("stop"    . "Send shutdown, wait for the socket to disappear, clean up.")
-    ("ping"    . "Liveness check with per-method counters.")
-    ("debug"   . "Run FORM with debug:true; use --keep to leave a server-owned session for debug-* follow-ups.")
-    ("list-debug-sessions" . "List active server-owned debugger sessions.")
-    ("inspect" . "Open an inspector on FORM, walk --path 0,1,2 if given, print the view, and close the session (unless --keep).")
-    ("diff"    . "Alias for list-redefinitions. Shows top-level forms redefined since the daemon started (or since the last `reset').")
-    ("help"    . "Show the cheat sheet. Pass a SUBCOMMAND to drill into one.")))
-
-(defun %bridge-cmd-help (args)
-  "`clpm repl-bridge help [SUBCOMMAND]'.
-
-Without an arg, prints the cheat sheet. With an arg, prints a long-form
-description -- delegated to `methods NAME' for daemon-backed verbs and
-served from a small CLI-only table for the rest."
-  (let ((sub (first args)))
-    (when sub
-      ;; CLI-only first; fall through to `methods' for anything else.
-      (let ((cell (assoc sub +bridge-cli-only-help+ :test #'string=)))
-        (cond
-          (cell (format t "~A -- ~A~%" sub (cdr cell)) (return-from %bridge-cmd-help 0))
-          (t (return-from %bridge-cmd-help (%bridge-methods (list sub)))))))
-  (format t "clpm repl-bridge -- persistent Lisp image for LLM-driven dev~%~%")
-  (format t "lifecycle:~%")
-  (format t "  serve [--detach] [--no-load]   Run the daemon in this directory.~%")
-  (format t "  status                          Show daemon state.~%")
-  (format t "  stop                            Graceful shutdown.~%")
-  (format t "  ping                            Liveness check + per-method counters.~%~%")
-  (format t "evaluation:~%")
-  (format t "  eval FORM [--package P] [--worker W]     Evaluate FORM, print value+output.~%")
-  (format t "       [--handler T=R[:A,...]]... [--debug]  --handler: declarative restart.~%")
-  (format t "  time-eval FORM [--package P]          Evaluate with wall/CPU timing.~%")
-  (format t "  profile-eval FORM [--top N] [--mode]  Run sb-sprof, print flat report.~%")
-  (format t "  gc [--full]                            Trigger a GC.~%")
-  (format t "  interrupt                              Unwind current eval.~%~%")
-  (format t "introspection:~%")
-  (format t "  apropos PATTERN [--package P]   describe SYMBOL~%")
-  (format t "  arglist SYMBOL                  doc SYMBOL [--type T]~%")
-  (format t "  function-info SYMBOL            class-info NAME~%")
-  (format t "  find-definition SYMBOL          xref SYMBOL --direction calls|references~%")
-  (format t "  complete-symbol PREFIX          disassemble SYMBOL~%")
-  (format t "  macroexpand FORM [--full]       package-info NAME~%")
-  (format t "  list-packages                   loaded-systems~%")
-  (format t "  describe-system NAME            image-info~%")
-  (format t "  current-package [--worker W]    set-package NAME [--worker W]~%~%")
-  (format t "load / compile / watch:~%")
-  (format t "  compile-file PATH               load-file PATH~%")
-  (format t "  watch DIR [--glob G] [--auto-revert]   list-watches  unwatch ID~%~%")
-  (format t "workers and tracing:~%")
-  (format t "  workers                         kill-worker NAME~%")
-  (format t "  reset [--worker W]              trace SYMBOL ...   untrace [SYMBOL ...]~%")
-  (format t "  list-traced~%~%")
-  (format t "single-shot interactive features:~%")
-  (format t "  inspect FORM [--path 0,1,..]   Open inspector, walk path, close.~%")
-  (format t "  debug FORM [--restart NAME]    Run with debug; pick restart inline.~%")
-  (format t "  debug FORM --keep              Leave stopped session in daemon.~%")
-  (format t "  list-debug-sessions            Show stopped debugger sessions.~%")
-  (format t "  debug-eval-in-frame N FORM     Eval in stopped frame (use --session S).~%")
-  (format t "  debug-invoke-restart NAME      Invoke restart (use --arg FORM).~%")
-  (format t "  debug-continue | debug-abort   Resolve stopped session.~%~%")
-  (format t "discovery:~%")
-  (format t "  methods [METHOD]                List RPCs (or detail one).~%")
-  (format t "  diff                            Show top-level redefinitions seen.~%~%")
-  (format t "global flags: --json (raw JSON line(s)), -h/--help~%")
-  0))
+(defun %bridge-help (args)
+  "Print the small public repl-bridge CLI surface."
+  (when args
+    (log-error "Usage: clpm repl-bridge [daemon|eval|call] ...")
+    (return-from %bridge-help 1))
+  (format t "Usage:~%")
+  (format t "  clpm repl-bridge daemon [--detach] [--no-load] [--status] [--stop]~%")
+  (format t "  clpm repl-bridge eval FORM [--package P] [--worker W] [--debug] ...~%")
+  (format t "  clpm repl-bridge call METHOD [--params-json JSON] [--PARAM VALUE]...~%~%")
+  (format t "Use `clpm repl-bridge call methods` to list daemon RPCs.~%")
+  (format t "Use `clpm repl-bridge call help --method eval` for a method schema.~%")
+  (format t "Use `clpm help repl-bridge` for CLI details.~%")
+  0)
 
 (defun cmd-repl-bridge (&rest args)
   "Dispatcher for `clpm repl-bridge <subcommand>'.
 
-See `clpm repl-bridge help' for the full surface."
+See `clpm help repl-bridge' for the full surface."
   (multiple-value-bind (json args)
       (%bridge-strip-json-flag args)
     (let* ((*bridge-cli-json* (or *bridge-cli-json* json))
            (sub (pop args)))
       (cond
-        ((or (null sub) (string= sub "help") (string= sub "--help") (string= sub "-h"))
-         (%bridge-cmd-help args))
-        ((string= sub "serve") (%bridge-serve args))
+        ((or (null sub) (string= sub "--help") (string= sub "-h"))
+         (%bridge-help args))
+        ((string= sub "daemon") (%bridge-daemon args))
         ((string= sub "eval") (%bridge-eval args))
-        ((string= sub "interrupt") (%bridge-cmd-interrupt args))
-        ((string= sub "ping")
-         (%bridge-simple-method "ping" :renderer #'%bridge-render-ping))
-        ((string= sub "status") (%bridge-status args))
-        ((string= sub "stop") (%bridge-stop args))
-        ((string= sub "methods") (%bridge-methods args))
-        ((string= sub "describe")
-         (let ((sym (first args)))
-           (cond
-             ((null sym)
-              (log-error "Usage: clpm repl-bridge describe SYMBOL")
-              1)
-             (t
-              (%bridge-with-call (obj "describe"
-                                      :params (%bridge-make-params
-                                               (list (cons "symbol" sym))))
-                (format t "~A~%" (or (%bridge-field obj "description") "")))))))
-        ((string= sub "diff")
-         (multiple-value-bind (opts pos)
-             (%bridge-parse-flags args '(("worker" . :string)))
-           (declare (ignore pos))
-           (%bridge-simple-method
-            "list-redefinitions"
-            :params (%bridge-make-params
-                     (list (cons "worker" (getf opts :worker))))
-            :renderer (lambda (obj)
-                        (let ((items (%bridge-array-items
-                                       (%bridge-field obj "entries"))))
-                          (cond
-                            ((null items) (format t "(no redefinitions)~%"))
-                            (t
-                             (format t "~D redefinition~:P:~%" (length items))
-                             (dolist (e items)
-                               (let ((eo (cadr e)))
-                                 (format t "  ~A ~A:~A~%"
-                                         (or (%bridge-field eo "kind") "?")
-                                         (or (%bridge-field eo "package") "?")
-                                         (or (%bridge-field eo "name") "?")))))))))))
-        ((string= sub "image-info") (%bridge-cmd-image-info args))
-        ((string= sub "list-packages") (%bridge-cmd-list-packages args))
-        ((string= sub "loaded-systems") (%bridge-cmd-loaded-systems args))
-        ((string= sub "describe-system") (%bridge-cmd-describe-system args))
-        ((string= sub "package-info") (%bridge-cmd-package-info args))
-        ((string= sub "current-package") (%bridge-cmd-current-package args))
-        ((string= sub "set-package") (%bridge-cmd-set-package args))
-        ((string= sub "apropos") (%bridge-cmd-apropos args))
-        ((string= sub "complete-symbol") (%bridge-cmd-complete-symbol args))
-        ((string= sub "arglist") (%bridge-cmd-arglist args))
-        ((string= sub "doc") (%bridge-cmd-doc args))
-        ((string= sub "documentation") (%bridge-cmd-doc args))
-        ((string= sub "disassemble") (%bridge-cmd-disassemble args))
-        ((string= sub "function-info") (%bridge-cmd-function-info args))
-        ((string= sub "class-info") (%bridge-cmd-class-info args))
-        ((string= sub "find-definition") (%bridge-cmd-find-definition args))
-        ((string= sub "find-definitions") (%bridge-cmd-find-definition args))
-        ((string= sub "xref") (%bridge-cmd-xref args))
-        ((string= sub "who-calls")
-         (%bridge-cmd-xref (append (list "--direction" "calls") args)))
-        ((string= sub "who-references")
-         (%bridge-cmd-xref (append (list "--direction" "references") args)))
-        ((string= sub "who-sets")
-         (%bridge-cmd-xref (append (list "--direction" "sets") args)))
-        ((string= sub "who-binds")
-         (%bridge-cmd-xref (append (list "--direction" "binds") args)))
-        ((string= sub "macroexpand") (%bridge-cmd-macroexpand args))
-        ((string= sub "compile-file") (%bridge-cmd-compile-file args))
-        ((string= sub "load-file") (%bridge-cmd-load-file args))
-        ((string= sub "gc") (%bridge-cmd-gc args))
-        ((string= sub "time-eval") (%bridge-cmd-time-eval args))
-        ((string= sub "profile-eval") (%bridge-cmd-profile-eval args))
-        ((string= sub "trace") (%bridge-cmd-trace args))
-        ((string= sub "untrace") (%bridge-cmd-untrace args))
-        ((string= sub "list-traced") (%bridge-cmd-list-traced args))
-        ((or (string= sub "workers") (string= sub "list-workers"))
-         (%bridge-cmd-list-workers args))
-        ((string= sub "kill-worker") (%bridge-cmd-kill-worker args))
-        ((string= sub "reset") (%bridge-cmd-reset args))
-        ((string= sub "list-watches") (%bridge-cmd-list-watches args))
-        ((string= sub "unwatch") (%bridge-cmd-unwatch args))
-        ((string= sub "watch") (%bridge-cmd-watch args))
-        ((string= sub "inspect") (%bridge-cmd-inspect args))
-        ((string= sub "debug") (%bridge-cmd-debug args))
-        ((string= sub "list-debug-sessions")
-         (%bridge-cmd-list-debug-sessions args))
-        ((string= sub "debug-eval-in-frame")
-         (%bridge-cmd-debug-eval-in-frame args))
-        ((string= sub "debug-invoke-restart")
-         (%bridge-cmd-debug-invoke-restart args))
-        ((string= sub "debug-continue")
-         (%bridge-cmd-debug-continue args))
-        ((string= sub "debug-abort")
-         (%bridge-cmd-debug-abort args))
+        ((string= sub "call") (%bridge-call args))
         (t
-         (log-error "Unknown subcommand: ~A (try `clpm repl-bridge help')" sub)
+         (log-error "Unknown subcommand: ~A (expected daemon, eval, or call)" sub)
          1)))))
 
 ;;; run/exec commands
@@ -6394,88 +5222,90 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     ""
     "Use the bridge before starting a fresh `sbcl`, `clpm repl`, or ad hoc script when you need to understand a live condition, inspect a value, redefine one function, time a form, trace calls, or confirm image state. Fresh processes are still right for clean end-to-end tests, packaging, and dependency graph changes."
     ""
+    "The public bridge CLI is deliberately small:"
+    ""
+    "```sh"
+    "clpm repl-bridge daemon [--detach] [--no-load] [--status] [--stop]"
+    "clpm repl-bridge eval FORM [--package P] [--worker W] [--debug] ..."
+    "clpm repl-bridge call METHOD [--params-json JSON] [--PARAM VALUE]..."
+    "```"
+    ""
+    "`daemon` owns lifecycle, `eval` is the ergonomic one-form path, and `call` is the generic RPC constructor. `call` parses parameter values as JSON when possible and otherwise sends strings."
+    ""
     "Lifecycle and discovery:"
     ""
     "```sh"
-    "clpm repl-bridge serve --detach"
-    "clpm repl-bridge status"
-    "clpm repl-bridge ping"
-    "clpm repl-bridge methods"
-    "clpm repl-bridge help debug"
-    "clpm repl-bridge eval '(+ 1 2)' --pretty"
-    "clpm repl-bridge stop"
+    "clpm repl-bridge daemon --detach"
+    "clpm repl-bridge daemon --status"
+    "clpm repl-bridge call ping"
+    "clpm repl-bridge call methods"
+    "clpm repl-bridge call help --method eval"
+    "clpm repl-bridge eval '(+ 1 2)'"
+    "clpm repl-bridge daemon --stop"
     "```"
     ""
-    "`eval`, `debug`, and most single-shot commands auto-start the daemon if needed. Use `status` or `ping` when you need to distinguish no daemon, stale pid/socket files, and an unresponsive daemon."
-    ""
-    "Everyday image management:"
-    ""
-    "```sh"
-    "clpm repl-bridge current-package"
-    "clpm repl-bridge set-package CL-USER"
-    "clpm repl-bridge workers"
-    "clpm repl-bridge interrupt --worker default"
-    "clpm repl-bridge reset --worker default"
-    "clpm repl-bridge kill-worker scratch"
-    "clpm repl-bridge loaded-systems"
-    "clpm repl-bridge image-info"
-    "clpm repl-bridge gc --full"
-    "clpm repl-bridge diff"
-    "```"
-    ""
-    "Use named workers for experiments that should not pollute the default package/history. Use `interrupt` for a hung eval, `reset` for a poisoned worker, and `stop` only when you need a fresh image, changed dependencies, or are done with the daemon."
+    "`eval` auto-starts the daemon if needed. Use `daemon --status` when you need to distinguish no daemon, stale pid/socket files, and an unresponsive daemon."
     ""
     "Debug-first workflow:"
     ""
     "```sh"
-    "clpm repl-bridge debug '(error \"boom\")'"
-    "clpm repl-bridge debug '(restart-case (error \"need value\") (use-value (v) v))' --restart USE-VALUE --arg 42"
-    "clpm repl-bridge debug '(warn \"careful\")' --break-on warning"
+    "clpm repl-bridge eval '(error \"boom\")' --debug"
+    "clpm repl-bridge eval '(restart-case (error \"need value\") (use-value (v) v))' --debug --restart USE-VALUE --arg 42"
+    "clpm repl-bridge eval '(warn \"careful\")' --debug --break-on warning"
     "clpm repl-bridge eval '(restart-case (/ 1 0) (use-value (v) v))' --handler division-by-zero=use-value:0"
     "```"
     ""
-    "Use `debug` rather than plain `eval` when chasing a condition. First run it without a restart to see the condition, user frames, frame numbers, and available restarts. Then re-run with `--restart`, `--arg`, `--frame`, or `--frame-eval` once you know the intended recovery."
+    "Use `eval --debug` rather than plain `eval` when chasing a condition. First run it without a restart to see the condition, user frames, frame numbers, and available restarts. Then re-run with `--restart`, `--arg`, `--frame`, or `--frame-eval` once you know the intended recovery."
     ""
     "Server-owned debug sessions:"
     ""
     "```sh"
-    "clpm repl-bridge debug '(restart-case (error \"need value\") (use-value (v) v))' --keep"
-    "clpm repl-bridge list-debug-sessions"
-    "clpm repl-bridge debug-eval-in-frame 4 'x'"
-    "clpm repl-bridge debug-invoke-restart USE-VALUE --arg 42"
-    "clpm repl-bridge debug-abort"
+    "clpm repl-bridge eval '(restart-case (error \"need value\") (use-value (v) v))' --debug --keep"
+    "clpm repl-bridge call list-debug-sessions"
+    "clpm repl-bridge call debug-eval-in-frame --session 1 --frame 4 --form 'x'"
+    "clpm repl-bridge call debug-invoke-restart --session 1 --name USE-VALUE --args '[\"42\"]'"
+    "clpm repl-bridge call debug-abort --session 1"
     "```"
     ""
-    "Use `--keep` when you need follow-up commands against a live debugger stop. If more than one session is active, pass `--session N` to `debug-eval-in-frame`, `debug-invoke-restart`, `debug-continue`, or `debug-abort`."
+    "Use `--keep` only when you need follow-up calls against a live debugger stop. If more than one session is active, pass `--session N` to every debug-* call."
     ""
-    "Source and value inspection:"
+    "Everyday image management and introspection:"
     ""
     "```sh"
-    "clpm repl-bridge compile-file src/foo.lisp"
-    "clpm repl-bridge load-file src/foo.lisp"
-    "clpm repl-bridge inspect '(make-hash-table)' --keep"
-    "clpm repl-bridge apropos my-symbol --package MY-PACKAGE"
-    "clpm repl-bridge arglist my-function"
-    "clpm repl-bridge find-definition my-function"
-    "clpm repl-bridge who-calls my-function"
-    "clpm repl-bridge macroexpand '(my-macro x)' --full"
+    "clpm repl-bridge call current-package"
+    "clpm repl-bridge call set-package --name CL-USER"
+    "clpm repl-bridge call list-workers"
+    "clpm repl-bridge call interrupt --worker default"
+    "clpm repl-bridge call reset --worker default"
+    "clpm repl-bridge call kill-worker --name scratch"
+    "clpm repl-bridge call loaded-systems"
+    "clpm repl-bridge call image-info"
+    "clpm repl-bridge call gc --full true"
+    "clpm repl-bridge call list-redefinitions"
+    "clpm repl-bridge call compile-file --path src/foo.lisp"
+    "clpm repl-bridge call load-file --path src/foo.lisp"
+    "clpm repl-bridge call inspect --form '(make-hash-table)'"
+    "clpm repl-bridge call arglist --symbol my-function"
+    "clpm repl-bridge call find-definition --symbol my-function"
+    "clpm repl-bridge call xref --symbol my-function --direction calls"
+    "clpm repl-bridge call macroexpand --form '(my-macro x)' --full true"
     "```"
     ""
     "Watch and cleanup:"
     ""
     "```sh"
-    "clpm repl-bridge watch src --glob '*.lisp' --auto-revert"
-    "clpm repl-bridge list-watches"
-    "clpm repl-bridge unwatch 1"
-    "clpm repl-bridge list-traced"
-    "clpm repl-bridge untrace"
-    "clpm repl-bridge list-debug-sessions"
-    "clpm repl-bridge debug-abort --session 1"
-    "clpm repl-bridge diff"
-    "clpm repl-bridge stop"
+    "clpm repl-bridge call watch --dir src --glob '*.lisp' --auto-revert true"
+    "clpm repl-bridge call list-watches"
+    "clpm repl-bridge call unwatch --id 1"
+    "clpm repl-bridge call list-traced"
+    "clpm repl-bridge call untrace"
+    "clpm repl-bridge call list-debug-sessions"
+    "clpm repl-bridge call debug-abort --session 1"
+    "clpm repl-bridge call list-redefinitions"
+    "clpm repl-bridge daemon --stop"
     "```"
     ""
-    "Before stopping work, close kept debugger sessions, unwatch file watches, untrace functions, kill or reset throwaway workers, and run `clpm repl-bridge diff`. A non-empty `diff` means the image contains definitions that may still need to be written to source. Use `clpm repl-bridge stop` for normal shutdown; let `status` or `stop` clean stale pid/socket files instead of deleting `.clpm/repl-bridge.*` by hand."
+    "Before stopping work, close kept debugger sessions, unwatch file watches, untrace functions, kill or reset throwaway workers, and run `clpm repl-bridge call list-redefinitions`. A non-empty result means the image contains definitions that may still need to be written to source. Use `clpm repl-bridge daemon --stop` for normal shutdown; let `daemon --status` or `daemon --stop` clean stale pid/socket files instead of deleting `.clpm/repl-bridge.*` by hand."
     ""
     "After changing `clpm.project`, `clpm.lock`, registries, or dependency sources, run `clpm install`, then restart the daemon so its ASDF registry and loaded systems match the new dependency graph."
     ""
@@ -6485,9 +5315,9 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "- Do not bypass signature or hash checks silently."
     "- Keep dependency changes small and explain why each system was added or removed."
     "- Prefer focused CLPM commands over shelling into implementation details."
-    "- Prefer `clpm repl-bridge debug` for Common Lisp bug investigation; use plain `eval` only when you already know the form should succeed."
+    "- Prefer `clpm repl-bridge eval FORM --debug` for Common Lisp bug investigation; use plain `eval` only when you already know the form should succeed."
     "- After changing manifests, run `clpm install` and the narrowest relevant test command."
-    "- Before stopping work after repl-bridge edits, check `clpm repl-bridge diff` for in-image definitions that still need source changes."
+    "- Before stopping work after repl-bridge edits, check `clpm repl-bridge call list-redefinitions` for in-image definitions that still need source changes."
     "- Do not leave kept debug sessions, watches, traces, or throwaway workers behind."
     ""
     "## Help"
@@ -6851,92 +5681,71 @@ sub-subcommand=\"set\")."
       (:repl-bridge
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
          (cond
-           ((and sub (string= sub "serve"))
-            (p "Usage: clpm repl-bridge serve [--detach] [--no-load]")
+           ((and sub (string= sub "daemon"))
+            (p "Usage: clpm repl-bridge daemon [--detach] [--no-load] [--status] [--stop]")
             (p "")
-            (p "Start a daemon Lisp image for the current project that answers")
-            (p "JSON-RPC requests on .clpm/repl-bridge.sock. Without --detach the")
-            (p "process blocks; with --detach it forks via the clpm binary and")
-            (p "returns once the socket is listening.")
+            (p "Start, inspect, or stop the daemon Lisp image for the current")
+            (p "project. Bare daemon starts in the foreground; --detach starts")
+            (p "in the background.")
             (p "")
             (p "Options:")
-            (p "  --detach   Launch the daemon in the background and return.")
-            (p "  --no-load  Skip loading .clpm/asdf-config.lisp; daemon starts empty.")
+            (p "  --detach   Launch in the background and return.")
+            (p "  --no-load  Skip loading .clpm/asdf-config.lisp.")
+            (p "  --status   Report state and clean stale pid/socket files.")
+            (p "  --stop     Ask the daemon to shut down cleanly.")
             (p "")
             (p "Example:")
-            (p "  clpm repl-bridge serve --detach")
+            (p "  clpm repl-bridge daemon --detach")
             0)
            ((and sub (string= sub "eval"))
-            (p "Usage: clpm repl-bridge eval <form> [--package <name>] [--no-autostart] [--pretty]")
+            (p "Usage: clpm repl-bridge eval <form> [--package <name>] [--worker <name>] [--debug] [--no-autostart]")
             (p "")
             (p "Evaluate one Lisp form in the daemon. With no daemon running and")
             (p "without --no-autostart, the bridge starts one in the background")
-            (p "first. The response is one line of JSON; --pretty renders a human")
-            (p "summary instead.")
+            (p "first. Human output is the default; --json emits raw JSON.")
             (p "")
             (p "Options:")
             (p "  --package <name>  Override *package* for this call only")
             (p "                    (daemon's persistent package is unchanged).")
+            (p "  --worker <name>   Run on a named worker.")
+            (p "  --handler T=R[:A] Declarative condition recovery; repeatable.")
+            (p "  --debug           Enter the continuation-aware debugger path.")
+            (p "  --restart <name>  Pick a restart at the first debugger stop.")
+            (p "  --arg <form>      Restart argument form; repeatable.")
+            (p "  --frame <n> --frame-eval <form>")
+            (p "                    Evaluate in a debugger frame, then abort.")
+            (p "  --keep            Leave the debugger session for call debug-*.")
             (p "  --no-autostart    Fail with rc=2 if no daemon is running.")
-            (p "  --pretty          Print a human summary (stdout, errors, =>value)")
-            (p "                    instead of one-line JSON.")
             (p "")
             (p "Example:")
             (p "  clpm repl-bridge eval '(+ 1 2)'")
-            (p "  clpm repl-bridge eval '(defun foo () 42)' --pretty")
+            (p "  clpm repl-bridge eval '(error \"boom\")' --debug")
             0)
-           ((and sub (string= sub "interrupt"))
-            (p "Usage: clpm repl-bridge interrupt")
+           ((and sub (string= sub "call"))
+            (p "Usage: clpm repl-bridge call <method> [--params-json <json>] [--PARAM <value>]...")
             (p "")
-            (p "Signal an interrupt inside the daemon's worker thread, unwinding")
-            (p "the currently-running eval. The daemon stays up.")
-            0)
-           ((and sub (string= sub "ping"))
-            (p "Usage: clpm repl-bridge ping")
+            (p "Send one daemon RPC method. Parameter values are parsed as JSON")
+            (p "when possible, otherwise passed as strings. Hyphens in flag names")
+            (p "map to underscores in JSON parameter names.")
             (p "")
-            (p "Cheap health probe. Returns daemon pid, uptime, Lisp implementation,")
-            (p "and the number of evals serviced. Does not touch the worker thread.")
-            0)
-           ((and sub (string= sub "status"))
-            (p "Usage: clpm repl-bridge status")
+            (p "Examples:")
+            (p "  clpm repl-bridge call methods")
+            (p "  clpm repl-bridge call help --method eval")
+            (p "  clpm repl-bridge call gc --full true")
+            (p "  clpm repl-bridge call compile-file --path src/foo.lisp")
+            (p "  clpm repl-bridge call debug-abort --session 1")
             (p "")
-            (p "Report whether a daemon is running for the current project. Cleans")
-            (p "up stale pidfiles whose pid is no longer alive.")
-            0)
-           ((and sub (string= sub "stop"))
-            (p "Usage: clpm repl-bridge stop")
-            (p "")
-            (p "Ask the daemon to shut down cleanly. Waits up to 5s for the socket")
-            (p "file to disappear; falls back to SIGTERM only if the pid still")
-            (p "names a live process after the timeout.")
-            0)
-           ((and sub (string= sub "describe"))
-            (p "Usage: clpm repl-bridge describe <symbol>")
-            (p "")
-            (p "Capture the daemon's `(describe SYMBOL)` output as JSON.")
-            0)
-           ((and sub (string= sub "diff"))
-            (p "Usage: clpm repl-bridge diff")
-            (p "")
-            (p "List top-level forms redefined in-image (`defun', `defmethod', ...)")
-            (p "since the daemon started or the last `reset'. Use this before")
-            (p "declaring work done to find state that has drifted from source.")
+            (p "Use --params-json for arrays, objects, or explicit null.")
             0)
            (t
             (p "Usage:")
-            (p "  clpm repl-bridge serve [--detach] [--no-load]")
-            (p "  clpm repl-bridge eval <form> [--package <pkg>] [--no-autostart] [--pretty]")
-            (p "  clpm repl-bridge interrupt")
-            (p "  clpm repl-bridge ping")
-            (p "  clpm repl-bridge status")
-            (p "  clpm repl-bridge stop")
-            (p "  clpm repl-bridge describe <symbol>")
-            (p "  clpm repl-bridge diff")
+            (p "  clpm repl-bridge daemon [--detach] [--no-load] [--status] [--stop]")
+            (p "  clpm repl-bridge eval <form> [--package <pkg>] [--worker <name>] [--debug] ...")
+            (p "  clpm repl-bridge call <method> [--params-json <json>] [--PARAM <value>]...")
             (p "")
-            (p "Drive a persistent project-scoped Lisp daemon over a Unix-socket")
-            (p "JSON-RPC. Designed for LLM-assisted development: state persists")
-            (p "across calls so redefining a single `defun' is faster than")
-            (p "reloading systems, and `diff' surfaces in-image drift from source.")
+            (p "Drive a persistent project-scoped Lisp daemon. `call methods`")
+            (p "lists the RPC registry, and `call help --method NAME` returns")
+            (p "the exact parameter schema for a method.")
             (p "")
             (p "Run `clpm help repl-bridge <subcommand>` for per-subcommand details.")
             0))))

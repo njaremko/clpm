@@ -149,27 +149,24 @@
   (assert-contains stdout "Usage: clpm registry trust set")
   (assert-contains stdout "none"))
 
-;; repl-bridge umbrella: lists the subcommands and does not leak any single
-;; subcommand's usage line into the umbrella page.
+;; repl-bridge umbrella: lists the three public commands.
 (multiple-value-bind (code stdout stderr)
     (run-cli-captured '("help" "repl-bridge"))
   (declare (ignore stderr))
   (assert-eql 0 code)
-  (assert-contains stdout "clpm repl-bridge serve")
+  (assert-contains stdout "clpm repl-bridge daemon")
   (assert-contains stdout "clpm repl-bridge eval")
-  (assert-contains stdout "clpm repl-bridge interrupt")
-  (assert-contains stdout "clpm repl-bridge status")
-  (assert-contains stdout "clpm repl-bridge stop"))
+  (assert-contains stdout "clpm repl-bridge call"))
 
-;; repl-bridge serve: focused page.
+;; repl-bridge daemon: focused page.
 (multiple-value-bind (code stdout stderr)
-    (run-cli-captured '("help" "repl-bridge" "serve"))
+    (run-cli-captured '("help" "repl-bridge" "daemon"))
   (declare (ignore stderr))
   (assert-eql 0 code)
-  (assert-contains stdout "Usage: clpm repl-bridge serve")
+  (assert-contains stdout "Usage: clpm repl-bridge daemon")
   (assert-contains stdout "--detach")
   (assert-true (not (search "clpm repl-bridge eval" stdout))
-               "repl-bridge serve help leaked the umbrella usage:~%~A" stdout))
+               "repl-bridge daemon help leaked the umbrella usage:~%~A" stdout))
 
 ;; repl-bridge eval: focused page, mentions --package and --no-autostart.
 (multiple-value-bind (code stdout stderr)
@@ -180,13 +177,13 @@
   (assert-contains stdout "--package")
   (assert-contains stdout "--no-autostart"))
 
-;; repl-bridge interrupt / status / stop: each has its own focused page.
-(dolist (sub '("interrupt" "status" "stop"))
-  (multiple-value-bind (code stdout stderr)
-      (run-cli-captured (list "help" "repl-bridge" sub))
-    (declare (ignore stderr))
-    (assert-eql 0 code)
-    (assert-contains stdout (format nil "Usage: clpm repl-bridge ~A" sub))))
+;; repl-bridge call: focused page.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "repl-bridge" "call"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm repl-bridge call")
+  (assert-contains stdout "--params-json"))
 
 (format t "  Per-subcommand help PASSED~%")
 

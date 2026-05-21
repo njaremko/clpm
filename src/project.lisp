@@ -25,8 +25,8 @@
   (scripts nil :type list)
   ;; Plist controlling the persistent Lisp daemon (`clpm repl-bridge'):
   ;;   (:autostart t :preload ("alexandria"))
-  ;; AUTOSTART means `clpm install' ends by launching `serve --detach' if no
-  ;; daemon is already running. PRELOAD is a list of additional ASDF system
+  ;; AUTOSTART means `clpm install' ends by launching `daemon --detach' if
+  ;; no daemon is already running. PRELOAD is a list of additional ASDF system
   ;; names to load after the project's own :systems.
   (repl-bridge nil :type list))
 

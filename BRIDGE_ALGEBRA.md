@@ -48,7 +48,8 @@ Representative examples:
    without re-running side effects.
 3. Open an inspector on a value, traverse into a part, evaluate with `*`
    bound to the focus, then close the session.
-4. Watch `src/*.lisp`, reload on save, then check `diff` before handoff.
+4. Watch `src/*.lisp`, reload on save, then call `list-redefinitions`
+   before handoff.
 5. Ask the registry through `call methods` or `call help --method eval` to
    discover the exact request schema rather than relying on stale
    documentation.
@@ -380,7 +381,7 @@ load-file
 Legacy CLI wrappers that should disappear during the rewrite:
 
 ```text
-serve, eval, interrupt, ping, status, stop, methods, describe, diff,
+serve, interrupt, ping, status, stop, methods, describe, diff,
 image-info, list-packages, loaded-systems, describe-system, package-info,
 current-package, set-package, apropos, complete-symbol, arglist, doc,
 documentation, disassemble, function-info, class-info, find-definition,

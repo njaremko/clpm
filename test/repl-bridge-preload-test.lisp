@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-preload-test.lisp -- serve preloads project :systems
+;;;; test/repl-bridge-preload-test.lisp -- daemon preloads project :systems
 
 (require :asdf)
 
