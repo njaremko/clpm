@@ -89,6 +89,26 @@
             0
             (clpm:run-cli (list "project" "new" project-name "--lib" "--dir" (namestring tmp))))
 
+           ;; Publishing writes registry artifacts only; VCS commits belong to
+           ;; the caller.
+           (multiple-value-bind (code stdout stderr)
+               (run-cli-captured (list "registry" "publish"
+                                       "--registry" (namestring reg-root)
+                                       "--key-id" key-id
+                                       "--keys-dir" (namestring keys-dir)
+                                       "--project" (namestring project-root)
+                                       "--tarball-url" "https://example.invalid/mylib-0.1.0.tar.gz"
+                                       "--tarball-out" (namestring tarballs-dir)
+                                       "--git-commit"))
+             (declare (ignore stdout))
+             (assert-eql 1 code)
+             (assert-true (search "Unknown option" stderr :test #'char-equal)
+                          "Expected --git-commit rejection, got:~%~A" stderr)
+             (assert-true
+              (not (uiop:file-exists-p
+                    (merge-pathnames "registry/packages/mylib/0.1.0/release.sxp" reg-root)))
+              "Rejected publish should not write release metadata"))
+
            ;; Publish into the local registry.
            (multiple-value-bind (code stdout _stderr)
                (run-cli-captured (list "registry" "publish"

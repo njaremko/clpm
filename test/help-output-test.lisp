@@ -165,6 +165,15 @@
   (assert-true (not (search "--refresh-trust" stdout :test #'char-equal))
                "registry update help still advertises trust refresh:~%~A" stdout))
 
+;; registry publish: writes CLPM artifacts only, no VCS side effects.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "registry" "publish"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm registry publish")
+  (assert-true (not (search "--git-commit" stdout :test #'char-equal))
+               "registry publish help still advertises git commits:~%~A" stdout))
+
 ;; repl umbrella: lists the three public commands.
 (multiple-value-bind (code stdout stderr)
     (run-cli-captured '("help" "repl"))

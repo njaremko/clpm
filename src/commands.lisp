@@ -4520,11 +4520,10 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
         (keys-dir nil)
         (project-dir nil)
         (tarball-url nil)
-        (tarball-out nil)
-        (git-commit-p nil))
+        (tarball-out nil))
     (labels ((usage-error (fmt &rest fmt-args)
                (apply #'log-error fmt fmt-args)
-               (log-error "Usage: clpm registry publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>] [--git-commit]")
+               (log-error "Usage: clpm registry publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>]")
                (return-from cmd-publish 1)))
       ;; Parse args.
       (loop while args do
@@ -4536,7 +4535,6 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
             ((string= arg "--project") (setf project-dir (pop args)))
             ((string= arg "--tarball-url") (setf tarball-url (pop args)))
             ((string= arg "--tarball-out") (setf tarball-out (pop args)))
-            ((string= arg "--git-commit") (setf git-commit-p t))
             (t
              (usage-error "Unknown option: ~A" arg)))))
 
@@ -4712,33 +4710,6 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                          snapshot-path
                          :pretty t)
                         (write-sig-hex (read-file-bytes snapshot-path) snapshot-sig-path seed))
-
-                      (when git-commit-p
-                        (let ((git (clpm.platform:find-git)))
-                          (unless git
-                            (error 'clpm.errors:clpm-missing-tool-error
-                                   :tool "git"
-                                   :install-hints (clpm.platform:tool-install-hints "git")))
-                          (multiple-value-bind (_out err1 rc1)
-                              (clpm.platform:run-program
-                               (list git "add" "registry/snapshot.sxp" "registry/snapshot.sig"
-                                     (format nil "registry/packages/~A/~A/release.sxp" name version)
-                                     (format nil "registry/packages/~A/~A/release.sig" name version))
-                               :directory registry-root
-                               :output :string
-                               :error-output :string)
-                            (declare (ignore _out))
-                            (unless (zerop rc1)
-                              (usage-error "git add failed: ~A" err1)))
-                          (multiple-value-bind (_out err2 rc2)
-                              (clpm.platform:run-program
-                               (list git "commit" "-m" (format nil "publish: ~A" release-ref))
-                               :directory registry-root
-                               :output :string
-                               :error-output :string)
-                            (declare (ignore _out))
-                            (unless (zerop rc2)
-                              (usage-error "git commit failed: ~A" err2)))))
 
                       (log-info "Published: ~A" release-ref)
                       (log-info "Release: ~A" (namestring release-path))
@@ -5769,7 +5740,7 @@ sub-subcommand=\"set\")."
             (p "Usage: clpm registry init --dir <path> --key-id <id> --keys-dir <dir>")
             0)
            ((and sub (string= sub "publish"))
-            (p "Usage: clpm registry publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>] [--git-commit]")
+            (p "Usage: clpm registry publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>]")
             0)
            (t
             (p "Subcommands:")

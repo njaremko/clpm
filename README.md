@@ -325,8 +325,7 @@ clpm registry publish \
   --keys-dir /tmp/clpm-demo/keys \
   --project /tmp/clpm-demo/demo-lib \
   --tarball-out /tmp/clpm-demo/tarballs/ \
-  --tarball-url file:///tmp/clpm-demo/tarballs/demo-lib-0.1.0.tar.gz \
-  --git-commit
+  --tarball-url file:///tmp/clpm-demo/tarballs/demo-lib-0.1.0.tar.gz
 ```
 
 ## Examples

@@ -845,6 +845,29 @@ but output kind and machine-readable shape are semantic.
     operator/admin functionality. `registry publish --git-commit` is the next
     implementation-shaped side effect to remove.
 
+### Iteration 17: Attack Publish VCS Side Effects
+
+- Commands deleted:
+  - `registry publish --git-commit`.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - Version-control staging and commits are lower-level repository operations,
+    not CLPM registry artifact construction.
+- Commands that survived and why:
+  - `registry publish` survives because it writes release metadata, release
+    signatures, snapshot metadata, snapshot signatures, and optionally the
+    tarball artifact. Those are CLPM registry artifacts.
+- Laws/protocol invariants added:
+  - Publish writes registry artifacts only:
+    `parse ["registry", "publish", ..., "--git-commit"] = Error`.
+  - CLPM does not run VCS commands as part of publish; callers inspect and
+    commit the registry working copy themselves.
+- Remaining discomfort:
+  - `registry key`, `registry init`, and `registry publish` remain broad
+    operator/admin functionality, but their side effects are now CLPM-owned
+    registry data rather than ambient VCS state.
+
 ## Constructors
 
 Terminal constructors:
@@ -1052,6 +1075,11 @@ Law: "trust refresh is trust-scoped"
   parse ["registry", "trust", "refresh", quicklispName] =
     Right (registry (trustRefresh quicklispName))
 
+Law: "publish has no VCS side effects"
+  parse ["registry", "publish", args..., "--git-commit"] = Error
+  denote (registry (publish args)) ctx world =
+    writeSignedRegistryArtifacts args ctx world
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -1248,6 +1276,8 @@ Failed-counterexample regressions:
   is not a CLI trust value.
 - `clpm registry update --refresh-trust quicklisp` is rejected; Quicklisp
   pin refresh is `clpm registry trust refresh quicklisp`.
+- `clpm registry publish --git-commit ...` is rejected; publish does not run
+  VCS commands.
 
 Reference versus optimized equivalence:
 
