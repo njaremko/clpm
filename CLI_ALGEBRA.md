@@ -1206,6 +1206,29 @@ but output kind and machine-readable shape are semantic.
   - The raw protocol still has implicit dispatch fields. That is appropriate
     for protocol framing, but the boundary should stay narrow and documented.
 
+### Iteration 31: Attack Open Help Selectors
+
+- Commands deleted:
+  - Invalid selector fallbacks like `help deps bogus`.
+  - Overlong selector fallbacks like `help registry trust set extra`.
+- Commands merged:
+  - No valid help pages were removed. Umbrella pages remain only for exact
+    selectors such as `help deps`, `help registry trust`, and
+    `help project workspace`.
+- Commands derived instead of exposed:
+  - Resource-local `--help` still derives the same closed selector as
+    `clpm help ...`.
+- Commands that survived and why:
+  - `help run repl` survives as an error page because the help schema
+    deliberately points old ordinary-REPL users to `clpm repl`.
+- Laws/protocol invariants added:
+  - `selector notin helpSchema => parse ["help", selector...] = Error`.
+  - Help rendering is a total function only on the finite command-schema
+    selector set.
+- Remaining discomfort:
+  - Resource-local help aliases remain as derived syntax. They are useful, but
+    the canonical schema projection is still `clpm help ...`.
+
 ## Constructors
 
 Terminal constructors:

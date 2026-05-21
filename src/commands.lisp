@@ -5999,6 +5999,66 @@ sub-subcommand=\"set\")."
        (log-error "Unknown command: ~A" command)
        1))))
 
+(defun %help-token (value)
+  (and (stringp value) (string-downcase value)))
+
+(defun %help-selector-valid-p (command parts)
+  "Return true when COMMAND/PARTS names an actual help page."
+  (let* ((parts (mapcar #'%help-token parts))
+         (sub (first parts))
+         (ssub (second parts)))
+    (and (every #'identity parts)
+         (null (cddr parts))
+         (case command
+           (:help (null sub))
+           (:doctor (null sub))
+           (:skill (null sub))
+           (:project
+            (cond
+              ((null sub) t)
+              ((member sub '("new" "init" "package") :test #'string=)
+               (null ssub))
+              ((string= sub "workspace")
+               (or (null ssub)
+                   (member ssub '("init" "add" "remove" "list")
+                           :test #'string=)))
+              (t nil)))
+           (:deps
+            (or (null sub)
+                (and (null ssub)
+                     (member sub
+                             '("add" "remove" "sync" "update" "search"
+                               "info" "tree" "why" "audit" "sbom")
+                             :test #'string=))))
+           (:registry
+            (cond
+              ((null sub) t)
+              ((member sub '("add" "list" "update" "init" "publish")
+                       :test #'string=)
+               (null ssub))
+              ((string= sub "key")
+               (or (null ssub)
+                   (member ssub '("generate" "list" "import" "verify")
+                           :test #'string=)))
+              ((string= sub "trust")
+               (or (null ssub)
+                   (member ssub '("list" "set" "refresh") :test #'string=)))
+              (t nil)))
+           (:repl
+            (or (null sub)
+                (and (null ssub)
+                     (member sub '("daemon" "eval" "call") :test #'string=))))
+           (:run
+            (or (null sub)
+                (and (null ssub)
+                     (member sub '("repl" "exec" "test" "script" "scripts")
+                             :test #'string=))))
+           (:store
+            (or (null sub)
+                (and (null ssub)
+                     (member sub '("clean" "gc") :test #'string=))))
+           (t nil)))))
+
 (defun cmd-help (&rest args)
   "Print command-specific help.
 
@@ -6010,6 +6070,15 @@ Accepts `clpm help <command> [subcommand [...]]` so chains like
       (log-error "Usage: clpm help <command> [subcommand [...]]")
       (return-from cmd-help 1))
     (let ((command (intern (string-upcase cmd-name) :keyword)))
+      (unless (%help-selector-valid-p command sub-chain)
+        (if (member command
+                    '(:help :doctor :project :deps :registry :run :store
+                      :skill :repl)
+                    :test #'eq)
+            (log-error "Unknown help target: clpm help ~A"
+                       (format nil "~{~A~^ ~}" (cons cmd-name sub-chain)))
+            (log-error "Unknown command: ~A" command))
+        (return-from cmd-help 1))
       (print-command-help command
                           :subcommand (first sub-chain)
                           :sub-subcommand (second sub-chain)))))
