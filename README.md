@@ -236,30 +236,31 @@ explicit resource operations.
 
 | Command | Description |
 |---------|-------------|
-| `clpm help <cmd>` | Show command-specific help |
+| `clpm help <command> [subcommand ...]` | Show command-specific help |
 | `clpm doctor` | Check environment and configuration |
 | `clpm project new <name> --bin\|--lib [--dir <path>]` | Create a new project scaffold |
 | `clpm project init [name]` | Initialize new project |
 | `clpm project workspace <init\|add\|remove\|list> ...` | Workspace management |
 | `clpm project package` | Build a distributable executable |
-| `clpm deps add <dep>[@<constraint>]...` | Add one or more dependencies |
-| `clpm deps remove <dep>` | Remove a dependency |
+| `clpm deps add [--dev\|--test] [--any\|--caret] ... <system>...` | Add one or more dependencies |
+| `clpm deps remove [--dev\|--test] <system>` | Remove a dependency |
 | `clpm deps sync [--to lock\|source\|build\|active]` | Resolve, fetch, build, and activate by stage |
 | `clpm deps update [sys...]` | Update dependencies |
-| `clpm deps search <query>` | Search configured registries |
-| `clpm deps info <system>` | Show system details |
-| `clpm deps tree` | Show dependency tree |
-| `clpm deps why <system>` | Explain why a system is included |
+| `clpm deps search <query> [--limit N] [--json]` | Search configured registries |
+| `clpm deps info <system> [--json] [--all]` | Show system details |
+| `clpm deps tree [--package <member>] [--depth N]` | Show dependency tree |
+| `clpm deps why <system> [--package <member>]` | Explain why a system is included |
 | `clpm deps audit [--json]` | Provenance report |
-| `clpm deps sbom --format <cyclonedx-json\|cyclonedx-xml\|spdx-json>` | SBOM export |
+| `clpm deps sbom --format <cyclonedx-json\|cyclonedx-xml\|spdx-json> [--out <path>]` | SBOM export |
 | `clpm registry <add\|list\|update\|trust\|init\|key\|publish> ...` | Manage registries, keys, trust, and publishing |
 | `clpm run [-- <args...>]` | Run the project entrypoint |
 | `clpm run exec -- <cmd...>` | Run a command in the project env |
 | `clpm run test` | Run project tests |
-| `clpm run script <name>` | Run a project script |
+| `clpm run script <name> [-- <args...>]` | Run a project script |
+| `clpm run scripts` | List project scripts |
 | `clpm repl <daemon\|eval\|call> ...` | Persistent project REPL/debug protocol |
-| `clpm store clean [--dist]` | Remove project-local outputs |
-| `clpm store gc` | Garbage collect store |
+| `clpm store clean [--dist] [--store]` | Remove project-local outputs |
+| `clpm store gc [--dry-run]` | Garbage collect store |
 
 ### Top-Level Options
 

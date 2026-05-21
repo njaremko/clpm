@@ -1003,6 +1003,30 @@ but output kind and machine-readable shape are semantic.
     acceptable inside the implementation boundary, but it should not become
     public API again.
 
+### Iteration 23: Attack Generated Guidance Drift
+
+- Commands deleted:
+  - README omissions that hid surviving public forms such as `run scripts`,
+    `store clean --store`, `store gc --dry-run`, `deps search --json`, and
+    `deps tree --package`.
+  - Agent skill wording that described `-p/--package` as a global option.
+- Commands merged:
+  - README and `clpm skill` now describe the same scoped-option model as root
+    help and command-specific help.
+- Commands derived instead of exposed:
+  - Documentation is a projection of the command algebra. It does not get to
+    invent old names, broader option scope, or narrower command forms.
+- Commands that survived and why:
+  - The generated skill remains because agents need an operational checklist,
+    but its command examples must remain law-abiding.
+- Laws/protocol invariants added:
+  - Agent guidance is not allowed to widen option scope:
+    `skillText` does not contain `global -p`.
+- Remaining discomfort:
+  - README is still hand-maintained Markdown rather than generated from the
+    command schema. Tests pin the highest-risk generated skill drift; README
+    needs continued manual review after each CLI cut.
+
 ## Constructors
 
 Terminal constructors:
@@ -1297,6 +1321,10 @@ Law: "package/export schema"
 
 Law: "root/export schema"
   exportedSymbols(clpm) = { main, run-cli }
+
+Law: "skill guidance does not widen option scope"
+  "global `-p" notin skillText
+  "scoped `-p <member>`" in skillText
 ```
 
 Rejected instances:

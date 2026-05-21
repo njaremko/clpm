@@ -61,7 +61,11 @@
   (assert-contains stdout "clpm repl call list-watches")
   (assert-contains stdout "clpm repl call debug-abort --session 1")
   (assert-contains stdout "Do not leave kept debug sessions")
+  (assert-contains stdout "scoped `-p <member>`")
   (assert-contains stdout "clpm skill")
+  (assert-true (not (search "global `-p" stdout :test #'char-equal))
+               "skill output still describes workspace targeting as global:~%~A"
+               stdout)
   (assert-true (not (search "clpm run repl" stdout))
                "skill output still advertises ordinary REPL:~%~A"
                stdout)
