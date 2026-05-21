@@ -34,6 +34,30 @@
   (unless (equal expected actual)
     (fail "Assertion failed: expected ~S, got ~S" expected actual)))
 
+(defun assert-contains (haystack needle)
+  (assert-true (and (stringp haystack)
+                    (search needle haystack :test #'char-equal))
+               "Expected output to contain ~S, got:~%~A"
+               needle
+               haystack))
+
+(defun run-cli-captured (args)
+  (let ((out (make-string-output-stream))
+        (err (make-string-output-stream)))
+    (let ((*standard-output* out)
+          (*error-output* err))
+      (let ((code (clpm:run-cli args)))
+        (values code
+                (get-output-stream-string out)
+                (get-output-stream-string err))))))
+
+(defun assert-duplicate-option (args option)
+  (multiple-value-bind (code stdout stderr)
+      (run-cli-captured args)
+    (declare (ignore stdout))
+    (assert-eql 1 code)
+    (assert-contains stderr (format nil "Duplicate option: ~A" option))))
+
 (defparameter *expected-gitignore*
   ".DS_Store
 .clpm/
@@ -52,6 +76,26 @@
          (bin-root (merge-pathnames "binproj/" workspace))
          (lib-root (merge-pathnames "libproj/" workspace)))
     (ensure-directories-exist workspace)
+
+    ;; Singleton value options must reject duplicates before creating files.
+    (assert-duplicate-option
+     (list "project" "new" "dupdir" "--lib"
+           "--dir" (namestring workspace)
+           "--dir" (namestring (merge-pathnames "other-ws/" tmp)))
+     "--dir")
+
+    (let ((member-a (merge-pathnames "member-a/" tmp))
+          (member-b (merge-pathnames "member-b/" tmp)))
+      (dolist (member-root (list member-a member-b))
+        (ensure-directories-exist member-root)
+        (clpm.workspace:write-workspace-file
+         (clpm.workspace:make-workspace :format 1 :members '())
+         (merge-pathnames "clpm.workspace" member-root)))
+      (assert-duplicate-option
+       (list "project" "new" "dupmember" "--lib"
+             "--member-of" (namestring member-a)
+             "--member-of" (namestring member-b))
+       "--member-of"))
 
     ;; --bin
     (uiop:with-current-directory (workspace)

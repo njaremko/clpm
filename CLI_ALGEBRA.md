@@ -2626,6 +2626,7 @@ Law: "leaf singleton options are values"
   duplicate opt in {
     ["deps", "search", query, "--limit"],
     ["deps", "sbom", "--format"],
+    ["project", "new", name, opt] where opt in {"--dir", "--member-of"},
     ["project", "workspace", "list", "--dir"],
     ["registry", "add", "--name"],
     ["registry", "init", opt] where opt in {"--dir", "--key-id", "--keys-dir"},
@@ -2865,7 +2866,8 @@ Failed-counterexample regressions:
   error can mask the malformed argv.
 - Duplicate singleton leaf options reject instead of silently overwriting:
   `deps search --limit`, `deps sbom --format`,
-  `project workspace list --dir`, `registry add --name`,
+  `project new --dir/--member-of`, `project workspace list --dir`,
+  `registry add --name`,
   `registry init` value flags, `registry key generate/list/import/verify`
   value flags, `registry publish` value flags, and `repl eval --worker`.
 - Root help, README, and generated `clpm skill` output state that scoped

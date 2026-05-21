@@ -119,7 +119,9 @@ When not in a project, only the global config registries are used."
           (kind nil)
           (dir nil)
           (workspace-p nil)
-          (member-of nil))
+          (member-of nil)
+          (dir-seen nil)
+          (member-of-seen nil))
       (unless (and name (plusp (length name)) (not (char= (char name 0) #\-)))
         (usage-error "Missing project name"))
       ;; Parse flags
@@ -138,11 +140,17 @@ When not in a project, only the global config registries are used."
                  (usage-error "Only one of --bin or --lib may be specified"))
                (setf kind :lib))
               ((string= arg "--dir")
+               (when dir-seen
+                 (usage-error "Duplicate option: --dir"))
+               (setf dir-seen t)
                (incf i)
                (when (>= i (length args))
                  (usage-error "Missing value for --dir"))
                (setf dir (nth i args)))
               ((string= arg "--member-of")
+               (when member-of-seen
+                 (usage-error "Duplicate option: --member-of"))
+               (setf member-of-seen t)
                (incf i)
                (when (>= i (length args))
                  (usage-error "Missing value for --member-of"))
