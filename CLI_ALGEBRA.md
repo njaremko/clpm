@@ -2434,6 +2434,36 @@ but output kind and machine-readable shape are semantic.
     can still intentionally address that endpoint outside the CLI-selected
     project algebra.
 
+### Iteration 78: Generated Guidance Must Typecheck Against Method Schema
+
+- Commands deleted:
+  - No runtime command token. The deleted surface is generated agent guidance
+    that advertised invalid `repl call` arguments: `xref --direction calls`,
+    `macroexpand --full true`, and `watch --dir src`.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - `clpm skill` remains a generated documentation observation over the same
+    CLI and method algebra. It is not allowed to invent extra aliases for
+    method parameters.
+- Commands that survived and why:
+  - `xref --direction callers` survives because `callers` is a member of the
+    closed xref direction domain.
+  - `macroexpand --recursive true` survives because `recursive` is the method
+    parameter that selects full expansion.
+  - `watch --dir /absolute/path/to/src` survives because watchers denote
+    daemon-owned filesystem watches over absolute directories.
+- Laws/protocol invariants added:
+  - Every generated `clpm repl call METHOD --PARAM VALUE` example must satisfy
+    the callable method schema reported by `repl call help --method METHOD`.
+  - Generated guidance may use placeholders, but placeholders must preserve
+    the parameter domain: an absolute-path parameter must be shown as an
+    absolute path.
+- Remaining discomfort:
+  - `clpm skill` is still hand-assembled strings in the command layer. The
+    test now pins the highest-risk examples; a future internal generator could
+    derive examples from method specs.
+
 ## Constructors
 
 Terminal constructors:

@@ -119,8 +119,8 @@ clpm repl call kill-worker --name scratch
 clpm repl call compile-file --path src/foo.lisp
 clpm repl call load-file --path src/foo.lisp
 clpm repl call find-definition --symbol my-function
-clpm repl call xref --symbol my-function --direction calls
-clpm repl call macroexpand --form '(my-macro x)' --full true
+clpm repl call xref --symbol my-function --direction callers
+clpm repl call macroexpand --form '(my-macro x)' --recursive true
 clpm repl call documentation --symbol my-function --type function
 clpm repl call arglist --symbol my-function
 
@@ -131,7 +131,7 @@ clpm repl call inspect-eval --session ins-1 --form '(length *)'
 clpm repl call inspect-close --session ins-1
 
 # watch, trace, profile
-clpm repl call watch --dir src --glob '*.lisp' --auto-revert true
+clpm repl call watch --dir /absolute/path/to/src --glob '*.lisp' --auto-revert true
 clpm repl call list-watches
 clpm repl call unwatch --id 1
 clpm repl call trace --symbols '["my-fn"]'

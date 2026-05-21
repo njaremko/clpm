@@ -233,6 +233,17 @@
   (assert-eql 0 code)
   (assert-contains stdout "Usage: clpm run script"))
 
+;; deps remove: leaf page uses the same system-target spelling as parser
+;; errors and README.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "deps" "remove"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm deps remove [--dev|--test] <system>")
+  (assert-not-contains stdout "<dep>"
+                       "deps remove help leaked alternate target name:~%~A"
+                       stdout))
+
 ;; registry trust set: leaf page (drills two levels).
 (multiple-value-bind (code stdout stderr)
     (run-cli-captured '("help" "registry" "trust" "set"))

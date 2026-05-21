@@ -3459,7 +3459,7 @@ persistent package), `kind' (one of \"function\", \"method\", \"macro\",
 (defun %xref-entries (symbol direction)
   "Return JSON entries for an xref query.
 DIRECTION is one of :callers, :callees, :references, :sets, :binds,
-:macroexpands, :specializers."
+:macroexpands, :specializes."
   (handler-case
       (let ((raw
               (case direction

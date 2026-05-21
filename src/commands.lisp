@@ -729,7 +729,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
          (log-error "Unexpected argument: ~A" arg)
          (return-from cmd-remove 1))))
     (unless system-id
-      (log-error "Usage: clpm deps remove <system> [--dev|--test]")
+      (log-error "Usage: clpm deps remove [--dev|--test] <system>")
       (return-from cmd-remove 1))
 
     (when (and dev-p test-p)
@@ -1265,7 +1265,7 @@ manifest; root-level entries in that set are tagged \"(optional)\"."
   "Explain why a system appears in the resolved dependency graph."
   (labels ((usage-error (fmt &rest fmt-args)
              (apply #'log-error fmt fmt-args)
-             (log-error "Usage: clpm [-p <member>] deps why <system-id>")
+             (log-error "Usage: clpm [-p <member>] deps why <system>")
              (return-from cmd-why 1)))
     (let ((target nil))
       ;; Parse args
@@ -1282,7 +1282,7 @@ manifest; root-level entries in that set are tagged \"(optional)\"."
           (incf i)))
 
       (unless (and (stringp target) (plusp (length target)))
-        (usage-error "Missing <system-id>"))
+        (usage-error "Missing <system>"))
 
       (multiple-value-bind (_project-root manifest-path lock-path workspace-root _workspace-path)
           (find-effective-project-root)
@@ -5900,14 +5900,14 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "clpm repl call inspect --form '(make-hash-table)'"
     "clpm repl call arglist --symbol my-function"
     "clpm repl call find-definition --symbol my-function"
-    "clpm repl call xref --symbol my-function --direction calls"
-    "clpm repl call macroexpand --form '(my-macro x)' --full true"
+    "clpm repl call xref --symbol my-function --direction callers"
+    "clpm repl call macroexpand --form '(my-macro x)' --recursive true"
     "```"
     ""
     "Watch and cleanup:"
     ""
     "```sh"
-    "clpm repl call watch --dir src --glob '*.lisp' --auto-revert true"
+    "clpm repl call watch --dir /absolute/path/to/src --glob '*.lisp' --auto-revert true"
     "clpm repl call list-watches"
     "clpm repl call unwatch --id 1"
     "clpm repl call list-traced"
@@ -6051,7 +6051,7 @@ sub-subcommand=\"set\")."
             (p "Run `clpm deps sync` after dependency edits to realize the graph.")
             0)
            ((and sub (string= sub "remove"))
-            (p "Usage: clpm deps remove [--dev|--test] <dep>")
+            (p "Usage: clpm deps remove [--dev|--test] <system>")
             0)
            ((and sub (string= sub "sync"))
             (p "Usage: clpm deps sync [--to lock|source|build|active]")

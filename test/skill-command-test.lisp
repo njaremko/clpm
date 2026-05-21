@@ -60,6 +60,18 @@
   (assert-contains stdout "clpm repl eval '(error")
   (assert-contains stdout "clpm repl eval FORM [--package P] [--worker W] [--no-autostart] [--json]")
   (assert-contains stdout "clpm repl eval FORM [--package P] [--worker W] [--no-autostart] --debug [debug-options]")
+  (assert-contains stdout "clpm repl call xref --symbol my-function --direction callers")
+  (assert-true (not (search "--direction calls" stdout :test #'char-equal))
+               "skill output still advertises invalid xref direction:~%~A"
+               stdout)
+  (assert-contains stdout "clpm repl call macroexpand --form '(my-macro x)' --recursive true")
+  (assert-true (not (search "clpm repl call macroexpand --form '(my-macro x)' --full true" stdout :test #'char-equal))
+               "skill output still advertises invalid macroexpand parameter:~%~A"
+               stdout)
+  (assert-contains stdout "clpm repl call watch --dir /absolute/path/to/src --glob '*.lisp' --auto-revert true")
+  (assert-true (not (search "clpm repl call watch --dir src" stdout :test #'char-equal))
+               "skill output still advertises a relative watch directory:~%~A"
+               stdout)
   (assert-contains stdout "clpm repl call list-watches")
   (assert-contains stdout "clpm repl call debug-abort --session 1")
   (assert-contains stdout "Do not leave kept debug sessions")

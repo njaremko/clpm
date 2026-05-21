@@ -189,7 +189,7 @@
     (format t "Testing clpm deps remove argv validation...~%")
     (uiop:with-current-directory (tmp)
       (dolist (case '((("deps" "remove")
-                       "Usage: clpm deps remove <system> [--dev|--test]")
+                       "Usage: clpm deps remove [--dev|--test] <system>")
                       (("deps" "remove" "--bogus")
                        "Unknown option: --bogus")))
         (destructuring-bind (args expected) case
