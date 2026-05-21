@@ -2289,7 +2289,6 @@ server-owned session for later `call debug-* ...' requests."
                (log-error "Invalid integer for --timeout-ms: ~A" raw)
                (return-from %bridge-eval 1))
              (setf timeout-ms n)))
-          ((string= arg "--pretty"))   ; human is the default
           ((null form) (setf form arg))
           (t
            (log-error "Unknown eval option: ~A" arg)

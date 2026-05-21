@@ -164,6 +164,11 @@
                  (assert-contains stdout "=> 3")
                  (assert-true (not (search "\"result\"" stdout))
                               "default eval should not be JSON: ~A" stdout))
+               (multiple-value-bind (rc _stdout stderr)
+                   (run-cli-captured '("repl" "eval" "(+ 1 2)" "--pretty"))
+                 (declare (ignore _stdout))
+                 (assert-eql 1 rc)
+                 (assert-contains stderr "Unknown eval option: --pretty"))
                (run-cli-captured '("repl" "eval"
                                    "(defparameter *cli-x* 41)"))
                (multiple-value-bind (rc stdout)

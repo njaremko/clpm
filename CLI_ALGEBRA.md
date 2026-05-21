@@ -868,6 +868,26 @@ but output kind and machine-readable shape are semantic.
     operator/admin functionality, but their side effects are now CLPM-owned
     registry data rather than ambient VCS state.
 
+### Iteration 18: Attack No-Op Eval Output Alias
+
+- Commands deleted:
+  - `repl eval --pretty`.
+- Commands merged:
+  - Human rendering remains the default `repl eval` observation.
+- Commands derived instead of exposed:
+  - A flag that denotes the default observation is not a constructor.
+    `--json` is the only eval output-mode flag because it changes the
+    observation to the raw structured RPC response.
+- Commands that survived and why:
+  - `repl eval FORM` survives as human one-form evaluation.
+  - `repl eval FORM --json` survives as machine-readable eval response.
+- Laws/protocol invariants added:
+  - No inert output aliases:
+    `parse ["repl", "eval", form, "--pretty"] = Error`.
+- Remaining discomfort:
+  - Root help still groups leaf-scoped options under the top-level usage
+    banner. That should be attacked next as help/schema drift.
+
 ## Constructors
 
 Terminal constructors:
@@ -1080,6 +1100,11 @@ Law: "publish has no VCS side effects"
   denote (registry (publish args)) ctx world =
     writeSignedRegistryArtifacts args ctx world
 
+Law: "eval has no default-output alias"
+  parse ["repl", "eval", form, "--pretty"] = Error
+  parse ["repl", "eval", form] = Right (repl (eval form Human))
+  parse ["repl", "eval", form, "--json"] = Right (repl (eval form Json))
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -1278,6 +1303,8 @@ Failed-counterexample regressions:
   pin refresh is `clpm registry trust refresh quicklisp`.
 - `clpm registry publish --git-commit ...` is rejected; publish does not run
   VCS commands.
+- `clpm repl eval FORM --pretty` is rejected; human output is the default and
+  has no flag alias.
 
 Reference versus optimized equivalence:
 
