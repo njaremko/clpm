@@ -589,6 +589,9 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
 (defclass server ()
   ((socket-path :initarg :socket-path :reader server-socket-path)
    (project-root :initarg :project-root :initform nil :reader server-project-root)
+   (initial-package :initarg :initial-package
+                    :initform (find-package "COMMON-LISP-USER")
+                    :reader server-initial-package)
    (transport :initarg :transport :initform nil :accessor server-transport)
    (socket :initform nil :accessor server-socket)
    (workers :initform (make-hash-table :test 'equal)
@@ -635,6 +638,35 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
     (if (and (stringp project-root) (plusp (length project-root)))
         (uiop:ensure-directory-pathname project-root)
         *default-pathname-defaults*)))
+
+(defun %project-package-name (project-root)
+  "Return the package name for PROJECT-ROOT's default REPL namespace."
+  (concatenate 'string "CLPM.REPL.USER." project-root))
+
+(defun %project-initial-package (project-root)
+  "Return the default package for a project daemon.
+
+Raw in-process test servers that do not carry PROJECT-ROOT keep CL-USER.
+Project daemons get a package keyed by canonical project identity, so
+unqualified definitions in one project are not visible in another daemon
+hosted by the same Lisp process."
+  (cond
+    ((and (stringp project-root) (plusp (length project-root)))
+     (let ((name (%project-package-name project-root)))
+       (or (find-package name)
+           (make-package name :use '("COMMON-LISP")))))
+    (t
+     (find-package "COMMON-LISP-USER"))))
+
+(defun %delete-project-initial-package (server)
+  "Delete SERVER's CLPM-owned project package after daemon shutdown."
+  (let ((project-root (and server (server-project-root server)))
+        (package (and server (server-initial-package server))))
+    (when (and (stringp project-root)
+               package
+               (string= (package-name package)
+                        (%project-package-name project-root)))
+      (ignore-errors (delete-package package)))))
 
 (defparameter +max-log-bytes+ (* 10 1024 1024)
   "Rotate `.clpm/repl.log' once it grows past this many bytes.")
@@ -1253,11 +1285,12 @@ list of the last eval; `**' / `++' / `//' are the prior, `***' / `+++' /
          ,@body)
        (progn ,@body)))
 
-(defun %read-history-snapshot (history)
+(defun %read-history-snapshot (history &optional package)
   "Capture WORKER-local history as a JSON-friendly alist."
-  (loop for name in +history-symbols+
-        for value in (%history-values history)
-        collect (cons name (%safe-prin1 value))))
+  (let ((*package* (or package *package*)))
+    (loop for name in +history-symbols+
+          for value in (%history-values history)
+          collect (cons name (%safe-prin1 value)))))
 
 (defun %update-history! (history last-form last-values)
   "Shift the worker-local REPL history bindings."
@@ -1702,11 +1735,13 @@ sessions."
                (let ((value-strings
                        (and (null code)
                             (%with-print-options options
-                              (mapcar (lambda (v) (%safe-prin1 v)) returned-values))))
+                              (let ((*package* package))
+                                (mapcar (lambda (v) (%safe-prin1 v))
+                                        returned-values)))))
                      (history-snap
                        (and (null code)
                             history
-                            (handler-case (%read-history-snapshot history)
+                            (handler-case (%read-history-snapshot history package)
                               (error () nil)))))
                  (make-eval-result
                   :code code
@@ -1979,7 +2014,7 @@ SERVER-WORKERS-MUTEX."
          (worker (make-worker :name name
                               :server server
                               :mailbox mailbox
-                              :package (find-package "COMMON-LISP-USER")
+                              :package (server-initial-package server)
                               :concurrent? concurrent?)))
     (setf (worker-thread worker)
           (clpm.repl.compat:make-thread
@@ -4942,6 +4977,8 @@ process."
          (transport (make-transport :kind kind :path advertise))
          (server (make-instance 'server :socket-path advertise
                                         :project-root project-root
+                                        :initial-package
+                                        (%project-initial-package project-root)
                                         :transport transport)))
     (when (and log-path (stringp log-path))
       (setf (server-event-log server) (%open-event-log log-path)))
@@ -5019,7 +5056,8 @@ process."
               (error () nil))))
         (%log-event (server-event-log server) "stop")
         (%close-event-log (server-event-log server))
-        (%close-listener transport)))))
+        (%close-listener transport)
+        (%delete-project-initial-package server)))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Request context: per-in-flight-request handle used by dispatch to emit

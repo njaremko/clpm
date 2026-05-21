@@ -158,7 +158,7 @@
                (multiple-value-bind (rc stdout)
                    (run-cli-captured '("repl" "call" "current-package"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "COMMON-LISP-USER"))
+                 (assert-contains stdout "CLPM.REPL.USER."))
                (run-cli-captured '("repl" "call" "set-package"
                                    "--name" "COMMON-LISP"))
                (multiple-value-bind (rc stdout)

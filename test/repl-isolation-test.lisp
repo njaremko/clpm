@@ -113,6 +113,19 @@
         do (sleep 0.1))
   (assert-true (probe-file path) "daemon socket did not appear: ~A" path))
 
+(defun wait-for-project-ping (project-root expected-fragment)
+  (loop for i from 0 below 20
+        do (multiple-value-bind (rc stdout stderr)
+               (run-cli-captured '("repl" "call" "ping")
+                                 :directory project-root)
+             (declare (ignore stderr))
+             (when (and (zerop rc)
+                        (search expected-fragment stdout))
+               (return-from wait-for-project-ping stdout))
+             (sleep 0.1)))
+  (fail "daemon for ~A did not answer as project ~S"
+        project-root expected-fragment))
+
 (defun stop-daemon (project-root)
   (ignore-errors
     (run-cli-captured '("repl" "call" "debug-abort")
@@ -133,9 +146,17 @@
           (thread-b nil))
       (sleep 0.05)
       (wait-for-socket sock-a)
+      (format t "Test: daemon start cleans foreign lifecycle files~%")
+      (write-pidfile project-b (sb-posix:getpid))
+      (point-socket-at project-b sock-a)
       (setf thread-b (start-daemon-thread project-b "project-b"))
       (sleep 0.05)
-      (wait-for-socket sock-b)
+      (loop for i from 0 below 20
+            while (and thread-b (not (sb-thread:thread-alive-p thread-b)))
+            do (sleep 0.1))
+      (assert-true (and thread-b (sb-thread:thread-alive-p thread-b))
+                   "project-b daemon refused to start over foreign repl lifecycle files")
+      (wait-for-project-ping project-b "project-b")
       (unwind-protect
            (progn
              (multiple-value-bind (rc _stdout stderr)
@@ -175,10 +196,11 @@
                (assert-not-contains stdout "TRACE-SHARED-TARGET"))
              (multiple-value-bind (rc stdout stderr)
                  (run-cli-captured '("repl" "eval"
-                                     "(trace-shared-target 41)"
+                                     "(fboundp 'trace-shared-target)"
                                      "--no-autostart")
                                    :directory project-b)
                (assert-eql 0 rc)
+               (assert-contains stdout "=> NIL")
                (assert-not-contains stdout "TRACE-SHARED-TARGET")
                (assert-not-contains stderr "TRACE-SHARED-TARGET"))
              (run-cli-captured

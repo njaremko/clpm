@@ -1854,7 +1854,8 @@ workflows, not the runtime image."
   "If the manifest sets `:repl (:autostart t ...)`, ensure a daemon is
 running for PROJECT-ROOT by launching `daemon --detach' when one is not.
 
-Idempotent: if the existing pidfile points at a live process, do nothing.
+Idempotent: if the existing pidfile points at this project's live daemon,
+do nothing. Foreign project lifecycle files are stale and are replaced.
 Failures are logged but never propagate -- `clpm deps sync' must not fail
 because the daemon couldn't come up."
   (handler-case
@@ -1863,8 +1864,19 @@ because the daemon couldn't come up."
         (%bridge-clean-stale sock pid)
         (let ((existing (%bridge-read-pidfile pid)))
           (when (and existing (%bridge-pid-alive-p existing))
-            (log-info "repl daemon already running (pid ~D)" existing)
-            (return-from %bridge-maybe-autostart)))
+            (multiple-value-bind (state _ping _obj)
+                (%bridge-ping-daemon sock project-root)
+              (declare (ignore _ping _obj))
+              (cond
+                ((eq state :running)
+                 (log-info "repl daemon already running (pid ~D)" existing)
+                 (return-from %bridge-maybe-autostart))
+                ((eq state :project-mismatch)
+                 (%bridge-clean-lifecycle-files sock pid))
+                (t
+                 (log-error "repl autostart: daemon pid ~D is not responsive"
+                            existing)
+                 (return-from %bridge-maybe-autostart))))))
         (let ((clpm-bin (%bridge-clpm-executable)))
           (unless clpm-bin
             (log-error "repl autostart: could not find current clpm executable")
@@ -1911,8 +1923,20 @@ because the daemon couldn't come up."
       (%bridge-clean-stale sock pid)
       (let ((existing (%bridge-read-pidfile pid)))
         (when (and existing (%bridge-pid-alive-p existing))
-          (log-error "Daemon already running (pid ~D, socket ~A)" existing sock)
-          (return-from %bridge-daemon-start 1)))
+          (multiple-value-bind (state _ping _obj)
+              (%bridge-ping-daemon sock project-root)
+            (declare (ignore _ping _obj))
+            (cond
+              ((eq state :running)
+               (log-error "Daemon already running (pid ~D, socket ~A)"
+                          existing sock)
+               (return-from %bridge-daemon-start 1))
+              ((eq state :project-mismatch)
+               (%bridge-clean-lifecycle-files sock pid))
+              (t
+               (log-error "Daemon pid ~D is running but not responsive"
+                          existing)
+               (return-from %bridge-daemon-start 1))))))
       (cond
         (detach
          (let ((clpm-bin (%bridge-clpm-executable)))
@@ -2055,6 +2079,13 @@ multi-arg restart-case clause behind an &REST wrapper."
                 (and args (format nil "[~{~A~^ ~}]" args))
                 file line)))))
 
+(defun %bridge-default-package-name-p (name)
+  (and (stringp name)
+       (or (string= name "COMMON-LISP-USER")
+           (let ((prefix "CLPM.REPL.USER."))
+             (and (>= (length name) (length prefix))
+                  (string= prefix name :end2 (length prefix)))))))
+
 (defun %bridge-pretty-print-success (obj stream)
   "Pretty-print a successful eval result OBJ to STREAM."
   (let* ((value (%bridge-field obj "value"))
@@ -2079,7 +2110,7 @@ multi-arg restart-case clause behind an &REST wrapper."
       (format stream "redefined: ~A ~A~%"
               (or (%bridge-field redef "kind") "?")
               (or (%bridge-field redef "name") "?")))
-    (when (and pkg (stringp pkg) (not (string= pkg "COMMON-LISP-USER")))
+    (when (and pkg (stringp pkg) (not (%bridge-default-package-name-p pkg)))
       (format stream "package: ~A~%" pkg))
     (when (and elapsed (integerp elapsed) (> elapsed 100))
       (format stream "elapsed: ~Dms~%" elapsed))))

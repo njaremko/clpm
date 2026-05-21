@@ -2196,6 +2196,38 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None for trusted registry metadata erasure.
 
+### Iteration 71: REPL Identity Is Project Identity
+
+- Commands deleted:
+  - The accidental lifecycle path where a live pidfile plus any socket file
+    meant "this project's daemon exists" before proving the daemon's project
+    identity.
+  - The accidental in-process sharing of `COMMON-LISP-USER` as the default
+    eval package for every project daemon.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - A daemon's default eval namespace is derived from canonical project root,
+    not from process-global `CL-USER`.
+- Commands that survived and why:
+  - `repl daemon`, `repl eval`, and `repl call` survive as the lifecycle,
+    ergonomic eval, and RPC constructors for one project-scoped image.
+- Laws/protocol invariants added:
+  - `daemonExists(project)` requires both live lifecycle metadata and
+    `ping.project_root = canonical(project)`.
+  - `defaultPackage(projectA) != defaultPackage(projectB)` when their canonical
+    roots differ, so unqualified definitions in one foreground project daemon
+    are not visible in another daemon hosted by the same Lisp process.
+  - Shutting down a project daemon releases CLPM's owned default package, so a
+    later foreground daemon in the same Lisp process does not inherit stopped
+    REPL bindings as a hidden cache.
+  - Explicit package selection remains explicit: `--package` and `set-package`
+    may choose a shared package by name, but the default constructor never does.
+- Remaining discomfort:
+  - ASDF's loaded-system registry is process-global in raw in-process test
+    servers. Detached CLI daemons remain separate OS processes, and the default
+    eval namespace now covers the user-visible REPL binding leak.
+
 ## Constructors
 
 Terminal constructors:
@@ -2634,6 +2666,11 @@ Failed-counterexample regressions:
 - A stale REPL endpoint in project B that points at project A is treated as
   absent for B; `repl call`, `repl eval --no-autostart`, and debug eval do
   not surface project A's daemon.
+- `clpm repl daemon` and manifest repl autostart prove a live endpoint's
+  `project_root` before deciding a selected project's daemon already exists.
+- Two foreground project daemons hosted by one Lisp process get distinct
+  default eval packages; an unqualified function defined in project A is not
+  fbound in project B's default REPL context.
 - A live unrelated PID in `.clpm/repl.pid` without `.clpm/repl.sock` is stale
   lifecycle metadata; status and stop clean the selected project's files and
   leave the unrelated process alive.
