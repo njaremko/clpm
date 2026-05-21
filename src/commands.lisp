@@ -458,23 +458,15 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
 
 (defun cmd-add (&rest args)
   "Add dependencies to clpm.project and refresh clpm.lock."
-  (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
-      (find-effective-project-root)
-    (declare (ignore lock-path _workspace-path))
-    (unless manifest-path
-      (when (null workspace-root)
-        (log-no-project-found))
-      (return-from cmd-add 1))
-
-    (let ((specs '())
-          (dev-p nil)
-          (test-p nil)
-          (any-p nil)
-          (caret-p nil)
-          (registry-name nil)
-          (path nil)
-          (git-url nil)
-          (git-ref nil))
+  (let ((specs '())
+        (dev-p nil)
+        (test-p nil)
+        (any-p nil)
+        (caret-p nil)
+        (registry-name nil)
+        (path nil)
+        (git-url nil)
+        (git-ref nil))
       ;; Parse args
       (let ((i 0))
         (loop while (< i (length args)) do
@@ -565,17 +557,25 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
         (log-error "--ref requires --git")
         (return-from cmd-add 1))
 
-      (let* ((project (clpm.project:read-project-file manifest-path))
-             (registries (load-project-registries project))
-             (section (cond
-                        (dev-p :dev-depends)
-                        (test-p :test-depends)
-                        (t :depends)))
-             (registry-index nil))
-        (labels ((registry-index ()
-                   (or registry-index
-                       (setf registry-index
-                             (clpm.registry:build-registry-index registries))))
+      (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
+          (find-effective-project-root)
+        (declare (ignore lock-path _workspace-path))
+        (unless manifest-path
+          (when (null workspace-root)
+            (log-no-project-found))
+          (return-from cmd-add 1))
+
+        (let* ((project (clpm.project:read-project-file manifest-path))
+               (registries (load-project-registries project))
+               (section (cond
+                          (dev-p :dev-depends)
+                          (test-p :test-depends)
+                          (t :depends)))
+               (registry-index nil))
+          (labels ((registry-index ()
+                     (or registry-index
+                         (setf registry-index
+                               (clpm.registry:build-registry-index registries))))
                  (provider-names (system-id)
                    (sort (remove-duplicates
                           (mapcar (lambda (entry)

@@ -2618,6 +2618,10 @@ Law: "run exec argv boundary before project lookup"
 Law: "leaf argv validation before state lookup"
   denote (parse ["deps", "remove"]) ctx world = FailedUsage
   denote (parse ["deps", "remove", "--bogus"]) ctx world = FailedUsage
+  denote (parse ["deps", "add"]) ctx world = FailedUsage
+  denote (parse ["deps", "add", "--dev", "--test", system]) ctx world = FailedUsage
+  denote (parse ["deps", "add", "--path", path, "--git", url,
+                 "--ref", ref, system]) ctx world = FailedUsage
   denote (parse ["run", "script"]) ctx world = FailedUsage
   -- these failures are independent of project discovery, registry state,
   -- lockfile state, activation state, and manifest contents.
@@ -2865,9 +2869,9 @@ Failed-counterexample regressions:
 - `clpm run exec`, `clpm run exec --`, and `clpm run exec sh -c true`
   reject with `run exec` usage before any project discovery error can mask the
   malformed argv.
-- `clpm deps remove`, `clpm deps remove --bogus`, and `clpm run script`
-  reject with command-local usage/option errors before any project discovery
-  error can mask the malformed argv.
+- `clpm deps remove`, `clpm deps remove --bogus`, malformed `clpm deps add`
+  argv, and `clpm run script` reject with command-local usage/option errors
+  before any project discovery error can mask the malformed argv.
 - Duplicate singleton leaf options reject instead of silently overwriting:
   `deps search --limit`, `deps tree --depth`, `deps sbom --format`,
   `project new --dir/--member-of`, `project workspace list --dir`,
