@@ -63,11 +63,10 @@
          (clpm-home (merge-pathnames "clpm-home/" tmp))
          (binary (merge-pathnames "bin/clpm" prefix))
          (binary-image (merge-pathnames "bin/clpm.bin" prefix))
-         (data-dir (merge-pathnames ".local/share/clpm/" home))
+         (data-dir clpm-home)
          (old-home (sb-posix:getenv "HOME"))
          (old-clpm-home (sb-posix:getenv "CLPM_HOME")))
     (ensure-directories-exist home)
-    (ensure-directories-exist clpm-home)
     (unwind-protect
          (progn
            (sb-posix:setenv "HOME" (namestring home) 1)

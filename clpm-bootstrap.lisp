@@ -42,15 +42,17 @@
 
 ;;; Platform detection
 
+(defun env-directory (name)
+  "Return NAME's environment value as a directory pathname, or NIL."
+  (let ((value (sb-ext:posix-getenv name)))
+    (when (and value (plusp (length value)))
+      (uiop:ensure-directory-pathname value))))
+
 (defun home-dir ()
   "Return the user's home directory as a directory pathname."
-  (let ((home (or (sb-ext:posix-getenv "HOME")
-                  (sb-ext:posix-getenv "USERPROFILE"))))
-    (cond
-      ((and home (plusp (length home)))
-       (uiop:ensure-directory-pathname home))
-      (t
-       (uiop:ensure-directory-pathname (user-homedir-pathname))))))
+  (or (env-directory "HOME")
+      (env-directory "USERPROFILE")
+      (uiop:ensure-directory-pathname (user-homedir-pathname))))
 
 (defun default-prefix ()
   (uiop:ensure-directory-pathname
@@ -60,7 +62,22 @@
   (merge-pathnames "bin/" (default-prefix)))
 
 (defun default-data-dir ()
-  (merge-pathnames ".local/share/clpm/" (home-dir)))
+  "Return the CLPM data directory used by the installed runtime."
+  (or (env-directory "CLPM_HOME")
+      #+(or linux freebsd openbsd netbsd)
+      (let ((xdg (env-directory "XDG_DATA_HOME")))
+        (if xdg
+            (merge-pathnames "clpm/" xdg)
+            (merge-pathnames ".local/share/clpm/" (home-dir))))
+      #+darwin
+      (merge-pathnames ".local/share/clpm/" (home-dir))
+      #+windows
+      (let ((localappdata (env-directory "LOCALAPPDATA")))
+        (if localappdata
+            (merge-pathnames "clpm/" localappdata)
+            (merge-pathnames ".clpm/" (home-dir))))
+      #-(or linux freebsd openbsd netbsd darwin windows)
+      (merge-pathnames ".clpm/" (home-dir))))
 
 ;;; Utility functions
 
