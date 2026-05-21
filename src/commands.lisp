@@ -1762,9 +1762,11 @@ malformed."
     (error () nil)))
 
 (defun %bridge-clean-stale (sock-path pid-path)
-  "Remove SOCK-PATH and PID-PATH if the PID is dead or the pidfile is bogus."
+  "Remove SOCK-PATH and PID-PATH when lifecycle metadata cannot name a daemon."
   (let ((pid (%bridge-read-pidfile pid-path)))
-    (when (or (null pid) (not (%bridge-pid-alive-p pid)))
+    (when (or (null pid)
+              (not (%bridge-pid-alive-p pid))
+              (not (probe-file sock-path)))
       (ignore-errors (delete-file pid-path))
       (ignore-errors (delete-file sock-path))
       t)))
@@ -2475,11 +2477,13 @@ server-owned session for later `call debug-* ...' requests."
       (let ((existing (%bridge-read-pidfile pid)))
         (cond
           ((null existing)
+           (%bridge-clean-stale sock pid)
            (if *bridge-cli-json*
                (emit-json "not-running")
                (format t "not running~%"))
            0)
-          ((not (%bridge-pid-alive-p existing))
+          ((or (not (%bridge-pid-alive-p existing))
+               (not (probe-file sock)))
            (%bridge-clean-lifecycle-files sock pid)
            (if *bridge-cli-json*
                (emit-json "stale")
@@ -2545,7 +2549,8 @@ are dropped, matching `%bridge-make-params'."
         ((null existing)
          (format t "not running~%")
          0)
-        ((not (%bridge-pid-alive-p existing))
+        ((or (not (%bridge-pid-alive-p existing))
+             (not (probe-file sock)))
          (%bridge-clean-lifecycle-files sock pid)
          (format t "cleaned stale pidfile~%")
          0)

@@ -2068,6 +2068,32 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None.
 
+### Iteration 66: Daemon Liveness Is Endpoint Liveness
+
+- Commands deleted:
+  - The accidental lifecycle state where a live unrelated PID in
+    `.clpm/repl.pid` without the advertised socket could make a project look
+    like it had a daemon.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Pidfiles are implementation metadata for the selected project endpoint;
+    they are not an independent daemon identity.
+- Commands that survived and why:
+  - `repl daemon --status` survives as the observation of selected-project
+    lifecycle state.
+  - `repl daemon --stop` survives as the lifecycle mutation for a proven
+    selected-project daemon.
+- Laws/protocol invariants added:
+  - `running(root)` requires a live pidfile, an existing endpoint, and a
+    successful daemon ping whose `project_root` equals `root`.
+  - A pidfile that names a live process but has no endpoint denotes stale
+    lifecycle metadata, not an unresponsive daemon.
+  - Cleaning stale lifecycle metadata must not signal or kill the pid named in
+    the stale pidfile.
+- Remaining discomfort:
+  - None.
+
 ## Constructors
 
 Terminal constructors:
@@ -2506,6 +2532,9 @@ Failed-counterexample regressions:
 - A stale REPL endpoint in project B that points at project A is treated as
   absent for B; `repl call`, `repl eval --no-autostart`, and debug eval do
   not surface project A's daemon.
+- A live unrelated PID in `.clpm/repl.pid` without `.clpm/repl.sock` is stale
+  lifecycle metadata; status and stop clean the selected project's files and
+  leave the unrelated process alive.
 - `clpm --insecure help` is rejected; `--insecure` is not an inert
   pre-command global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes
