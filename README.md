@@ -98,6 +98,7 @@ from disk.
 ```bash
 clpm deps sync                                       # one-time setup
 clpm repl daemon --detach                           # background daemon
+clpm repl daemon --status --json                    # machine-readable status
 clpm repl eval '(asdf:load-system "my-app")'
 clpm repl eval '(my-app:hello)'
 clpm repl call methods                              # list every RPC

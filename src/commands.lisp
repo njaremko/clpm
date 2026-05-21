@@ -2164,8 +2164,7 @@ JSON object `{type, restart, args}'. Returns NIL on a malformed spec."
                                  [--frame-eval FORM] [--keep]
                                  [--no-autostart] [--json]'.
 
-Default rendering is human-readable; pass `--json' (or rely on the
-global `--json' flag) for the raw JSON line.
+Default rendering is human-readable; pass `--json' for the raw JSON line.
 
 `--handler' may appear multiple times -- each spec is applied as a
 declarative restart for any condition matching TYPE. ARGS, if given,
@@ -2453,20 +2452,26 @@ foreground, `--detach' starts background, `--status' observes state, and
 `--stop' requests shutdown."
   (let ((status nil)
         (stop nil)
+        (json nil)
         (start-args '()))
     (loop while args do
       (let ((arg (pop args)))
         (cond
           ((string= arg "--status") (setf status t))
           ((string= arg "--stop") (setf stop t))
+          ((string= arg "--json") (setf json t))
           (t (push arg start-args)))))
     (when (and status stop)
       (log-error "Use only one of --status or --stop")
       (return-from %bridge-daemon 1))
-    (cond
-      (status (%bridge-status '()))
-      (stop (%bridge-stop '()))
-      (t (%bridge-daemon-start (nreverse start-args))))))
+    (when (and json (not status))
+      (log-error "Use --json only with `clpm repl daemon --status`")
+      (return-from %bridge-daemon 1))
+    (let ((*bridge-cli-json* (or *bridge-cli-json* json)))
+      (cond
+        (status (%bridge-status '()))
+        (stop (%bridge-stop '()))
+        (t (%bridge-daemon-start (nreverse start-args)))))))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Generic helpers used by the new single-shot CLI surface.
@@ -2806,15 +2811,7 @@ quotes around every non-JSON atom."
               0)))))))))
 
 ;;; ----------------------------------------------------------------------------
-;;; Dispatcher (with JSON flag support, alias normalization, and help).
-
-(defun %bridge-strip-json-flag (args)
-  "Extract `--json' from anywhere in ARGS; return (values json-p new-args)."
-  (let ((j nil) (out '()))
-    (loop for a in args
-          do (cond ((string= a "--json") (setf j t))
-                   (t (push a out))))
-    (values j (nreverse out))))
+;;; Dispatcher.
 
 (defun %bridge-help (args)
   "Print the small public repl CLI surface."
@@ -2822,7 +2819,7 @@ quotes around every non-JSON atom."
     (log-error "Usage: clpm repl [daemon|eval|call] ...")
     (return-from %bridge-help 1))
   (format t "Usage:~%")
-  (format t "  clpm repl daemon [--detach] [--no-load] [--status] [--stop]~%")
+  (format t "  clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]~%")
   (format t "  clpm repl eval FORM [--package P] [--worker W] [--debug] ...~%")
   (format t "  clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...~%~%")
   (format t "Use `clpm repl call methods` to list daemon RPCs.~%")
@@ -2834,19 +2831,16 @@ quotes around every non-JSON atom."
   "Dispatcher for `clpm repl <subcommand>'.
 
 See `clpm help repl' for the full surface."
-  (multiple-value-bind (json args)
-      (%bridge-strip-json-flag args)
-    (let* ((*bridge-cli-json* (or *bridge-cli-json* json))
-           (sub (pop args)))
-      (cond
-        ((or (null sub) (string= sub "--help") (string= sub "-h"))
-         (%bridge-help args))
-        ((string= sub "daemon") (%bridge-daemon args))
-        ((string= sub "eval") (%bridge-eval args))
-        ((string= sub "call") (%bridge-call args))
-        (t
-         (log-error "Unknown subcommand: ~A (expected daemon, eval, or call)" sub)
-         1)))))
+  (let ((sub (pop args)))
+    (cond
+      ((or (null sub) (string= sub "--help") (string= sub "-h"))
+       (%bridge-help args))
+      ((string= sub "daemon") (%bridge-daemon args))
+      ((string= sub "eval") (%bridge-eval args))
+      ((string= sub "call") (%bridge-call args))
+      (t
+       (log-error "Unknown subcommand: ~A (expected daemon, eval, or call)" sub)
+       1))))
 
 ;;; run/exec commands
 
@@ -5723,7 +5717,7 @@ sub-subcommand=\"set\")."
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
          (cond
            ((and sub (string= sub "daemon"))
-            (p "Usage: clpm repl daemon [--detach] [--no-load] [--status] [--stop]")
+            (p "Usage: clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]")
             (p "")
             (p "Start, inspect, or stop the daemon Lisp image for the current")
             (p "project. Bare daemon starts in the foreground; --detach starts")
@@ -5733,6 +5727,7 @@ sub-subcommand=\"set\")."
             (p "  --detach   Launch in the background and return.")
             (p "  --no-load  Skip loading .clpm/asdf-config.lisp.")
             (p "  --status   Report state and clean stale pid/socket files.")
+            (p "  --json     With --status, emit raw JSON.")
             (p "  --stop     Ask the daemon to shut down cleanly.")
             (p "")
             (p "Example:")

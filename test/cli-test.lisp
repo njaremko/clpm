@@ -79,6 +79,17 @@
     (assert-eql :internal status)))
 (format t "  Public handler exports PASSED~%")
 
+(format t "Testing JSON option scope...~%")
+(dolist (args '(("repl" "--json")
+                ("--json" "repl")))
+  (multiple-value-bind (code _out err)
+      (run-cli-captured args)
+    (declare (ignore _out))
+    (assert-eql 1 code)
+    (unless (search "Unknown subcommand: --json" err)
+      (fail "Expected repl resource-level --json to be rejected, got: ~A" err))))
+(format t "  JSON option scope PASSED~%")
+
 (format t "Testing run-program :timeout keyword...~%")
 (multiple-value-bind (output error-output exit-code)
     (clpm.platform:run-program (list "sh" "-c" "exit 0") :timeout 1)

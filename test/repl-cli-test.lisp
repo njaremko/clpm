@@ -143,6 +143,14 @@
             (assert-contains stdout "pid"))
           (format t "  status OK~%")
 
+          (format t "Test: daemon --status --json reports raw status~%")
+          (multiple-value-bind (rc stdout)
+              (run-cli-captured '("repl" "daemon" "--status" "--json"))
+            (assert-eql 0 rc)
+            (assert-contains stdout "\"state\":\"running\"")
+            (assert-contains stdout "\"pid\""))
+          (format t "  status --json OK~%")
+
           (format t "Test: eval --no-autostart fails after stop~%")
           (multiple-value-bind (rc stdout stderr)
               (run-cli-captured '("repl" "daemon" "--stop"))

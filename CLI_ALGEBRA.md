@@ -283,7 +283,7 @@ clpm [options] run scripts
 clpm [options] store clean [--dist] [--store]
 clpm [options] store gc [--dry-run]
 
-clpm [options] repl daemon [--detach] [--no-load] [--status] [--stop]
+clpm [options] repl daemon [--detach] [--no-load] [--status [--json]] [--stop]
 clpm [options] repl eval FORM [--package P] [--worker W] [--debug] ...
 clpm [options] repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
@@ -436,6 +436,35 @@ Bare `clpm [options]` denotes `clpm [options] help`.
     debugging sometimes requires bypassing trust. It is semantically marked
     as an integrity override and must stay noisy in documentation and logs.
 
+### Iteration 5: Attack Output-Mode Scope
+
+- Commands deleted:
+  - No commands. The cut removes a hidden option placement: `clpm repl --json`
+    is not a public observation.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - Resource-level `repl --json` had no denotation. JSON rendering belongs to
+    the observation that can produce a machine-readable value:
+    `repl eval ... --json` or `repl daemon --status --json`.
+- Commands that survived and why:
+  - `repl daemon --status --json` survives because daemon status is a useful
+    machine observation.
+  - `repl eval ... --json` survives because eval responses are already typed
+    RPC responses.
+  - `repl call METHOD` remains JSON by construction; it is the raw protocol
+    escape hatch and does not need an output-mode flag.
+- Laws/protocol invariants added:
+  - Output mode is scoped to observations, not resource dispatchers:
+    `parse ["repl", "--json"] = Error`.
+  - JSON daemon status is an observation:
+    `parse ["repl", "daemon", "--status", "--json"] =
+     Repl (Daemon (Status Json))`.
+- Remaining discomfort:
+  - `repl call METHOD` is still intentionally broad. It survives only as the
+    controlled protocol hook and remains a target for the next RPC-overreach
+    attack.
+
 ## Constructors
 
 Terminal constructors:
@@ -572,6 +601,11 @@ Law: "json observations are stable"
 forall obs ctx world.
   jsonSupported obs
   => renderJson obs ctx world = renderJson obs ctx world
+
+Law: "json is leaf-scoped"
+  parse ["repl", "--json"] = Error
+  parse ["repl", "daemon", "--status", "--json"] =
+    Right (repl (daemon (status Json)))
 
 Law: "help is schema projection"
 forall selector ctx world.
@@ -744,6 +778,8 @@ Failed-counterexample regressions:
   surface and point at `clpm repl`.
 - `clpm.commands:cmd-install`, `clpm.commands:cmd-keys`,
   `clpm.commands:cmd-gc`, and other leaf handlers are not external symbols.
+- `clpm repl --json` is rejected; `--json` is not a resource-level output
+  mode.
 
 Reference versus optimized equivalence:
 
