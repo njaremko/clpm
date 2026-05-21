@@ -2618,6 +2618,34 @@ but output kind and machine-readable shape are semantic.
     highest-risk umbrella rows; a generator from the help schema would be a
     cleaner long-term proof.
 
+### Iteration 84: Umbrella Help Is Still Public Syntax
+
+- Commands deleted:
+  - `clpm project workspace <init|add|remove|list> ...` in project help and
+    project arity errors.
+  - `clpm registry <add|list|update|trust|init|key|publish> [options]` in
+    registry help and registry arity errors.
+- Commands merged:
+  - Project root usage now shares one exact leaf emitter across `clpm project`
+    and `clpm help project`.
+  - Registry root usage now shares one exact leaf emitter across
+    `clpm registry` and `clpm help registry`.
+- Commands derived instead of exposed:
+  - Root resource help is a schema projection over leaf constructors, not a
+    separate grammar with a residual subcommand/options bucket.
+- Commands that survived and why:
+  - Workspace, registry, trust, key, and publish leaves survive with exact
+    arities because each denotes a distinct state transition or observation.
+- Laws/protocol invariants added:
+  - Every user-facing usage block that summarizes a resource must be no broader
+    than the union of its focused help leaf pages.
+  - Help and arity-error observations for the same resource use the same
+    emitter, preventing command/error drift.
+- Remaining discomfort:
+  - Top-level root help intentionally lists resource families (`project ...`,
+    `registry ...`) rather than every leaf. That is a navigation index, not a
+    usage block; leaf usage remains under `clpm help <resource>`.
+
 ## Constructors
 
 Terminal constructors:

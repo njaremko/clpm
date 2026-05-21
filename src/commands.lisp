@@ -314,18 +314,24 @@ When not in a project, only the global config registries are used."
                            (namestring project-root))
                  0))))))))
 
+(defun %emit-project-usage (emit)
+  (funcall emit "Usage:")
+  (funcall emit "  clpm project new <name> --workspace [--dir <path>]")
+  (funcall emit "  clpm project new <name> --bin|--lib [--dir <path>]")
+  (funcall emit "  clpm project new <name> --bin|--lib --member-of <workspace-dir>")
+  (funcall emit "  clpm project init [name]")
+  (funcall emit "  clpm project workspace init [--dir <path>]")
+  (funcall emit "  clpm project workspace add <member> [--dir <path>]")
+  (funcall emit "  clpm project workspace remove <member> [--dir <path>]")
+  (funcall emit "  clpm project workspace list [--dir <path>]")
+  (funcall emit "  clpm project package"))
+
 (defun cmd-project (&rest args)
   "Dispatch project-resource operations."
   (let ((sub (first args))
         (rest (rest args)))
     (labels ((usage ()
-               (log-error "Usage:")
-               (log-error "  clpm project new <name> --workspace [--dir <path>]")
-               (log-error "  clpm project new <name> --bin|--lib [--dir <path>]")
-               (log-error "  clpm project new <name> --bin|--lib --member-of <workspace-dir>")
-               (log-error "  clpm project init [name]")
-               (log-error "  clpm project workspace <init|add|remove|list> ...")
-               (log-error "  clpm project package")
+               (%emit-project-usage #'log-error)
                1))
       (cond
         ((or (null sub) (string= sub "--help"))
@@ -4252,6 +4258,22 @@ Default: remove the project's .clpm/ activation cache.
     (:quicklisp "tofu or sha256:<64-hex-digest>")
     (t "a supported trust string")))
 
+(defun %emit-registry-usage (emit)
+  (funcall emit "Usage:")
+  (funcall emit "  clpm registry add --name <name> --url <git-url> --trust ed25519:<key-id>")
+  (funcall emit "  clpm registry add --quicklisp [--name quicklisp] [--url <dist-url>] [--trust tofu|sha256:<64-hex-digest>]")
+  (funcall emit "  clpm registry list")
+  (funcall emit "  clpm registry update [name ...]")
+  (funcall emit "  clpm registry trust list")
+  (funcall emit "  clpm registry trust set <name> <trust>")
+  (funcall emit "  clpm registry trust refresh <name>")
+  (funcall emit "  clpm registry init --dir <path> --key-id <id> --keys-dir <dir>")
+  (funcall emit "  clpm registry key generate --out <dir> --id <id>")
+  (funcall emit "  clpm registry key list [--keys-dir <dir>]")
+  (funcall emit "  clpm registry key import --pub <path> [--id <id>] [--keys-dir <dir>]")
+  (funcall emit "  clpm registry key verify --pub <path> --file <path> --sig <path>")
+  (funcall emit "  clpm registry publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>]"))
+
 (defun %emit-registry-trust-usage (emit)
   (funcall emit "Usage:")
   (funcall emit "  clpm registry trust list")
@@ -4264,7 +4286,7 @@ Default: remove the project's .clpm/ activation cache.
         (rest (rest args)))
     (cond
       ((null subcommand)
-       (log-error "Usage: clpm registry <list|add|update|trust|init|key|publish> [options]")
+       (%emit-registry-usage #'log-error)
        (return-from cmd-registry 1))
 
       ((string= subcommand "list")
@@ -6082,13 +6104,7 @@ sub-subcommand=\"set\")."
                (p "  clpm project workspace list [--dir <path>]")
                0)))
            (t
-            (p "Usage:")
-            (p "  clpm project new <name> --workspace [--dir <path>]")
-            (p "  clpm project new <name> --bin|--lib [--dir <path>]")
-            (p "  clpm project new <name> --bin|--lib --member-of <workspace-dir>")
-            (p "  clpm project init [name]")
-            (p "  clpm project workspace <init|add|remove|list> ...")
-            (p "  clpm project package")
+            (%emit-project-usage #'p)
             0))))
       (:deps
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
@@ -6190,8 +6206,6 @@ sub-subcommand=\"set\")."
        (p "  clpm skill > SKILL.md")
        0)
       (:registry
-       (p "Usage: clpm registry <add|list|update|trust|init|key|publish> [options]")
-       (p "")
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
          (cond
            ((and sub (string= sub "add"))
@@ -6290,6 +6304,8 @@ sub-subcommand=\"set\")."
             (p "  -p, --package <member>  Workspace member target from a workspace root.")
             0)
            (t
+            (%emit-registry-usage #'p)
+            (p "")
             (p "Subcommands:")
             (p "  add      Add or update a configured registry")
             (p "  list     List configured registries")

@@ -128,8 +128,27 @@
   (declare (ignore stderr))
   (assert-eql 0 code)
   (assert-contains stdout "--workspace")
-  (assert-contains stdout "--member-of <workspace-dir>"))
+  (assert-contains stdout "--member-of <workspace-dir>")
+  (assert-contains stdout "clpm project workspace init [--dir <path>]")
+  (assert-contains stdout "clpm project workspace add <member> [--dir <path>]")
+  (assert-contains stdout "clpm project workspace remove <member> [--dir <path>]")
+  (assert-contains stdout "clpm project workspace list [--dir <path>]")
+  (assert-not-contains stdout "clpm project workspace <init|add|remove|list> ..."
+                       "project help still exposes workspace as a residual subgrammar:~%~A"
+                       stdout))
 (format t "  `clpm help project` PASSED~%")
+
+(format t "Testing `clpm project` usage output...~%")
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("project"))
+  (declare (ignore stdout))
+  (assert-eql 1 code)
+  (assert-contains stderr "clpm project workspace init [--dir <path>]")
+  (assert-contains stderr "clpm project workspace add <member> [--dir <path>]")
+  (assert-not-contains stderr "clpm project workspace <init|add|remove|list> ..."
+                       "project arity error still exposes workspace as a residual subgrammar:~%~A"
+                       stderr))
+(format t "  `clpm project` usage PASSED~%")
 
 (format t "Testing `clpm help deps search` output...~%")
 (multiple-value-bind (code stdout stderr)
@@ -299,6 +318,31 @@
   (assert-contains stdout "Usage: clpm registry update")
   (assert-true (not (search "--refresh-trust" stdout :test #'char-equal))
                "registry update help still advertises trust refresh:~%~A" stdout))
+
+;; registry umbrella help: exact leaf rows, no hidden option bucket.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "registry"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage:")
+  (assert-contains stdout "  clpm registry add --name <name> --url <git-url> --trust ed25519:<key-id>")
+  (assert-contains stdout "  clpm registry trust refresh <name>")
+  (assert-contains stdout "  clpm registry key verify --pub <path> --file <path> --sig <path>")
+  (assert-not-contains stdout "Usage: clpm registry <add|list|update|trust|init|key|publish> [options]"
+                       "registry help still exposes hidden subcommand/options grammar:~%~A"
+                       stdout))
+
+;; registry missing subcommand: same exact leaf rows.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("registry"))
+  (declare (ignore stdout))
+  (assert-eql 1 code)
+  (assert-contains stderr "Usage:")
+  (assert-contains stderr "  clpm registry add --name <name> --url <git-url> --trust ed25519:<key-id>")
+  (assert-contains stderr "  clpm registry trust refresh <name>")
+  (assert-not-contains stderr "Usage: clpm registry <list|add|update|trust|init|key|publish> [options]"
+                       "registry arity error still exposes hidden subcommand/options grammar:~%~A"
+                       stderr))
 
 ;; registry trust missing subcommand: error text mirrors the same closed forms.
 (multiple-value-bind (code stdout stderr)
