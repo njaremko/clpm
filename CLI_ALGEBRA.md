@@ -1057,6 +1057,32 @@ but output kind and machine-readable shape are semantic.
     explaining the pre-command workspace selector separately from
     `repl eval --package`.
 
+### Iteration 25: Attack Workspace REPL Directory Leakage
+
+- Commands deleted:
+  - No command tokens. This cut removes an accidental launch-context leak.
+- Commands merged:
+  - Foreground and detached daemon startup now have the same project image
+    context: socket, pid/log files, protocol `project_root`, and pathname
+    defaults all resolve to the selected project root. A standalone daemon
+    process starts with its cwd at that root too.
+- Commands derived instead of exposed:
+  - Workspace member selection remains a `ProjectTarget`; it derives every
+    daemon identity field rather than only the socket path.
+- Commands that survived and why:
+  - `clpm -p <member> repl daemon` survives because a workspace member can
+    own a foreground daemon just like a detached daemon.
+- Laws/protocol invariants added:
+  - Project REPL image identity includes path context:
+    `denote (repl daemon) (ProjectTarget root) world =
+     startImage { socketRoot = root, projectRoot = root,
+                  pathnameDefaults = root, processCwd = root }`.
+- Remaining discomfort:
+  - Multiple foreground daemons embedded in one host Lisp still share the
+    operating-system cwd because the OS process owns that state. In-process
+    tests therefore validate per-daemon Lisp pathname defaults as the useful
+    isolation boundary for relative Lisp file operations.
+
 ## Constructors
 
 Terminal constructors:

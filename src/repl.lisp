@@ -627,6 +627,13 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
    (shutdown-requested? :initform nil :accessor server-shutdown-requested?)
    (event-log :initform nil :accessor server-event-log)))
 
+(defun %server-default-pathname-defaults (server)
+  "Return the pathname defaults that belong to SERVER's project image."
+  (let ((project-root (and server (server-project-root server))))
+    (if (and (stringp project-root) (plusp (length project-root)))
+        (uiop:ensure-directory-pathname project-root)
+        *default-pathname-defaults*)))
+
 (defparameter +max-log-bytes+ (* 10 1024 1024)
   "Rotate `.clpm/repl.log' once it grows past this many bytes.")
 
@@ -1890,8 +1897,11 @@ while keeping the timer fired count small."
 result-mailbox. Returns when a `:stop' sentinel arrives. Binds
 `*current-worker*' so `%eval-one' and `%record-redefinition' land their
 side-effects on the right worker."
-  (let ((*server* (worker-server worker))
-        (mailbox (worker-mailbox worker)))
+  (let* ((server (worker-server worker))
+         (*server* server)
+         (*default-pathname-defaults*
+           (%server-default-pathname-defaults server))
+         (mailbox (worker-mailbox worker)))
     (loop
       (let ((job (clpm.repl.compat:receive-message mailbox)))
         (cond
@@ -2767,7 +2777,9 @@ out so the watcher's `watch' request finally completes."
             (clpm.repl.compat:make-thread
              (let ((owner server))
                (lambda ()
-                 (let ((*server* owner))
+                 (let ((*server* owner)
+                       (*default-pathname-defaults*
+                         (%server-default-pathname-defaults owner)))
                    (%watch-loop owner w))))
              :name (format nil "clpm.repl.watch[~D]" id)))
       (setf (gethash id (server-watches server)) w)
@@ -4920,9 +4932,10 @@ PROJECT-ROOT is the canonical project identity accepted from CLPM CLI
 clients in each request's `project_root' parameter. A NIL PROJECT-ROOT means
 raw test/tooling servers do not enforce a project-root guard.
 
-Each daemon thread binds `*server*' dynamically to its own SERVER. Connection
-and worker threads inherit that identity explicitly so multiple project
-daemons can coexist in one host Lisp process."
+Each daemon thread binds `*server*' and project-root pathname defaults
+dynamically to its own SERVER. Connection and worker threads inherit that
+identity explicitly so multiple project daemons can coexist in one host Lisp
+process."
   (let* ((kind (or transport-kind (%default-transport-kind)))
          (advertise (ecase kind
                       (:unix (or socket-path
@@ -4935,7 +4948,9 @@ daemons can coexist in one host Lisp process."
                                         :transport transport)))
     (when (and log-path (stringp log-path))
       (setf (server-event-log server) (%open-event-log log-path)))
-    (let ((*server* server))
+    (let ((*server* server)
+          (*default-pathname-defaults*
+            (%server-default-pathname-defaults server)))
       (unwind-protect
            (progn
              (%open-listener transport)
@@ -4962,7 +4977,9 @@ daemons can coexist in one host Lisp process."
                       (let ((c conn)
                             (owner server))
                         (lambda ()
-                          (let ((*server* owner))
+                          (let ((*server* owner)
+                                (*default-pathname-defaults*
+                                  (%server-default-pathname-defaults owner)))
                             (unwind-protect
                                  (handler-case
                                      (%handle-connection owner c)
@@ -5406,7 +5423,9 @@ with v2 toggles requiring continuations)."
            (clpm.repl.compat:make-thread
             (let ((owner server))
               (lambda ()
-                (let ((*server* owner))
+                (let ((*server* owner)
+                      (*default-pathname-defaults*
+                        (%server-default-pathname-defaults owner)))
                   (handler-case
                       (%dispatch-and-finalize owner cstate id method params)
                     (error (c)

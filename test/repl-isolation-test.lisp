@@ -3,10 +3,12 @@
 (require :asdf)
 (require :sb-posix)
 
-(let* ((this-file (or *load-truename* *load-pathname*))
-       (test-dir (uiop:pathname-directory-pathname this-file))
-       (repo-root (uiop:pathname-parent-directory-pathname test-dir)))
-  (push repo-root asdf:*central-registry*))
+(defparameter *repo-root*
+  (let* ((this-file (or *load-truename* *load-pathname*))
+         (test-dir (uiop:pathname-directory-pathname this-file)))
+    (uiop:pathname-parent-directory-pathname test-dir)))
+
+(push *repo-root* asdf:*central-registry*)
 
 (format t "Loading CLPM...~%")
 (handler-case
@@ -75,11 +77,17 @@
                        :external-format :utf-8)
       (write-string ";; empty for test~%" s))))
 
-(defun start-daemon-thread (project-root name)
+(defun write-workspace (workspace-root members)
+  (ensure-directories-exist workspace-root)
+  (clpm.workspace:write-workspace-file
+   (clpm.workspace:make-workspace :format 1 :members members)
+   (merge-pathnames "clpm.workspace" workspace-root)))
+
+(defun start-daemon-thread (directory name &optional (args '("repl" "daemon")))
   (sb-thread:make-thread
    (lambda ()
      (handler-case
-         (run-cli-captured '("repl" "daemon") :directory project-root)
+         (run-cli-captured args :directory directory)
        (error (c)
          (format *error-output* "~A daemon thread died: ~A~%" name c)
          (force-output *error-output*))))
@@ -148,6 +156,57 @@
           (ignore-errors (sb-thread:terminate-thread thread-a)))
         (when (and thread-b (sb-thread:thread-alive-p thread-b))
           (ignore-errors (sb-thread:terminate-thread thread-b)))))))
+
+(sb-posix:chdir (namestring *repo-root*))
+
+(with-short-temp-dir (tmp)
+  (let* ((workspace-root (merge-pathnames "workspace/" tmp))
+         (app-root (merge-pathnames "app/" workspace-root))
+         (lib-root (merge-pathnames "lib/" workspace-root))
+         (sock-app (namestring (merge-pathnames ".clpm/repl.sock" app-root))))
+    (write-workspace workspace-root '("app" "lib"))
+    (write-minimal-project app-root "app")
+    (write-minimal-project lib-root "lib")
+    (format t "Test: foreground workspace member daemon uses member cwd~%")
+    (let ((thread (start-daemon-thread
+                   workspace-root
+                   "workspace-app"
+                   '("-p" "app" "repl" "daemon"))))
+      (sleep 0.05)
+      (wait-for-socket sock-app)
+      (unwind-protect
+           (progn
+             (let ((resp (clpm.repl:send-request
+                          sock-app
+                          "eval"
+                          :params (list :object
+                                        (list
+                                         (cons "project_root"
+                                               (namestring
+                                                (uiop:ensure-directory-pathname
+                                                 (truename app-root))))
+                                         (cons "form"
+                                               "(namestring (uiop:getcwd))"))))))
+               (assert-contains (prin1-to-string resp)
+                                (namestring (truename app-root))))
+             (multiple-value-bind (rc stdout stderr)
+                 (run-cli-captured
+                  '("-p" "app" "repl" "eval"
+                    "(namestring *default-pathname-defaults*)"
+                    "--no-autostart")
+                  :directory workspace-root)
+               (unless (zerop rc)
+                 (fail "workspace app cwd eval failed: ~D~%stdout:~%~A~%stderr:~%~A"
+                       rc stdout stderr))
+               (assert-contains stdout (format nil "=> ~S"
+                                               (namestring (truename app-root)))))
+             (format t "  workspace foreground cwd isolation OK~%"))
+        (stop-daemon app-root)
+        (loop for i from 0 below 30
+              while (and thread (sb-thread:thread-alive-p thread))
+              do (sleep 0.1))
+        (when (and thread (sb-thread:thread-alive-p thread))
+          (ignore-errors (sb-thread:terminate-thread thread)))))))
 
 (format t "~%REPL isolation tests PASSED!~%")
 (sb-ext:exit :code 0)
