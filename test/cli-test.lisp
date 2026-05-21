@@ -30,6 +30,12 @@
   (unless (string= expected actual)
     (fail "Assertion failed: expected ~S, got ~S" expected actual)))
 
+(defun sorted-external-symbol-names (package-name)
+  (let ((names '()))
+    (do-external-symbols (sym package-name)
+      (push (symbol-name sym) names))
+    (sort names #'string<)))
+
 (defun assert-equal (expected actual)
   (unless (equal expected actual)
     (fail "Assertion failed: expected ~S, got ~S" expected actual)))
@@ -129,6 +135,12 @@
       (find-symbol name "CLPM.COMMANDS")
     (declare (ignore _symbol))
     (assert-eql :internal status)))
+(assert-equal '("CMD-DEPS" "CMD-DOCTOR" "CMD-HELP" "CMD-PROJECT"
+                "CMD-REGISTRY" "CMD-REPL" "CMD-RUN" "CMD-SKILL"
+                "CMD-STORE")
+              (sorted-external-symbol-names "CLPM.COMMANDS"))
+(assert-equal '("MAIN" "RUN-CLI")
+              (sorted-external-symbol-names "CLPM"))
 (format t "  Public handler exports PASSED~%")
 
 (format t "Testing JSON option scope...~%")

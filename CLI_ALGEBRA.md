@@ -1832,6 +1832,27 @@ but output kind and machine-readable shape are semantic.
   - The README table is still maintained by hand. Tests pin the high-risk
     constructor rows so drift is at least observable.
 
+### Iteration 55: Pin Exact Package Export Schema
+
+- Commands deleted:
+  - No source change. The deleted risk is partial export sampling that could
+    let command wrappers or invocation globals become public API again.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Internal command helpers remain behind the `clpm.commands` package
+    boundary.
+- Commands that survived and why:
+  - `clpm.commands:cmd-project`, `cmd-deps`, `cmd-registry`, `cmd-run`,
+    `cmd-store`, `cmd-repl`, `cmd-skill`, `cmd-help`, and `cmd-doctor`
+    survive as the resource dispatchers.
+  - `clpm:main` and `clpm:run-cli` survive as executable/test entry points.
+- Laws/protocol invariants added:
+  - The tests now check exact external symbol sets for `CLPM.COMMANDS` and
+    `CLPM`, not only selected internal/external examples.
+- Remaining discomfort:
+  - This is evidence hardening, not a semantic expansion.
+
 ## Constructors
 
 Terminal constructors:
@@ -2304,6 +2325,7 @@ Failed-counterexample regressions:
   support trust refresh and does not describe a no-op for git registries.
 - README documents the workspace, standalone project, and workspace-member
   `project new` constructor forms.
+- Tests pin the exact public exports of `CLPM.COMMANDS` and `CLPM`.
 - `clpm registry publish --git-commit ...` is rejected; publish does not run
   VCS commands.
 - `clpm repl eval FORM --pretty` is rejected; human output is the default and
