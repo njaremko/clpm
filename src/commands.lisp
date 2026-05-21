@@ -2665,6 +2665,21 @@ quotes around every non-JSON atom."
       (cell (setf (cdr cell) value) alist)
       (t (append alist (list (cons name value)))))))
 
+(defparameter +bridge-reserved-call-params+ '("project_root" "token")
+  "Protocol params owned by the client transport, not `repl call' users.")
+
+(defun %bridge-reserved-call-param-p (name)
+  (member name +bridge-reserved-call-params+ :test #'string=))
+
+(defun %bridge-add-call-param (params name value)
+  "Add one public `repl call' parameter, rejecting transport-owned fields."
+  (cond
+    ((%bridge-reserved-call-param-p name)
+     (log-error "Reserved repl call parameter: ~A" name)
+     (values params nil))
+    (t
+     (values (%bridge-put-param params name value) t))))
+
 (defun %bridge-call-params-object (alist)
   "Build params for `call', preserving explicit JSON null values."
   (when alist
@@ -2715,8 +2730,11 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
                  (when (eq alist :error)
                    (return-from %bridge-call 1))
                  (dolist (cell alist)
-                   (setf params (%bridge-put-param
-                                 params (car cell) (cdr cell))))))))
+                   (multiple-value-bind (next ok)
+                       (%bridge-add-call-param params (car cell) (cdr cell))
+                     (unless ok
+                       (return-from %bridge-call 1))
+                     (setf params next)))))))
           ((and (> (length arg) 2)
                 (string= "--" (subseq arg 0 2)))
            (multiple-value-bind (name inline-value inline?)
@@ -2728,10 +2746,14 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
                (unless (stringp raw)
                  (log-error "Missing value for --~A" name)
                  (return-from %bridge-call 1))
-               (setf params
-                     (%bridge-put-param params
-                                        (%bridge-param-flag-name name)
-                                        (%bridge-parse-call-value raw))))))
+               (multiple-value-bind (next ok)
+                   (%bridge-add-call-param
+                    params
+                    (%bridge-param-flag-name name)
+                    (%bridge-parse-call-value raw))
+                 (unless ok
+                   (return-from %bridge-call 1))
+                 (setf params next)))))
           (t
            (log-error "Unexpected call argument: ~A" arg)
            (return-from %bridge-call 1)))))
@@ -5891,6 +5913,7 @@ sub-subcommand=\"set\")."
            (p "Send one daemon RPC method. Parameter values are parsed as JSON")
            (p "when possible, otherwise passed as strings. Hyphens in flag names")
            (p "map to underscores in JSON parameter names.")
+           (p "`project_root` and `token` are transport fields owned by CLPM.")
            (p "The daemon must already be running; call never autostarts it.")
             (p "")
             (p "Examples:")

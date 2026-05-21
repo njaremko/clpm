@@ -116,7 +116,9 @@ State persists across `eval` calls. Hung evals are unwound with
 recovered with `clpm repl call reset`.
 Use `clpm repl eval FORM` for evaluation; `clpm repl call` is not an
 alternate spelling of the daemon's eval RPC. `call` requires an existing
-daemon; it never starts one implicitly.
+daemon; it never starts one implicitly. Transport fields such as
+`project_root` and `token` are owned by CLPM and cannot be supplied through
+`call` parameters.
 
 ### Capabilities
 

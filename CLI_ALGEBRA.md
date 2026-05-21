@@ -1179,6 +1179,33 @@ but output kind and machine-readable shape are semantic.
     plist. A future pass should split the selected continuation into a closed
     state before dispatch.
 
+### Iteration 30: Attack Public Transport Parameters
+
+- Commands deleted:
+  - `repl call METHOD --project-root VALUE`.
+  - `repl call METHOD --token VALUE`.
+  - The same fields supplied through `--params-json`.
+- Commands merged:
+  - No user-facing operation is lost. The selected project root is already the
+    resource identity of `clpm repl`, and TCP tokens are transport
+    credentials read by the client.
+- Commands derived instead of exposed:
+  - `project_root` is derived from the effective project before the request is
+    sent.
+  - `token` is derived from the daemon port file for TCP transports.
+- Commands that survived and why:
+  - Method-local params still survive because they are checked by the daemon
+    method schema.
+  - `explain` remains a protocol observation knob; it emits a plan event and
+    does not select or authenticate a different daemon.
+- Laws/protocol invariants added:
+  - `repl call` public params exclude transport fields.
+  - `denote(repl call method params)` is independent of user-supplied
+    transport credentials because such params fail before dispatch.
+- Remaining discomfort:
+  - The raw protocol still has implicit dispatch fields. That is appropriate
+    for protocol framing, but the boundary should stay narrow and documented.
+
 ## Constructors
 
 Terminal constructors:

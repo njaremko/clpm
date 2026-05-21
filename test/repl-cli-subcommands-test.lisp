@@ -126,6 +126,19 @@
                  (assert-eql 1 rc)
                  (assert-contains stdout "\"error\"")
                  (assert-contains stdout "unknown param"))
+               (multiple-value-bind (rc _stdout stderr)
+                   (run-cli-captured '("repl" "call" "ping"
+                                       "--project-root" "/tmp/not-this-project"))
+                 (declare (ignore _stdout))
+                 (assert-eql 1 rc)
+                 (assert-contains stderr "Reserved repl call parameter: project_root"))
+               (multiple-value-bind (rc _stdout stderr)
+                   (run-cli-captured
+                    '("repl" "call" "ping"
+                      "--params-json" "{\"token\":\"abc\"}"))
+                 (declare (ignore _stdout))
+                 (assert-eql 1 rc)
+                 (assert-contains stderr "Reserved repl call parameter: token"))
                (format t "  schema rejection OK~%")
 
                (format t "Test: call dispatches ordinary RPCs~%")
