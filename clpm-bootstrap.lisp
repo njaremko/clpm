@@ -69,7 +69,7 @@
   (let ((full-command (if directory
                           (format nil "cd ~A && ~A" (namestring directory) command)
                           command)))
-    (with-output-to-string (out)
+    (let ((out (make-string-output-stream)))
       (let ((process (sb-ext:run-program
                       "/bin/sh" (list "-c" full-command)
                       :output out
@@ -77,6 +77,48 @@
                       :wait t)))
         (values (get-output-stream-string out)
                 (sb-ext:process-exit-code process))))))
+
+(defun run-program (program arguments &key directory)
+  "Run PROGRAM with ARGUMENTS and return (values output exit-code)."
+  (let ((out (make-string-output-stream)))
+    (let ((process (sb-ext:run-program
+                    program arguments
+                    :search t
+                    :directory directory
+                    :output out
+                    :error out
+                    :wait t)))
+      (values (get-output-stream-string out)
+              (sb-ext:process-exit-code process)))))
+
+(defun build-clpm-from-source (source-dir output-path)
+  "Build CLPM from SOURCE-DIR into OUTPUT-PATH in a child SBCL process."
+  (let* ((source-dir (uiop:ensure-directory-pathname (truename source-dir)))
+         (output-path (uiop:ensure-pathname output-path
+                                            :want-existing nil
+                                            :want-file t))
+         (build-form
+           (format nil "~
+(let ((builder (find-symbol ~S :clpm)))
+  (unless builder
+    (error ~S))
+  (funcall builder ~S))"
+                   "BUILD-EXECUTABLE"
+                   "CLPM build executable entry point is unavailable."
+                   output-path))
+         (arguments
+           (list "--noinform"
+                 "--non-interactive"
+                 "--disable-debugger"
+                 "--eval" "(require :asdf)"
+                 "--eval" (format nil "(push ~S asdf:*central-registry*)"
+                                  source-dir)
+                 "--eval" "(asdf:load-system :clpm)"
+                 "--eval" build-form)))
+    (multiple-value-bind (output exit-code)
+        (run-program "sbcl" arguments :directory source-dir)
+      (unless (zerop exit-code)
+        (error "Build failed:~%~A" output)))))
 
 (defun which (program)
   "Find program in PATH."
@@ -147,24 +189,8 @@
 
              ;; Build CLPM
              (format t "Building CLPM...~%")
-             (let ((build-script (format nil "~
-cd ~A
-sbcl --noinform --non-interactive --disable-debugger \\
-     --eval '(require :asdf)' \\
-     --eval '(push ~S asdf:*central-registry*)' \\
-     --eval '(asdf:load-system :clpm)' \\
-     --eval '(clpm:build-executable ~S)'"
-                                         (namestring source-dir)
-                                         (namestring source-dir)
-                                         (namestring (merge-pathnames "clpm" bin-dir)))))
-
-               ;; Ensure bin directory exists
-               (ensure-directories-exist bin-dir)
-
-               (multiple-value-bind (output exit-code)
-                   (run build-script)
-                 (unless (zerop exit-code)
-                   (error "Build failed:~%~A" output))))
+             (ensure-directories-exist bin-dir)
+             (build-clpm-from-source source-dir (merge-pathnames "clpm" bin-dir))
 
              ;; Create data directory
              (ensure-directories-exist data-dir)
@@ -192,13 +218,7 @@ sbcl --noinform --non-interactive --disable-debugger \\
     ;; Build CLPM
     (format t "Building CLPM...~%")
     (ensure-directories-exist bin-dir)
-
-    ;; Load and build
-    (require :asdf)
-    (push source-dir asdf:*central-registry*)
-    (asdf:load-system :clpm)
-    (funcall (find-symbol "BUILD-EXECUTABLE" :clpm)
-             (merge-pathnames "clpm" bin-dir))
+    (build-clpm-from-source source-dir (merge-pathnames "clpm" bin-dir))
 
     ;; Create data directory
     (ensure-directories-exist data-dir)
