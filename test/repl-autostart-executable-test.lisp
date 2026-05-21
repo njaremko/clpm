@@ -28,6 +28,20 @@
   (unless (and (stringp haystack) (search needle haystack))
     (fail "expected ~S in:~%~A" needle haystack)))
 
+(defun write-pidfile (project-root pid)
+  (let ((pidfile (merge-pathnames ".clpm/repl.pid" project-root)))
+    (ensure-directories-exist pidfile)
+    (with-open-file (s pidfile :direction :output :if-exists :supersede
+                               :if-does-not-exist :create
+                               :external-format :utf-8)
+      (format s "~D~%" pid))))
+
+(defun point-socket-at (project-root target)
+  (let ((socket (merge-pathnames ".clpm/repl.sock" project-root)))
+    (ensure-directories-exist socket)
+    (ignore-errors (delete-file socket))
+    (sb-posix:symlink target (namestring socket))))
+
 (defun make-short-temp-dir ()
   "Create a short temp directory so Unix-domain socket paths stay portable."
   (let* ((template (namestring
@@ -162,6 +176,8 @@
                    (fail "project A token lookup failed: ~D~%stdout:~%~A~%stderr:~%~A"
                          rc stdout stderr))
                  (assert-contains stdout "=> :PROJECT-A"))
+               (write-pidfile proj-b (sb-posix:getpid))
+               (point-socket-at proj-b (namestring sock-a))
                (multiple-value-bind (rc stdout stderr)
                    (clpm-eval proj-b
                               "(boundp '*clpm-repl-isolation-token*)")

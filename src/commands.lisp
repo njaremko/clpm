@@ -2161,26 +2161,31 @@ own renderer so this fallback is rarely hit."
 (defun %bridge-send-or-autostart (sock pid project-root method
                                   &key params (autostart t) on-event)
   "Send a request, auto-starting the daemon on connect failure."
-  (declare (ignore pid))
-  (let* ((wire-params (%bridge-params-with-project-root params project-root))
-         (resp (clpm.repl:send-request sock method
+  (let ((wire-params (%bridge-params-with-project-root params project-root)))
+    (labels ((send-once (timeout)
+               (clpm.repl:send-request sock method
                                        :params wire-params
-                                       :connect-timeout 1
-                                       :on-event on-event)))
-    (cond
-      ((eq resp :no-daemon)
-       (cond
-         ((not autostart)
-          (log-error "No daemon running. Start one with `clpm repl daemon --detach`.")
-          (return-from %bridge-send-or-autostart nil))
-         (t
-          (let ((rc (%bridge-daemon-start (list "--detach"))))
-            (declare (ignore rc))
-            (clpm.repl:send-request sock method
-                                    :params wire-params
-                                    :connect-timeout 5
-                                    :on-event on-event)))))
-      (t resp))))
+                                       :connect-timeout timeout
+                                       :on-event on-event))
+             (no-daemon ()
+               (log-error "No daemon running for this project. Start one with `clpm repl daemon --detach`.")
+               nil)
+             (start-and-send ()
+               (let ((rc (%bridge-daemon-start (list "--detach"))))
+                 (declare (ignore rc))
+                 (send-once 5))))
+      (let ((resp (send-once 1)))
+        (cond
+          ((eq resp :no-daemon)
+           (if autostart
+               (start-and-send)
+               (no-daemon)))
+          ((%bridge-project-root-error-p resp)
+           (%bridge-clean-lifecycle-files sock pid)
+           (if autostart
+               (start-and-send)
+               (no-daemon)))
+          (t resp))))))
 
 (defun %bridge-split-on (char string)
   "Split STRING on every occurrence of CHAR (a character). Empty fields
@@ -2338,34 +2343,64 @@ server-owned session for later `call debug-* ...' requests."
       (unless project-root (return-from %bridge-eval 1))
       (cond
         (debug
-         (let ((*bridge-cli-json* (or *bridge-cli-json* json))
-               (conn (clpm.repl:open-connection sock :connect-timeout 5)))
-           (when (and (eq conn :no-daemon) autostart)
-             (let ((rc (%bridge-daemon-start (list "--detach"))))
-               (declare (ignore rc))
-               (setf conn (clpm.repl:open-connection
-                           sock :connect-timeout 5))))
-           (cond
-             ((eq conn :no-daemon)
-              (log-error "No daemon running and autostart is disabled or failed")
-              2)
-             (t
-              (let ((opts (list :package package
-                                :worker worker
-                                :project-root project-root
-                                :restart restart
-                                :arg (nreverse restart-args)
-                                :frame frame
-                                :frame-eval frame-eval
-                                :keep keep
-                                :break-on break-on
-                                :timeout-ms timeout-ms
-                                :handlers (and handlers
-                                               (list :array
-                                                     (nreverse handlers))))))
-                (unwind-protect
-                     (%bridge-debug-on-connection conn opts form)
-                  (clpm.repl:close-connection conn)))))))
+         (let ((*bridge-cli-json* (or *bridge-cli-json* json)))
+           (labels ((foreign-project-p (ping)
+                      (or (%bridge-project-root-error-p ping)
+                          (let* ((result (%bridge-obj ping))
+                                 (reported (%bridge-field result
+                                                          "project_root")))
+                            (and result
+                                 (not (and (stringp reported)
+                                           (string= reported
+                                                    (%bridge-project-root-id
+                                                     project-root))))))))
+                    (open-checked ()
+                      (let ((conn (clpm.repl:open-connection
+                                   sock :connect-timeout 5)))
+                        (cond
+                          ((eq conn :no-daemon) :no-daemon)
+                          (t
+                           (let ((ping (clpm.repl:send-on-connection
+                                        conn "ping"
+                                        :params (%bridge-params-with-project-root
+                                                 nil project-root))))
+                             (cond
+                               ((foreign-project-p ping)
+                                (clpm.repl:close-connection conn)
+                                (%bridge-clean-lifecycle-files sock pid)
+                                :no-daemon)
+                               (t conn)))))))
+                    (open-or-autostart ()
+                      (let ((conn (open-checked)))
+                        (cond
+                          ((and (eq conn :no-daemon) autostart)
+                           (let ((rc (%bridge-daemon-start
+                                      (list "--detach"))))
+                             (declare (ignore rc))
+                             (open-checked)))
+                          (t conn)))))
+             (let ((conn (open-or-autostart)))
+               (cond
+                 ((eq conn :no-daemon)
+                  (log-error "No daemon running and autostart is disabled or failed")
+                  2)
+                 (t
+                  (let ((opts (list :package package
+                                    :worker worker
+                                    :project-root project-root
+                                    :restart restart
+                                    :arg (nreverse restart-args)
+                                    :frame frame
+                                    :frame-eval frame-eval
+                                    :keep keep
+                                    :break-on break-on
+                                    :timeout-ms timeout-ms
+                                    :handlers (and handlers
+                                                   (list :array
+                                                         (nreverse handlers))))))
+                    (unwind-protect
+                         (%bridge-debug-on-connection conn opts form)
+                      (clpm.repl:close-connection conn)))))))))
         (t
          (let* ((params (%bridge-make-params
                          (list (cons "form" form)

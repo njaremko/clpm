@@ -1699,6 +1699,37 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None for SBOM output spelling.
 
+### Iteration 50: Treat Foreign REPL Endpoints as Absent
+
+- Commands deleted:
+  - No command tokens. The cut removes the observable state where one
+    project's `repl call` or `repl eval` can address a socket that belongs to
+    another project image.
+- Commands merged:
+  - A daemon endpoint whose `project_root` differs from the selected project
+    is merged into the existing "no daemon for this project" outcome.
+- Commands derived instead of exposed:
+  - Stale lifecycle cleanup remains derived from project identity validation;
+    users should not need a separate repair command before evaluating.
+- Commands that survived and why:
+  - `repl daemon --status` and `--stop` still clean stale lifecycle files.
+  - `repl eval` survives as the autostarting path: after deleting a foreign
+    endpoint it starts the selected project's daemon.
+  - `repl call` survives as non-autostarting RPC and fails as no-daemon when
+    the only reachable endpoint is foreign.
+- Laws/protocol invariants added:
+  - `endpoint.projectRoot != selectedProjectRoot => endpoint = Absent`.
+  - `replCall selectedProjectRoot method` must never observe another
+    project's daemon result.
+  - `replEval selectedProjectRoot form --no-autostart` fails with no-daemon
+    when the endpoint belongs to a different project.
+  - `replEval selectedProjectRoot form` may clean a foreign endpoint and
+    autostart only the selected project's image.
+- Remaining discomfort:
+  - The command layer still recognizes project mismatch through the daemon's
+    protocol error text. A future internal cleanup can make that a typed
+    transport result without changing the CLI algebra.
+
 ## Constructors
 
 Terminal constructors:
@@ -2134,6 +2165,9 @@ Failed-counterexample regressions:
   actions selected together.
 - `clpm deps sbom --output PATH` is rejected; `--out` is the only SBOM
   file-output spelling.
+- A stale REPL endpoint in project B that points at project A is treated as
+  absent for B; `repl call`, `repl eval --no-autostart`, and debug eval do
+  not surface project A's daemon.
 - `clpm --insecure help` is rejected; `--insecure` is not an inert
   pre-command global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes
