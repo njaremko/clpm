@@ -35,6 +35,30 @@
   (unless (string= expected actual)
     (fail "Assertion failed: expected ~S, got ~S" expected actual)))
 
+(defun assert-contains (haystack needle)
+  (assert-true (and (stringp haystack)
+                    (search needle haystack :test #'char-equal))
+               "Expected output to contain ~S, got:~%~A"
+               needle
+               haystack))
+
+(defun assert-not-contains (haystack needle)
+  (assert-true (not (and (stringp haystack)
+                         (search needle haystack :test #'char-equal)))
+               "Expected output not to contain ~S, got:~%~A"
+               needle
+               haystack))
+
+(defun run-cli-captured (args)
+  (let ((out (make-string-output-stream))
+        (err (make-string-output-stream)))
+    (let ((*standard-output* out)
+          (*error-output* err))
+      (let ((code (clpm:run-cli args)))
+        (values code
+                (get-output-stream-string out)
+                (get-output-stream-string err))))))
+
 (defun write-sexp (path form)
   (ensure-directories-exist path)
   (with-open-file (s path :direction :output
@@ -161,6 +185,21 @@
     (ensure-directories-exist proj2)
     (ensure-directories-exist proj-multi)
     (ensure-directories-exist ws)
+
+    (format t "Testing clpm deps remove argv validation...~%")
+    (uiop:with-current-directory (tmp)
+      (dolist (case '((("deps" "remove")
+                       "Usage: clpm deps remove <system> [--dev|--test]")
+                      (("deps" "remove" "--bogus")
+                       "Unknown option: --bogus")))
+        (destructuring-bind (args expected) case
+          (multiple-value-bind (code stdout stderr)
+              (run-cli-captured args)
+            (declare (ignore stdout))
+            (assert-eql 1 code)
+            (assert-contains stderr expected)
+            (assert-not-contains stderr "No clpm.project found")))))
+    (format t "  clpm deps remove argv validation PASSED~%")
 
     (unwind-protect
          (progn

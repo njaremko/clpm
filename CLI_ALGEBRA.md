@@ -2615,6 +2615,13 @@ Law: "run exec argv boundary before project lookup"
     denote (parse (["run", "exec"] ++ xs)) ctx world = FailedUsage
   -- the failure is independent of project discovery or activation state.
 
+Law: "leaf argv validation before state lookup"
+  denote (parse ["deps", "remove"]) ctx world = FailedUsage
+  denote (parse ["deps", "remove", "--bogus"]) ctx world = FailedUsage
+  denote (parse ["run", "script"]) ctx world = FailedUsage
+  -- these failures are independent of project discovery, registry state,
+  -- lockfile state, activation state, and manifest contents.
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -2835,6 +2842,9 @@ Failed-counterexample regressions:
 - `clpm run exec`, `clpm run exec --`, and `clpm run exec sh -c true`
   reject with `run exec` usage before any project discovery error can mask the
   malformed argv.
+- `clpm deps remove`, `clpm deps remove --bogus`, and `clpm run script`
+  reject with command-local usage/option errors before any project discovery
+  error can mask the malformed argv.
 - Root help, README, and generated `clpm skill` output state that scoped
   options must appear before the command token.
 - `clpm help repl eval` lists accepted debug selectors including

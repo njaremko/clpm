@@ -706,36 +706,35 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
 
 (defun cmd-remove (&rest args)
   "Remove a dependency from clpm.project and refresh clpm.lock."
-  (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
-      (find-effective-project-root)
-    (declare (ignore lock-path _workspace-path))
-    (unless manifest-path
-      (when (null workspace-root)
-        (log-no-project-found))
+  (let ((system-id nil)
+        (dev-p nil)
+        (test-p nil))
+    (dolist (arg args)
+      (cond
+        ((string= arg "--dev") (setf dev-p t))
+        ((string= arg "--test") (setf test-p t))
+        ((and (plusp (length arg)) (char= (char arg 0) #\-))
+         (log-error "Unknown option: ~A" arg)
+         (return-from cmd-remove 1))
+        ((null system-id) (setf system-id arg))
+        (t
+         (log-error "Unexpected argument: ~A" arg)
+         (return-from cmd-remove 1))))
+    (unless system-id
+      (log-error "Usage: clpm deps remove <system> [--dev|--test]")
       (return-from cmd-remove 1))
 
-    (let ((system-id nil)
-          (dev-p nil)
-          (test-p nil))
-      (dolist (arg args)
-        (cond
-          ((string= arg "--dev") (setf dev-p t))
-          ((string= arg "--test") (setf test-p t))
-          ((and (plusp (length arg)) (char= (char arg 0) #\-))
-           (log-error "Unknown option: ~A" arg)
-           (return-from cmd-remove 1))
-          ((null system-id) (setf system-id arg))
-          (t
-           (log-error "Unexpected argument: ~A" arg)
-           (return-from cmd-remove 1))))
-      (unless system-id
-        (log-error "Usage: clpm deps remove <system> [--dev|--test]")
-        (return-from cmd-remove 1))
+    (when (and dev-p test-p)
+      (log-error "Only one of --dev or --test may be specified")
+      (return-from cmd-remove 1))
 
-      (when (and dev-p test-p)
-        (log-error "Only one of --dev or --test may be specified")
+    (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
+        (find-effective-project-root)
+      (declare (ignore lock-path _workspace-path))
+      (unless manifest-path
+        (when (null workspace-root)
+          (log-no-project-found))
         (return-from cmd-remove 1))
-
       (let ((section (cond
                        (dev-p :dev-depends)
                        (test-p :test-depends)
@@ -3526,6 +3525,12 @@ Returns (values parsed-scripts exit-code)."
 
 (defun cmd-scripts (&rest args)
   "List and run project scripts defined in clpm.project."
+  (let ((sub (and (first args) (string-downcase (first args)))))
+    (when (and (stringp sub) (string= sub "run"))
+      (let ((name (second args)))
+        (unless (and (stringp name) (plusp (length name)))
+          (log-error "Usage: clpm run script <name> [-- <args...>]")
+          (return-from cmd-scripts 1)))))
   (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
       (find-effective-project-root)
     (declare (ignore lock-path _workspace-path))
