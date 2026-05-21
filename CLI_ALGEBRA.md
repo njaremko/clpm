@@ -2563,6 +2563,11 @@ Law: "fetch tuning is fetch-scoped"
   parse ["--fetch-timeout", n, "registry", "update"] =
     Right (registry update with FetchTimeout n)
 
+Law: "scalar root options are single-valued"
+  parse ["--jobs", n, "--jobs", m, "deps", "sync"] = Error
+  parse ["--fetch-retries", n, "--fetch-retries", m, "deps", "search", q] = Error
+  parse ["--fetch-timeout", n, "--fetch-timeout", m, "registry", "update"] = Error
+
 Law: "sync stage selection is single-valued"
   parse ["deps", "sync", "--to", a, "--to", b] = Error
   parse ["--offline", "deps", "sync", "--to", a, "--to", b] = Error
@@ -2872,6 +2877,9 @@ Failed-counterexample regressions:
   dependency solving.
 - `clpm --fetch-retries 2 help` and `clpm --fetch-timeout 3 repl` are
   rejected; fetch tuning is only for CLPM-managed fetch operations.
+- Duplicate scalar root options such as `--jobs 1 --jobs 2`,
+  `--fetch-retries 1 --fetch-retries 2`, and
+  `--fetch-timeout 1 --fetch-timeout 2` are rejected before command dispatch.
 - `clpm deps sync --to source --to lock`,
   `clpm --offline deps sync --to source --to lock`,
   `clpm --jobs 2 deps sync --to source --to lock`, and

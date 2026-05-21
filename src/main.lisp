@@ -87,6 +87,11 @@ Returns (values command command-args options)."
            (when (>= i (length args))
              (clpm.errors:signal-error 'clpm.errors:clpm-user-error
                                        "Missing value for ~A" arg))
+           (when (some (lambda (opt)
+                         (and (consp opt) (eq (car opt) :jobs)))
+                       options)
+             (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                       "Duplicate option: ~A" arg))
            (let* ((raw (nth i args))
                   (n (ignore-errors (parse-integer raw :junk-allowed nil))))
              (unless (and (integerp n) (plusp n))
@@ -153,6 +158,11 @@ Returns (values command command-args options)."
            (when (>= i (length args))
              (clpm.errors:signal-error 'clpm.errors:clpm-user-error
                                        "Missing value for ~A" arg))
+           (when (some (lambda (opt)
+                         (and (consp opt) (eq (car opt) :fetch-retries)))
+                       options)
+             (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                       "Duplicate option: ~A" arg))
            (let* ((raw (nth i args))
                   (n (ignore-errors (parse-integer raw :junk-allowed nil))))
              (unless (and (integerp n) (plusp n))
@@ -165,6 +175,11 @@ Returns (values command command-args options)."
            (when (>= i (length args))
              (clpm.errors:signal-error 'clpm.errors:clpm-user-error
                                        "Missing value for ~A" arg))
+           (when (some (lambda (opt)
+                         (and (consp opt) (eq (car opt) :fetch-timeout)))
+                       options)
+             (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                       "Duplicate option: ~A" arg))
            (let* ((raw (nth i args))
                   (n (ignore-errors (parse-integer raw :junk-allowed nil))))
              (unless (and (integerp n) (plusp n))

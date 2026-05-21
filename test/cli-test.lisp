@@ -113,6 +113,21 @@
               expected err)))))
 (format t "  Global option placement PASSED~%")
 
+(format t "Testing scalar root options are single-valued...~%")
+(dolist (args '(("--jobs" "1" "--jobs" "2" "deps" "sync")
+                ("-j" "1" "-j" "2" "deps" "sync")
+                ("--fetch-retries" "1" "--fetch-retries" "2"
+                 "deps" "search" "alexandria")
+                ("--fetch-timeout" "1" "--fetch-timeout" "2"
+                 "registry" "update")))
+  (multiple-value-bind (code _out err)
+      (run-cli-captured args)
+    (declare (ignore _out))
+    (assert-eql 1 code)
+    (unless (search "Duplicate option:" err)
+      (fail "Expected duplicate scalar option rejection, got: ~A" err))))
+(format t "  Scalar root option arity PASSED~%")
+
 (format t "Testing unknown command...~%")
 (assert-eql 1 (clpm:run-cli '("unknown-command")))
 (format t "  Unknown command PASSED~%")
