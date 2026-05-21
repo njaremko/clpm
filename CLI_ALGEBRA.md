@@ -1756,6 +1756,33 @@ but output kind and machine-readable shape are semantic.
   - The lower layer still uses the internal keyword `:refresh-trust` for the
     implementation parameter. That name is not a CLI constructor.
 
+### Iteration 52: Delete Full-RPC Discovery Claim
+
+- Commands deleted:
+  - No parser surface. The deleted surface is the documentation claim that
+    `repl call methods` lists every RPC.
+- Commands merged:
+  - Internal wire frames (`eval`, `shutdown`, `query-response`) remain in the
+    daemon protocol but are not merged into the public `repl call` discovery
+    observation.
+- Commands derived instead of exposed:
+  - Full protocol introspection is not a CLI observation. The public
+    observation is the callable-method schema that `repl call METHOD` can
+    construct.
+- Commands that survived and why:
+  - `repl call methods` survives as public callable RPC discovery.
+  - `repl call help --method METHOD` survives only for those discoverable
+    callable methods.
+- Laws/protocol invariants added:
+  - `methods = publicCallableMethods(methodRegistry)`.
+  - `internalMethod in {eval, shutdown, query-response} =>
+    internalMethod notin methods`.
+  - Help and README must describe `methods` as public callable discovery, not
+    full internal RPC discovery.
+- Remaining discomfort:
+  - The daemon still has internal registered frames for transport and
+    lifecycle. They are implementation protocol, not CLI algebra.
+
 ## Constructors
 
 Terminal constructors:
@@ -2222,6 +2249,8 @@ Failed-counterexample regressions:
 - Quicklisp SHA-256 mismatch errors name
   `clpm registry trust refresh <name>` and do not advertise
   `--refresh-trust`.
+- `clpm repl call methods` documentation says public callable RPC discovery,
+  not "every RPC" or full internal wire-registry discovery.
 - `clpm registry publish --git-commit ...` is rejected; publish does not run
   VCS commands.
 - `clpm repl eval FORM --pretty` is rejected; human output is the default and

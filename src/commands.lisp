@@ -6034,7 +6034,7 @@ sub-subcommand=\"set\")."
             (p "  clpm repl call <method> [--params-json <json>] [--PARAM <value>]...")
             (p "")
             (p "Drive a persistent project-scoped Lisp daemon. `call methods`")
-            (p "lists the RPC registry, and `call help --method NAME` returns")
+            (p "lists the public callable RPC registry, and `call help --method NAME` returns")
             (p "the exact parameter schema for a method. `call` requires an")
             (p "existing daemon; use `daemon --detach` or `eval` to start one.")
             (p "")

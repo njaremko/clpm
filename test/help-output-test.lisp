@@ -237,7 +237,11 @@
   (assert-eql 0 code)
   (assert-contains stdout "clpm repl daemon")
   (assert-contains stdout "clpm repl eval")
-  (assert-contains stdout "clpm repl call"))
+  (assert-contains stdout "clpm repl call")
+  (assert-contains stdout "public callable RPC")
+  (assert-not-contains stdout "lists the RPC registry"
+                       "repl help still suggests full internal RPC discovery:~%~A"
+                       stdout))
 
 ;; repl daemon: focused page.
 (multiple-value-bind (code stdout stderr)

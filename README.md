@@ -108,7 +108,7 @@ clpm repl daemon --detach                           # background daemon
 clpm repl daemon --status --json                    # machine-readable status
 clpm repl eval '(asdf:load-system "my-app")'
 clpm repl eval '(my-app:hello)'
-clpm repl call methods                              # list every RPC
+clpm repl call methods                              # list callable daemon RPCs
 clpm repl daemon --stop
 ```
 
@@ -146,9 +146,9 @@ daemon; it never starts one implicitly. Transport fields such as
   `reload-failed` / `revert-applied` events.
 - **Image introspection.** `image-info`, `loaded-systems`, `list-packages`,
   `gc`, all through `call METHOD`.
-- **Self-documenting.** Every method is published in the registry the
-  dispatcher reads. `call methods` lists them; `call help --method METHOD`
-  returns the long doc + parameter schema.
+- **Self-documenting.** Public callable methods are published in the registry
+  the dispatcher exposes. `call methods` lists them; `call help --method
+  METHOD` returns the long doc + parameter schema.
 
 Run `clpm skill` for agent recipes, and `clpm help repl` for the
 three-command REPL surface.
