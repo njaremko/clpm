@@ -2301,6 +2301,36 @@ but output kind and machine-readable shape are semantic.
     another project's token can intentionally target that daemon, but the
     daemon still rejects requests whose selected project root differs.
 
+### Iteration 74: Fixed-Arity Constructors Reject Residual Tokens
+
+- Commands deleted:
+  - Silent residual-argument acceptance for `doctor`, `registry list`,
+    `registry trust list`, and `registry trust set`.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - No residual tokens are interpreted as comments, ignored payload, or future
+    compatibility space. A command vector is a closed constructor application.
+- Commands that survived and why:
+  - `doctor` survives as a nullary environment observation.
+  - `registry list` survives as a nullary registry-config observation.
+  - `registry trust list` survives as a nullary trust observation.
+  - `registry trust set NAME TRUST` survives as an exact binary trust
+    mutation.
+- Laws/protocol invariants added:
+  - `parse ["doctor", extra...] = Error` when `extra...` is non-empty.
+  - `parse ["registry", "list", extra...] = Error` when `extra...` is
+    non-empty.
+  - `parse ["registry", "trust", "list", extra...] = Error` when `extra...`
+    is non-empty.
+  - `parse ["registry", "trust", "set", name, trust, extra...] = Error`
+    when `extra...` is non-empty, and the registry config is unchanged.
+  - Successful fixed-arity constructors consume the entire command vector.
+- Remaining discomfort:
+  - Other fixed-arity leaves should keep being attacked in later loops. This
+    slice closes the counterexamples found in the registry trust/operator
+    surface and the top-level nullary observation.
+
 ## Constructors
 
 Terminal constructors:
@@ -2752,6 +2782,11 @@ Failed-counterexample regressions:
 - `current-package`, `list-workers`, `ping`, and
   `repl daemon --status --json` do not expose root-derived private package
   names, socket paths, log paths, or selected project paths.
+- `clpm doctor extra`, `clpm registry list extra`,
+  `clpm registry trust list extra`, and
+  `clpm registry trust set main ed25519:key extra` are rejected instead of
+  ignoring the trailing token; the failed trust-set form leaves configured
+  trust unchanged.
 - A live unrelated PID in `.clpm/repl.pid` without `.clpm/repl.sock` is stale
   lifecycle metadata; status and stop clean the selected project's files and
   leave the unrelated process alive.

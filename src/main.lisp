@@ -469,7 +469,12 @@ This function must not call `sb-ext:exit` so it can be used from tests."
              (print-version)
              0)
             (:doctor
-             (clpm.commands:cmd-doctor))
+             (cond
+               (command-args
+                (format *error-output* "Usage: clpm doctor~%")
+                1)
+               (t
+                (clpm.commands:cmd-doctor))))
             (:project
              (apply #'clpm.commands:cmd-project command-args))
             (:deps

@@ -4132,6 +4132,9 @@ Default: remove the project's .clpm/ activation cache.
        (return-from cmd-registry 1))
 
       ((string= subcommand "list")
+       (when rest
+         (log-error "Usage: clpm registry list")
+         (return-from cmd-registry 1))
        (let* ((cfg (clpm.config:read-config))
               (regs (clpm.config:config-registries cfg)))
          (if (null regs)
@@ -4362,6 +4365,8 @@ Default: remove the project's .clpm/ activation cache.
               (usage-error "Missing trust subcommand"))
 
              ((string= action "list")
+              (when rest
+                (usage-error "Usage: clpm registry trust list"))
               (let* ((cfg (clpm.config:read-config))
                      (refs (clpm.config:config-registries cfg)))
                 (if (null refs)
@@ -4380,7 +4385,8 @@ Default: remove the project's .clpm/ activation cache.
               (let ((name (first rest))
                     (trust-raw (second rest)))
                 (unless (and (stringp name) (plusp (length name))
-                             (stringp trust-raw) (plusp (length trust-raw)))
+                             (stringp trust-raw) (plusp (length trust-raw))
+                             (null (cddr rest)))
                   (usage-error "Usage: clpm registry trust set <name> <trust>"))
                 (let ((found nil))
                   (clpm.config:update-config

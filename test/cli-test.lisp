@@ -111,6 +111,15 @@
 (assert-eql 1 (clpm:run-cli '("unknown-command")))
 (format t "  Unknown command PASSED~%")
 
+(format t "Testing nullary commands reject trailing args...~%")
+(multiple-value-bind (code _out err)
+    (run-cli-captured '("doctor" "extra"))
+  (declare (ignore _out))
+  (assert-eql 1 code)
+  (unless (search "Usage: clpm doctor" err)
+    (fail "Expected doctor trailing-arg rejection, got: ~A" err)))
+(format t "  Nullary command arity PASSED~%")
+
 (format t "Testing public command handler exports...~%")
 (assert-equal '("CMD-DEPS" "CMD-DOCTOR" "CMD-HELP" "CMD-PROJECT"
                 "CMD-REGISTRY" "CMD-REPL" "CMD-RUN" "CMD-SKILL"

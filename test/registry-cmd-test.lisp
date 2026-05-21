@@ -76,6 +76,15 @@
            ;; List should succeed even with no project.
            (assert-true (zerop (clpm:run-cli '("registry" "list")))
                         "Expected registry list to succeed")
+           (multiple-value-bind (code stdout stderr)
+               (run-cli-captured '("registry" "list" "extra"))
+             (declare (ignore stdout))
+             (assert-true (= code 1)
+                          "Expected registry list extra arg to fail")
+             (assert-true (search "Usage: clpm registry list" stderr
+                                  :test #'char-equal)
+                          "Expected registry list arity error, got:~%~A"
+                          stderr))
            (let* ((cfg (clpm.config:read-config))
                   (regs (clpm.config:config-registries cfg)))
              (assert-true (= (length regs) 1)

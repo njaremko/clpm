@@ -256,6 +256,36 @@ Returns (values base-url stop-fn)."
                         (format nil "quicklisp~Cquicklisp~C~A" #\Tab #\Tab pinned))
                   (split-lines stdout)))
 
+               ;; trust subcommands are closed constructors; extra trailing
+               ;; tokens must not be silently ignored.
+               (multiple-value-bind (code stdout stderr)
+                   (run-cli-captured '("registry" "trust" "list" "extra"))
+                 (declare (ignore stdout))
+                 (assert-eql 1 code)
+                 (assert-true (search "Usage: clpm registry trust list" stderr
+                                      :test #'char-equal)
+                              "Expected trust list arity rejection, got:~%~A"
+                              stderr))
+               (multiple-value-bind (code stdout stderr)
+                   (run-cli-captured '("registry" "trust" "set" "main"
+                                       "ed25519:rotated" "extra"))
+                 (declare (ignore stdout))
+                 (assert-eql 1 code)
+                 (assert-true (search "Usage: clpm registry trust set" stderr
+                                      :test #'char-equal)
+                              "Expected trust set arity rejection, got:~%~A"
+                              stderr))
+               (multiple-value-bind (code stdout stderr)
+                   (run-cli-captured '("registry" "trust" "list"))
+                 (declare (ignore stderr))
+                 (unless (eql code 0)
+                   (fail "registry trust list (after rejected extras) failed: ~D~%stdout:~A~%stderr:~A"
+                         code stdout stderr))
+                 (assert-equal
+                  (list (format nil "main~Cgit~Ced25519:deadbeef" #\Tab #\Tab)
+                        (format nil "quicklisp~Cquicklisp~C~A" #\Tab #\Tab pinned))
+                  (split-lines stdout)))
+
                ;; trust refresh is not an update option alias.
                (multiple-value-bind (code stdout stderr)
                    (run-cli-captured '("registry" "update" "--refresh-trust" "quicklisp"))
