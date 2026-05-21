@@ -2608,6 +2608,13 @@ Law: "run entrypoint args require an explicit boundary"
   token notin {"--", "exec", "test", "script", "scripts", "help", "--help"}
     => parse ["run", token, args...] = Error
 
+Law: "run exec argv boundary before project lookup"
+  parse ["run", "exec", "--", prog, args...] =
+    Right (run (Exec (prog, args)))
+  xs in {[], ["--"], [prog, args...]} =>
+    denote (parse (["run", "exec"] ++ xs)) ctx world = FailedUsage
+  -- the failure is independent of project discovery or activation state.
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -2825,6 +2832,9 @@ Failed-counterexample regressions:
   `clpm deps sync --jobs 4`, and `clpm run --lisp sbcl` are rejected by the
   owning command parser; global options cannot be placed after the command
   token.
+- `clpm run exec`, `clpm run exec --`, and `clpm run exec sh -c true`
+  reject with `run exec` usage before any project discovery error can mask the
+  malformed argv.
 - Root help, README, and generated `clpm skill` output state that scoped
   options must appear before the command token.
 - `clpm help repl eval` lists accepted debug selectors including

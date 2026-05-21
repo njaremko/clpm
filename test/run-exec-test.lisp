@@ -31,6 +31,30 @@
   (unless (eql expected actual)
     (fail "Assertion failed: expected ~S, got ~S" expected actual)))
 
+(defun assert-contains (haystack needle)
+  (assert-true (and (stringp haystack)
+                    (search needle haystack :test #'char-equal))
+               "Expected output to contain ~S, got:~%~A"
+               needle
+               haystack))
+
+(defun assert-not-contains (haystack needle)
+  (assert-true (not (and (stringp haystack)
+                         (search needle haystack :test #'char-equal)))
+               "Expected output not to contain ~S, got:~%~A"
+               needle
+               haystack))
+
+(defun run-cli-captured (args)
+  (let ((out (make-string-output-stream))
+        (err (make-string-output-stream)))
+    (let ((*standard-output* out)
+          (*error-output* err))
+      (let ((code (clpm:run-cli args)))
+        (values code
+                (get-output-stream-string out)
+                (get-output-stream-string err))))))
+
 (defun write-file (path contents)
   (ensure-directories-exist path)
   (with-open-file (s path :direction :output
@@ -39,6 +63,20 @@
     (write-string contents s)))
 
 (format t "Testing clpm run/exec...~%")
+
+(format t "Testing clpm run exec argv validation...~%")
+(clpm.store:with-temp-dir (tmp)
+  (uiop:with-current-directory (tmp)
+    (dolist (args '(("run" "exec")
+                    ("run" "exec" "--")
+                    ("run" "exec" "sh" "-c" "true")))
+      (multiple-value-bind (code stdout stderr)
+          (run-cli-captured args)
+        (declare (ignore stdout))
+        (assert-eql 1 code)
+        (assert-contains stderr "Usage: clpm run exec -- <cmd...>")
+        (assert-not-contains stderr "No clpm.project found")))))
+(format t "  clpm run exec argv validation PASSED~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))

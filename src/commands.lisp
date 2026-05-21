@@ -3397,6 +3397,9 @@ Returns an integer exit code."
   "Run an external command in the project's activated environment.
 
 Usage: clpm run exec -- <cmd...>"
+  (unless (and args (string= (first args) "--") (rest args))
+    (log-error "Usage: clpm run exec -- <cmd...>")
+    (return-from cmd-exec 1))
   (multiple-value-bind (project-root manifest-path _lock-path workspace-root _workspace-path)
       (find-effective-project-root)
     (declare (ignore _lock-path _workspace-path))
@@ -3404,13 +3407,7 @@ Usage: clpm run exec -- <cmd...>"
       (when (null workspace-root)
         (log-no-project-found))
       (return-from cmd-exec 1))
-    (let ((cmd args))
-      (when (and cmd (string= (first cmd) "--"))
-        (setf cmd (rest cmd)))
-      (unless cmd
-        (log-error "Usage: clpm run exec -- <cmd...>")
-        (return-from cmd-exec 1))
-
+    (let ((cmd (rest args)))
       (multiple-value-bind (config-path rc)
           (ensure-project-activated project-root)
         (unless (zerop rc)
