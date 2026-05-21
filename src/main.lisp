@@ -229,22 +229,30 @@ Returns (values command command-args options)."
             (string= subcommand "update"))))
     (t nil)))
 
-(defun sync-lock-stage-p (command-args)
-  "Return true when dependency sync explicitly targets only the lock stage."
-  (loop for rest on command-args
-        for arg = (first rest)
-        when (and (stringp arg) (string= arg "--to"))
-          do (return (let ((stage (second rest)))
-                       (and (stringp stage) (string= stage "lock"))))
-        finally (return nil)))
+(defun sync-stage-selectors (command-args)
+  "Return every raw value passed to deps sync --to, in command order."
+  (let ((stages '()))
+    (loop for rest on command-args
+          for arg = (first rest)
+          when (and (stringp arg) (string= arg "--to"))
+            do (push (second rest) stages))
+    (nreverse stages)))
 
 (defun sync-stage-option (command-args)
   "Return the raw value passed to deps sync --to, or NIL when absent."
-  (loop for rest on command-args
-        for arg = (first rest)
-        when (and (stringp arg) (string= arg "--to"))
-          do (return (second rest))
-        finally (return nil)))
+  (first (sync-stage-selectors command-args)))
+
+(defun duplicate-sync-stage-p (command command-args)
+  "Return true when deps sync receives more than one --to selector."
+  (and (eq command :deps)
+       (stringp (first command-args))
+       (string= (first command-args) "sync")
+       (> (length (sync-stage-selectors command-args)) 1)))
+
+(defun sync-lock-stage-p (command-args)
+  "Return true when dependency sync explicitly targets only the lock stage."
+  (let ((stage (sync-stage-option command-args)))
+    (and (stringp stage) (string= stage "lock"))))
 
 (defun sync-build-stage-p (command-args)
   "Return true when dependency sync may build with a selected Lisp."
@@ -362,6 +370,10 @@ Returns (values command command-args options)."
 
 (defun validate-option-scope (command command-args options)
   "Reject global options that have no denotation for COMMAND."
+  (when (duplicate-sync-stage-p command command-args)
+    (clpm.errors:signal-error
+     'clpm.errors:clpm-user-error
+     "Duplicate option: --to"))
   (when (and (option-present-p :package options)
              (not (workspace-target-command-p command command-args)))
     (clpm.errors:signal-error

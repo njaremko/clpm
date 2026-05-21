@@ -1610,7 +1610,8 @@ deps don't churn)."
 
 (defun cmd-deps-sync (&rest args)
   "Realize dependency state through a selected pipeline stage."
-  (let ((stage :active))
+  (let ((stage :active)
+        (stage-seen nil))
     (labels ((usage-error (fmt &rest fmt-args)
                (apply #'log-error fmt fmt-args)
                (log-error "Usage: clpm deps sync [--to lock|source|build|active]")
@@ -1630,6 +1631,9 @@ deps don't churn)."
         (let ((arg (pop args)))
           (cond
             ((string= arg "--to")
+             (when stage-seen
+               (usage-error "Duplicate option: --to"))
+             (setf stage-seen t)
              (let ((raw (pop args)))
                (unless (and (stringp raw) (plusp (length raw)))
                  (usage-error "Missing value for --to"))

@@ -2562,6 +2562,12 @@ Law: "fetch tuning is fetch-scoped"
   parse ["--fetch-timeout", n, "registry", "update"] =
     Right (registry update with FetchTimeout n)
 
+Law: "sync stage selection is single-valued"
+  parse ["deps", "sync", "--to", a, "--to", b] = Error
+  parse ["--offline", "deps", "sync", "--to", a, "--to", b] = Error
+  parse ["--jobs", n, "deps", "sync", "--to", a, "--to", b] = Error
+  parse ["--lisp", impl, "deps", "sync", "--to", a, "--to", b] = Error
+
 Law: "trust values are kind-typed and non-clearing"
   parse ["registry", "trust", "set", gitName, "ed25519:key"] =
     Right (registry (trustSet gitName (GitTrust (Ed25519 "key"))))
@@ -2857,6 +2863,11 @@ Failed-counterexample regressions:
   dependency solving.
 - `clpm --fetch-retries 2 help` and `clpm --fetch-timeout 3 repl` are
   rejected; fetch tuning is only for CLPM-managed fetch operations.
+- `clpm deps sync --to source --to lock`,
+  `clpm --offline deps sync --to source --to lock`,
+  `clpm --jobs 2 deps sync --to source --to lock`, and
+  `clpm --lisp sbcl deps sync --to build --to source` are rejected; sync
+  stage selection is a single-valued pipeline selector.
 - `clpm registry trust set main none` and
   `clpm registry trust set main nil` are rejected; permanent trust clearing
   is not a CLI trust value.
