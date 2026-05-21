@@ -203,6 +203,18 @@
   (assert-true (not (search "none" stdout :test #'char-equal))
                "trust set help still advertises clearing trust:~%~A" stdout))
 
+;; registry trust refresh: Quicklisp-only, not a maybe-no-op.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "registry" "trust" "refresh"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm registry trust refresh")
+  (assert-contains stdout "Only Quicklisp registries")
+  (assert-contains stdout "--fetch-retries")
+  (assert-true (not (search "no-op" stdout :test #'char-equal))
+               "trust refresh help still describes an ambiguous no-op:~%~A"
+               stdout))
+
 ;; registry update: snapshot update only, not trust refresh.
 (multiple-value-bind (code stdout stderr)
     (run-cli-captured '("help" "registry" "update"))

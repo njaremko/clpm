@@ -1783,6 +1783,29 @@ but output kind and machine-readable shape are semantic.
   - The daemon still has internal registered frames for transport and
     lifecycle. They are implementation protocol, not CLI algebra.
 
+### Iteration 53: Delete Ambiguous Trust-Refresh No-Op Claim
+
+- Commands deleted:
+  - No parser surface. The deleted surface is help text claiming
+    non-Quicklisp `registry trust refresh` might be a no-op.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - None. Quicklisp trust refresh remains the only trust-pin refresh
+    constructor.
+- Commands that survived and why:
+  - `registry trust refresh <quicklisp-name>` survives because Quicklisp
+    stores unsigned dist hash pins that require explicit rotation.
+- Laws/protocol invariants added:
+  - `registry.kind != Quicklisp => registry trust refresh registry =
+    Failed unsupported-registry-kind`.
+  - Help must state the closed domain rather than advertise a no-op branch
+    that the implementation does not denote.
+- Remaining discomfort:
+  - Git registry trust rotation is still modeled as `registry trust set`,
+    not as refresh. That is a separate trust operation and remains outside
+    this constructor.
+
 ## Constructors
 
 Terminal constructors:
@@ -2251,6 +2274,8 @@ Failed-counterexample regressions:
   `--refresh-trust`.
 - `clpm repl call methods` documentation says public callable RPC discovery,
   not "every RPC" or full internal wire-registry discovery.
+- `clpm help registry trust refresh` states that only Quicklisp registries
+  support trust refresh and does not describe a no-op for git registries.
 - `clpm registry publish --git-commit ...` is rejected; publish does not run
   VCS commands.
 - `clpm repl eval FORM --pretty` is rejected; human output is the default and
