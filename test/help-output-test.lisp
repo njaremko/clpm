@@ -67,7 +67,7 @@
   (assert-contains stdout "skill")
   (assert-contains stdout "repl")
   (assert-contains stdout "Scoped options must appear before the command token.")
-  (assert-contains stdout "Use `clpm help <command> [subcommand ...]`")
+  (assert-contains stdout "Use `clpm help [command [subcommand ...]]`")
   (assert-not-contains stdout "ed25519:example-key-id"
                        "top-level help still uses fake trust key example:~%~A"
                        stdout)
@@ -95,6 +95,12 @@
 (format t "Testing bare `clpm` (no args) prints help...~%")
 (multiple-value-bind (code stdout stderr)
     (run-cli-captured '())
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Commands:")
+  (assert-contains stdout "Usage: clpm"))
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help"))
   (declare (ignore stderr))
   (assert-eql 0 code)
   (assert-contains stdout "Commands:")
@@ -134,7 +140,10 @@
     (run-cli-captured '("help" "help"))
   (declare (ignore stderr))
   (assert-eql 0 code)
-  (assert-contains stdout "Usage: clpm help <command> [subcommand ...]"))
+  (assert-contains stdout "Usage: clpm help [command [subcommand ...]]")
+  (assert-not-contains stdout "Usage: clpm help <command>"
+                       "help help still requires a selector:~%~A"
+                       stdout))
 (format t "  `clpm help help` PASSED~%")
 
 (format t "Testing scoped option help...~%")
@@ -332,6 +341,7 @@
   (assert-contains stdout "--debug [debug-options]")
   (assert-contains stdout "--package")
   (assert-contains stdout "  --json")
+  (assert-contains stdout "--handler T=R[:A,...]")
   (assert-contains stdout "--break-on")
   (assert-contains stdout "--timeout-ms")
   (assert-contains stdout "--no-autostart")

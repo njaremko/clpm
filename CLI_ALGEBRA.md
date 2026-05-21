@@ -2253,8 +2253,8 @@ but output kind and machine-readable shape are semantic.
 - Laws/protocol invariants added:
   - Every exported `clpm.project` lockfile accessor must be backed by an
     actual struct accessor or constructor contract.
-  - Nested help selectors are variadic everywhere user-facing schema text
-    describes them: `clpm help <command> [subcommand ...]`.
+  - Nested help selectors are optional and variadic everywhere user-facing
+    schema text describes them: `clpm help [command [subcommand ...]]`.
   - Example trust values must be typed placeholders such as
     `ed25519:<key-id>`, not fake key material.
   - Every umbrella REPL eval usage names `--json`, because machine-readable
@@ -2463,6 +2463,46 @@ but output kind and machine-readable shape are semantic.
   - `clpm skill` is still hand-assembled strings in the command layer. The
     test now pins the highest-risk examples; a future internal generator could
     derive examples from method specs.
+
+### Iteration 79: Residual Tokens Are Not Hidden Payloads
+
+- Commands deleted:
+  - Bare `clpm run script <name> ARG...` as an implicit script-argv form.
+  - `clpm deps add <system> --dev`, `clpm deps add <system> --path <dir>`,
+    and `clpm deps remove <system> --dev` as post-operand option forms.
+  - `clpm project workspace add --dir <path> <member>` and the matching
+    `remove` form.
+  - Missing-value registry add forms such as
+    `clpm registry add --quicklisp --trust`.
+- Commands merged:
+  - Script argv uses the same explicit boundary law as entrypoint argv:
+    arguments cross from CLPM syntax into user payload only after `--`.
+  - Dependency intent options are prefix constructors for the dependency
+    operation, not per-system suffix modifiers.
+- Commands derived instead of exposed:
+  - `clpm help` is the zero-selector projection of the same help observation
+    as bare `clpm` and `clpm --help`.
+- Commands that survived and why:
+  - `clpm run script <name> -- ARG...` survives because `--` is the explicit
+    payload boundary.
+  - `clpm deps add [options] <system>...` and
+    `clpm deps remove [--dev|--test] <system>` survive because the option
+    prefix determines the target dependency section before operands are read.
+  - `clpm project workspace add <member> [--dir <path>]` survives because the
+    member is the primary workspace mutation argument.
+  - `clpm registry add --quicklisp --trust tofu` survives because add-time
+    trust is part of the Quicklisp registry value.
+- Laws/protocol invariants added:
+  - Residual tokens are never ignored or silently reclassified after the
+    documented constructor shape is complete.
+  - Any option that requires a value fails immediately when the next argv cell
+    is absent, before defaulting or mutating config.
+  - Malformed leaf argv fails before project, workspace, registry, activation,
+    or script lookup.
+- Remaining discomfort:
+  - `cmd-add` still represents the parsed dependency operation as local
+    booleans and strings. The public syntax is now closed; an internal parser
+    value can be introduced later without changing the CLI algebra.
 
 ## Constructors
 

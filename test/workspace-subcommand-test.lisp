@@ -69,6 +69,19 @@
            (assert-eql 0 (clpm:run-cli (list "project" "workspace" "add" "app/" "--dir" (namestring ws-root))))
            (assert-eql 0 (clpm:run-cli (list "project" "workspace" "add" "lib-a" "--dir" (namestring ws-root))))
 
+           (multiple-value-bind (code _out err)
+               (run-cli-captured (list "project" "workspace" "add" "--dir"
+                                       (namestring ws-root) "bad"))
+             (declare (ignore _out))
+             (assert-eql 1 code)
+             (assert-contains err "Usage: clpm project workspace add <member> [--dir <path>]"))
+           (multiple-value-bind (code _out err)
+               (run-cli-captured (list "project" "workspace" "remove" "--dir"
+                                       (namestring ws-root) "bad"))
+             (declare (ignore _out))
+             (assert-eql 1 code)
+             (assert-contains err "Usage: clpm project workspace remove <member> [--dir <path>]"))
+
            (let* ((ws (clpm.workspace:read-workspace-file ws-path))
                   (members (clpm.workspace:workspace-members ws)))
              (assert-true (equal members '("app" "lib-a"))
@@ -113,4 +126,3 @@
 
 (format t "~%Workspace subcommand tests PASSED!~%")
 (sb-ext:exit :code 0)
-

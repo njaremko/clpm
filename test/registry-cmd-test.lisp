@@ -46,6 +46,23 @@
     (unwind-protect
          (progn
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
+           (dolist (case '((("registry" "add" "--quicklisp" "--name")
+                            "Missing value for --name")
+                           (("registry" "add" "--quicklisp" "--url")
+                            "Missing value for --url")
+                           (("registry" "add" "--quicklisp" "--trust")
+                            "Missing value for --trust")))
+             (destructuring-bind (args expected) case
+               (multiple-value-bind (code stdout stderr)
+                   (run-cli-captured args)
+                 (declare (ignore stdout))
+                 (assert-true (= code 1)
+                              "Expected missing registry add value to fail")
+                 (assert-true (search expected stderr :test #'char-equal)
+                              "Expected ~S, got:~%~A" expected stderr)
+                 (let ((cfg (clpm.config:read-config)))
+                   (assert-true (null (clpm.config:config-registries cfg))
+                                "Malformed registry add should not mutate config")))))
            (multiple-value-bind (code stdout stderr)
                (run-cli-captured '("registry" "add"
                                    "--name" "first"

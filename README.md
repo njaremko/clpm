@@ -245,7 +245,7 @@ explicit resource operations.
 
 | Command | Description |
 |---------|-------------|
-| `clpm help <command> [subcommand ...]` | Show command-specific help |
+| `clpm help [command [subcommand ...]]` | Show help or command-specific help |
 | `clpm doctor` | Check environment and configuration |
 | `clpm project new <name> --workspace [--dir <path>]` | Create a workspace scaffold |
 | `clpm project new <name> --bin\|--lib [--dir <path>]` | Create a project scaffold |

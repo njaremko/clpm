@@ -149,6 +149,17 @@
            (assert-equal (format nil "one~%two~%")
                          (uiop:read-file-string shell-args-path))
 
+           ;; Script argv must cross the explicit `--` boundary.
+           (delete-file shell-args-path)
+           (uiop:with-current-directory (project-root)
+             (multiple-value-bind (code stdout stderr)
+                 (run-cli-captured '("run" "script" "args" "one"))
+               (declare (ignore stdout))
+               (assert-eql 1 code)
+               (assert-contains stderr "Usage: clpm run script <name> [-- <args...>]")))
+           (assert-true (not (uiop:file-exists-p shell-args-path))
+                        "Bare script argv should not run the script")
+
            ;; run lisp script args with forwarded args, assert exit code and args file
            (when (uiop:file-exists-p lisp-args-path)
              (delete-file lisp-args-path))

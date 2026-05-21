@@ -458,7 +458,8 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
 
 (defun cmd-add (&rest args)
   "Add dependencies to clpm.project and refresh clpm.lock."
-  (let ((specs '())
+  (let ((usage "Usage: clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]...")
+        (specs '())
         (dev-p nil)
         (test-p nil)
         (any-p nil)
@@ -466,21 +467,35 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
         (registry-name nil)
         (path nil)
         (git-url nil)
-        (git-ref nil))
+        (git-ref nil)
+        (seen-spec-p nil))
+    (labels ((usage-error (&optional (fmt nil fmt-p) &rest fmt-args)
+               (when fmt-p
+                 (apply #'log-error fmt fmt-args))
+               (log-error usage)
+               (return-from cmd-add 1))
+             (option-before-spec (arg)
+               (when seen-spec-p
+                 (usage-error "Option must appear before <system>: ~A" arg))))
       ;; Parse args
       (let ((i 0))
         (loop while (< i (length args)) do
           (let ((arg (nth i args)))
             (cond
               ((string= arg "--dev")
+               (option-before-spec arg)
                (setf dev-p t))
               ((string= arg "--test")
+               (option-before-spec arg)
                (setf test-p t))
               ((string= arg "--any")
+               (option-before-spec arg)
                (setf any-p t))
               ((string= arg "--caret")
+               (option-before-spec arg)
                (setf caret-p t))
               ((string= arg "--registry")
+               (option-before-spec arg)
                (incf i)
                (when (>= i (length args))
                  (log-error "Missing value for --registry")
@@ -490,6 +505,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                  (return-from cmd-add 1))
                (setf registry-name (nth i args)))
               ((string= arg "--path")
+               (option-before-spec arg)
                (incf i)
                (when (>= i (length args))
                  (log-error "Missing value for --path")
@@ -499,6 +515,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                  (return-from cmd-add 1))
                (setf path (nth i args)))
               ((string= arg "--git")
+               (option-before-spec arg)
                (incf i)
                (when (>= i (length args))
                  (log-error "Missing value for --git")
@@ -508,6 +525,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                  (return-from cmd-add 1))
                (setf git-url (nth i args)))
               ((string= arg "--ref")
+               (option-before-spec arg)
                (incf i)
                (when (>= i (length args))
                  (log-error "Missing value for --ref")
@@ -520,14 +538,14 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                (log-error "Unknown option: ~A" arg)
                (return-from cmd-add 1))
               (t
+               (setf seen-spec-p t)
                (push arg specs))))
           (incf i)))
 
       (setf specs (nreverse specs))
 
       (unless specs
-        (log-error "Usage: clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]...")
-        (return-from cmd-add 1))
+        (usage-error))
 
       (when (and any-p caret-p)
         (log-error "Only one of --any or --caret may be specified")
@@ -710,7 +728,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
 
         (uiop:with-current-directory (project-root)
           (let ((*target-package* nil))
-            (cmd-resolve)))))))
+            (cmd-resolve))))))))
 
 (defun cmd-remove (&rest args)
   "Remove a dependency from clpm.project and refresh clpm.lock."
@@ -719,6 +737,10 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
         (test-p nil))
     (dolist (arg args)
       (cond
+        ((and system-id
+              (member arg '("--dev" "--test") :test #'string=))
+         (log-error "Usage: clpm deps remove [--dev|--test] <system>")
+         (return-from cmd-remove 1))
         ((string= arg "--dev") (setf dev-p t))
         ((string= arg "--test") (setf test-p t))
         ((and (plusp (length arg)) (char= (char arg 0) #\-))
@@ -3619,9 +3641,12 @@ Returns (values parsed-scripts exit-code)."
                  (log-error "Usage: clpm run script <name> [-- <args...>]")
                  (return-from cmd-scripts 1))
                (let* ((rest (cddr args))
-                      (forward (if (and rest (string= (first rest) "--"))
-                                   (rest rest)
-                                   rest))
+                      (forward (cond
+                                 ((null rest) nil)
+                                 ((string= (first rest) "--") (rest rest))
+                                 (t
+                                  (log-error "Usage: clpm run script <name> [-- <args...>]")
+                                  (return-from cmd-scripts 1))))
                       (script (find name parsed :test #'string= :key (lambda (s) (getf s :name)))))
                  (unless script
                    (log-error "Unknown script: ~A" name)
@@ -4120,11 +4145,13 @@ Default: remove the project's .clpm/ activation cache.
                (log-info "Initialized workspace: ~A" (namestring root))
                0))))
         ((string= sub "add")
-         (multiple-value-bind (dir extra)
-             (parse-dir-arg rest)
-           (let ((member (first extra))
-                 (extra (rest extra)))
-             (when (or (null member) extra)
+         (let ((member (first rest))
+               (tail (rest rest)))
+           (when (null member)
+             (usage-error "Usage: clpm project workspace add <member> [--dir <path>]"))
+           (multiple-value-bind (dir extra)
+               (parse-dir-arg tail)
+             (when extra
                (usage-error "Usage: clpm project workspace add <member> [--dir <path>]"))
              (let ((norm (%normalize-workspace-member-arg member)))
                (unless norm
@@ -4144,11 +4171,13 @@ Default: remove the project's .clpm/ activation cache.
                    (log-info "Added member: ~A" norm)
                    0))))))
         ((string= sub "remove")
-         (multiple-value-bind (dir extra)
-             (parse-dir-arg rest)
-           (let ((member (first extra))
-                 (extra (rest extra)))
-             (when (or (null member) extra)
+         (let ((member (first rest))
+               (tail (rest rest)))
+           (when (null member)
+             (usage-error "Usage: clpm project workspace remove <member> [--dir <path>]"))
+           (multiple-value-bind (dir extra)
+               (parse-dir-arg tail)
+             (when extra
                (usage-error "Usage: clpm project workspace remove <member> [--dir <path>]"))
              (let ((norm (%normalize-workspace-member-arg member)))
                (unless norm
@@ -4259,36 +4288,42 @@ Default: remove the project's .clpm/ activation cache.
              (url-seen nil)
              (trust-seen nil)
              (quicklisp-seen nil))
-         (loop while rest do
-           (let ((arg (pop rest)))
-             (cond
-               ((string= arg "--name")
-                (when name-seen
-                  (log-error "Duplicate option: --name")
-                  (return-from cmd-registry 1))
-                (setf name-seen t
-                      name (pop rest)))
-               ((string= arg "--url")
-                (when url-seen
-                  (log-error "Duplicate option: --url")
-                  (return-from cmd-registry 1))
-                (setf url-seen t
-                      url (pop rest)))
-               ((string= arg "--trust")
-                (when trust-seen
-                  (log-error "Duplicate option: --trust")
-                  (return-from cmd-registry 1))
-                (setf trust-seen t
-                      trust (pop rest)))
-               ((string= arg "--quicklisp")
-                (when quicklisp-seen
-                  (log-error "Duplicate option: --quicklisp")
-                  (return-from cmd-registry 1))
-                (setf quicklisp-seen t
-                      kind :quicklisp))
-               (t
-                (log-error "Unknown option: ~A" arg)
-                (return-from cmd-registry 1)))))
+         (labels ((pop-value (option)
+                    (let ((value (pop rest)))
+                      (unless (and (stringp value) (plusp (length value)))
+                        (log-error "Missing value for ~A" option)
+                        (return-from cmd-registry 1))
+                      value)))
+           (loop while rest do
+             (let ((arg (pop rest)))
+               (cond
+                 ((string= arg "--name")
+                  (when name-seen
+                    (log-error "Duplicate option: --name")
+                    (return-from cmd-registry 1))
+                  (setf name-seen t
+                        name (pop-value "--name")))
+                 ((string= arg "--url")
+                  (when url-seen
+                    (log-error "Duplicate option: --url")
+                    (return-from cmd-registry 1))
+                  (setf url-seen t
+                        url (pop-value "--url")))
+                 ((string= arg "--trust")
+                  (when trust-seen
+                    (log-error "Duplicate option: --trust")
+                    (return-from cmd-registry 1))
+                  (setf trust-seen t
+                        trust (pop-value "--trust")))
+                 ((string= arg "--quicklisp")
+                  (when quicklisp-seen
+                    (log-error "Duplicate option: --quicklisp")
+                    (return-from cmd-registry 1))
+                  (setf quicklisp-seen t
+                        kind :quicklisp))
+                 (t
+                  (log-error "Unknown option: ~A" arg)
+                  (return-from cmd-registry 1))))))
 
          (when (eq kind :quicklisp)
            (unless name
@@ -5964,9 +5999,10 @@ sub-subcommand=\"set\")."
       (return-from print-command-help 1))
     (case command
       (:help
-       (p "Usage: clpm help <command> [subcommand ...]")
+       (p "Usage: clpm help [command [subcommand ...]]")
        (p "")
        (p "Examples:")
+       (p "  clpm help")
        (p "  clpm help project new")
        (p "  clpm help registry add")
        0)
@@ -6263,10 +6299,10 @@ sub-subcommand=\"set\")."
             (p "")
             (p "Example:")
            (p "  clpm repl daemon --detach")
-            0)
+           0)
            ((and sub (string= sub "eval"))
-            (p "Usage: clpm repl eval <form> [--package <name>] [--worker <name>] [--no-autostart] [--json]")
-            (p "       clpm repl eval <form> [--package <name>] [--worker <name>] [--no-autostart] --debug [debug-options]")
+            (p "Usage: clpm repl eval <form> [--package <name>] [--worker <name>] [--handler T=R[:A,...]]... [--no-autostart] [--json]")
+            (p "       clpm repl eval <form> [--package <name>] [--worker <name>] [--handler T=R[:A,...]]... [--no-autostart] --debug [debug-options]")
             (p "")
             (p "Evaluate one Lisp form in the daemon. With no daemon running and")
             (p "without --no-autostart, the bridge starts one in the background")
@@ -6278,7 +6314,8 @@ sub-subcommand=\"set\")."
            (p "                    (daemon's persistent package is unchanged).")
            (p "  --worker <name>   Run on a named worker.")
             (p "  --json            Emit the raw eval response instead of human output.")
-            (p "  --handler T=R[:A] Declarative condition recovery; repeatable.")
+            (p "  --handler T=R[:A,...]")
+            (p "                    Declarative condition recovery; repeatable.")
             (p "  --debug           Enter the continuation-aware debugger path.")
             (p "  --restart <name>  Pick a restart at the first debugger stop.")
             (p "  --arg <form>      Restart argument form; repeatable.")
