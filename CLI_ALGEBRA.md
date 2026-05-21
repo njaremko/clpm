@@ -2639,7 +2639,10 @@ Law: "leaf singleton options are values"
       "--registry", "--key-id", "--keys-dir", "--project",
       "--tarball-url", "--tarball-out"
     },
-    ["repl", "eval", form, "--worker"]
+    ["repl", "eval", form, opt] where opt in {
+      "--package", "--worker", "--restart", "--frame",
+      "--frame-eval", "--break-on", "--timeout-ms"
+    }
   } => denote (parse argv) ctx world = FailedUsage
 
 Law: "help is schema projection"
@@ -2870,7 +2873,8 @@ Failed-counterexample regressions:
   `project new --dir/--member-of`, `project workspace list --dir`,
   `registry add --name`,
   `registry init` value flags, `registry key generate/list/import/verify`
-  value flags, `registry publish` value flags, and `repl eval --worker`.
+  value flags, `registry publish` value flags, and `repl eval` scalar
+  value flags.
 - Root help, README, and generated `clpm skill` output state that scoped
   options must appear before the command token.
 - BRIDGE.md and `.claude/skills/clpm-repl-bridge.md` describe the surviving

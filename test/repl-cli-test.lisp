@@ -42,6 +42,13 @@
                 (get-output-stream-string out)
                 (get-output-stream-string err))))))
 
+(defun assert-duplicate-option (args option)
+  (multiple-value-bind (rc stdout stderr)
+      (run-cli-captured args)
+    (declare (ignore stdout))
+    (assert-eql 1 rc)
+    (assert-contains stderr (format nil "Duplicate option: ~A" option))))
+
 (defun make-short-temp-dir ()
   "Create a short temp directory so Unix-domain socket paths stay portable."
   (let* ((template (namestring
@@ -76,14 +83,18 @@
 
     (uiop:with-current-directory (proj)
       (format t "Test: eval singleton options reject duplicates~%")
-      (multiple-value-bind (rc stdout stderr)
-          (run-cli-captured '("repl" "eval" "(+ 1 2)"
-                              "--worker" "one"
-                              "--worker" "two"
-                              "--no-autostart"))
-        (declare (ignore stdout))
-        (assert-eql 1 rc)
-        (assert-contains stderr "Duplicate option: --worker"))
+      (dolist (case '(("--package" "CL-USER" "--package" "COMMON-LISP")
+                      ("--worker" "one" "--worker" "two")
+                      ("--restart" "USE-VALUE" "--restart" "CONTINUE")
+                      ("--frame" "0" "--frame" "1")
+                      ("--frame-eval" "(+ 1 2)" "--frame-eval" "(+ 3 4)")
+                      ("--break-on" "error" "--break-on" "warning")
+                      ("--timeout-ms" "10" "--timeout-ms" "20")))
+        (assert-duplicate-option
+         (append '("repl" "eval" "(+ 1 2)")
+                 case
+                 '("--no-autostart"))
+         (first case)))
       (format t "  singleton option rejection OK~%")
 
       (format t "Test: daemon (no --detach) blocks; we run it in a thread~%")

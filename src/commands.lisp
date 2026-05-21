@@ -2329,22 +2329,31 @@ server-owned session for later `call debug-* ...' requests."
         (keep nil)
         (break-on nil)
         (timeout-ms nil)
-        (handlers '()))
+        (handlers '())
+        (package-seen nil)
+        (worker-seen nil)
+        (restart-seen nil)
+        (frame-seen nil)
+        (frame-eval-seen nil)
+        (break-on-seen nil)
+        (timeout-ms-seen nil))
     (loop while args do
       (let ((arg (pop args)))
         (cond
           ((string= arg "--package")
-           (when package
+           (when package-seen
              (log-error "Duplicate option: --package")
              (return-from %bridge-eval 1))
+           (setf package-seen t)
            (setf package (pop args))
            (unless (stringp package)
              (log-error "Missing value for --package")
              (return-from %bridge-eval 1)))
           ((string= arg "--worker")
-           (when worker
+           (when worker-seen
              (log-error "Duplicate option: --worker")
              (return-from %bridge-eval 1))
+           (setf worker-seen t)
            (setf worker (pop args))
            (unless (stringp worker)
              (log-error "Missing value for --worker")
@@ -2361,6 +2370,10 @@ server-owned session for later `call debug-* ...' requests."
           ((string= arg "--json") (setf json t))
           ((string= arg "--debug") (setf debug t))
           ((string= arg "--restart")
+           (when restart-seen
+             (log-error "Duplicate option: --restart")
+             (return-from %bridge-eval 1))
+           (setf restart-seen t)
            (setf debug t
                  restart (pop args))
            (unless (stringp restart)
@@ -2374,15 +2387,23 @@ server-owned session for later `call debug-* ...' requests."
                (return-from %bridge-eval 1))
              (push value restart-args)))
           ((string= arg "--frame")
+           (when frame-seen
+             (log-error "Duplicate option: --frame")
+             (return-from %bridge-eval 1))
+           (setf frame-seen t)
            (setf debug t)
            (let* ((raw (pop args))
                   (n (and raw (ignore-errors
                                (parse-integer raw :junk-allowed nil)))))
              (unless (integerp n)
                (log-error "Invalid integer for --frame: ~A" raw)
-               (return-from %bridge-eval 1))
-             (setf frame n)))
+             (return-from %bridge-eval 1))
+            (setf frame n)))
           ((string= arg "--frame-eval")
+           (when frame-eval-seen
+             (log-error "Duplicate option: --frame-eval")
+             (return-from %bridge-eval 1))
+           (setf frame-eval-seen t)
            (setf debug t
                  frame-eval (pop args))
            (unless (stringp frame-eval)
@@ -2390,12 +2411,20 @@ server-owned session for later `call debug-* ...' requests."
              (return-from %bridge-eval 1)))
           ((string= arg "--keep") (setf debug t keep t))
           ((string= arg "--break-on")
+           (when break-on-seen
+             (log-error "Duplicate option: --break-on")
+             (return-from %bridge-eval 1))
+           (setf break-on-seen t)
            (setf debug t
                  break-on (pop args))
            (unless (stringp break-on)
              (log-error "Missing value for --break-on")
              (return-from %bridge-eval 1)))
           ((string= arg "--timeout-ms")
+           (when timeout-ms-seen
+             (log-error "Duplicate option: --timeout-ms")
+             (return-from %bridge-eval 1))
+           (setf timeout-ms-seen t)
            (setf debug t)
            (let* ((raw (pop args))
                   (n (and raw (ignore-errors
