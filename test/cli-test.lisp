@@ -1,6 +1,7 @@
 ;;;; test/cli-test.lisp - CLI behavior tests
 
 (require :asdf)
+(require :sb-posix)
 
 ;; Add repo root directory to ASDF load path.
 (let* ((this-file (or *load-truename* *load-pathname*))
@@ -305,6 +306,30 @@
         (fail "Expected fetch tuning to be accepted for ~S, got: ~A"
               args c)))))
 (format t "  Fetch tuning option scope PASSED~%")
+
+(format t "Testing registry update argv validation before config lookup...~%")
+(clpm.store:with-temp-dir (tmp)
+  (let ((old-home (sb-posix:getenv "CLPM_HOME"))
+        (clpm-home (merge-pathnames "clpm-home/" tmp)))
+    (unwind-protect
+         (progn
+           (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
+           (let ((config-path (merge-pathnames "config/config.sxp" clpm-home)))
+             (ensure-directories-exist config-path)
+             (with-open-file (s config-path :direction :output
+                                           :if-exists :supersede
+                                           :external-format :utf-8)
+               (write-string "(:not-a-config)" s)))
+           (multiple-value-bind (code _out err)
+               (run-cli-captured '("registry" "update" "--bogus"))
+             (declare (ignore _out))
+             (assert-eql 1 code)
+             (unless (search "Unknown option: --bogus" err)
+               (fail "Expected registry update option error before config lookup, got: ~A" err))))
+      (if old-home
+          (sb-posix:setenv "CLPM_HOME" old-home 1)
+          (sb-posix:unsetenv "CLPM_HOME")))))
+(format t "  Registry update argv validation PASSED~%")
 
 (format t "Testing workspace target option scope...~%")
 (dolist (args '(("--package" "app" "help")

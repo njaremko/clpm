@@ -4448,9 +4448,7 @@ Default: remove the project's .clpm/ activation cache.
            0)))
 
       ((string= subcommand "update")
-       (let* ((names '())
-              (cfg (clpm.config:read-config))
-              (refs (clpm.config:config-registries cfg)))
+       (let ((names '()))
          (loop while rest do
            (let ((arg (pop rest)))
              (cond
@@ -4458,28 +4456,30 @@ Default: remove the project's .clpm/ activation cache.
                 (log-error "Unknown option: ~A" arg)
                 (return-from cmd-registry 1))
                (t
-                (push arg names)))))
+                 (push arg names)))))
          (setf names (nreverse names))
          (when (null names)
            (setf names nil))
-         (dolist (ref refs)
-           (let ((name (clpm.project:registry-ref-name ref)))
-             (when (or (null names) (member name names :test #'string=))
-               (log-info "Updating registry: ~A" name)
-               (handler-case
-                   (let ((reg (clpm.registry:clone-registry
-                               name
-                               (clpm.project:registry-ref-url ref)
-                               :trust-key (clpm.project:registry-ref-trust ref)
-                               :quicklisp-systems-sha256
-                               (clpm.project:registry-ref-quicklisp-systems-sha256 ref)
-                               :quicklisp-releases-sha256
-                               (clpm.project:registry-ref-quicklisp-releases-sha256 ref)
-                               :kind (clpm.project:registry-ref-kind ref))))
-                     (clpm.registry:update-registry reg))
-                 (error (c)
-                   (log-error "Failed to update registry ~A: ~A" name c)
-                   (return-from cmd-registry 1))))))
+         (let* ((cfg (clpm.config:read-config))
+                (refs (clpm.config:config-registries cfg)))
+           (dolist (ref refs)
+             (let ((name (clpm.project:registry-ref-name ref)))
+               (when (or (null names) (member name names :test #'string=))
+                 (log-info "Updating registry: ~A" name)
+                 (handler-case
+                     (let ((reg (clpm.registry:clone-registry
+                                 name
+                                 (clpm.project:registry-ref-url ref)
+                                 :trust-key (clpm.project:registry-ref-trust ref)
+                                 :quicklisp-systems-sha256
+                                 (clpm.project:registry-ref-quicklisp-systems-sha256 ref)
+                                 :quicklisp-releases-sha256
+                                 (clpm.project:registry-ref-quicklisp-releases-sha256 ref)
+                                 :kind (clpm.project:registry-ref-kind ref))))
+                       (clpm.registry:update-registry reg))
+                   (error (c)
+                     (log-error "Failed to update registry ~A: ~A" name c)
+                     (return-from cmd-registry 1)))))))
          0))
 
       ((string= subcommand "key")
