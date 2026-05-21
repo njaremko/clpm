@@ -80,6 +80,12 @@
                        :external-format :utf-8)
       (write-string ";; empty for test~%" s))))
 
+(defun write-workspace (workspace-root members)
+  (ensure-directories-exist workspace-root)
+  (clpm.workspace:write-workspace-file
+   (clpm.workspace:make-workspace :format 1 :members members)
+   (merge-pathnames "clpm.workspace" workspace-root)))
+
 (let* ((this-file (or *load-truename* *load-pathname*))
        (test-dir (uiop:pathname-directory-pathname this-file))
        (repo-root (uiop:pathname-parent-directory-pathname test-dir)))
@@ -88,15 +94,27 @@
            (proj-a (merge-pathnames "proj-a/" tmp))
            (proj-b (merge-pathnames "proj-b/" tmp))
            (sock-a (merge-pathnames ".clpm/repl.sock" proj-a))
-           (sock-b (merge-pathnames ".clpm/repl.sock" proj-b)))
+           (sock-b (merge-pathnames ".clpm/repl.sock" proj-b))
+           (ws-root (merge-pathnames "workspace/" tmp))
+           (ws-a (merge-pathnames "app/" ws-root))
+           (ws-b (merge-pathnames "lib/" ws-root))
+           (ws-sock-a (merge-pathnames ".clpm/repl.sock" ws-a))
+           (ws-sock-b (merge-pathnames ".clpm/repl.sock" ws-b)))
       (format t "Test: saved executable autostarts repl daemon~%")
       (build-clpm-executable repo-root exe)
       (write-minimal-project proj-a)
       (write-minimal-project proj-b)
+      (write-workspace ws-root '("app" "lib"))
+      (write-minimal-project ws-a)
+      (write-minimal-project ws-b)
       (flet ((clpm-eval (project form)
                (run-program-captured
                 (list (namestring exe) "repl" "eval" form)
                 :directory project))
+             (clpm-workspace-eval (member form)
+               (run-program-captured
+                (list (namestring exe) "-p" member "repl" "eval" form)
+                :directory ws-root))
              (stop-daemon (project)
                (ignore-errors
                  (run-program-captured
@@ -146,11 +164,39 @@
                    (fail "project A token lookup failed: ~D~%stdout:~%~A~%stderr:~%~A"
                          rc stdout stderr))
                  (assert-contains stdout "=> :PROJECT-A"))
-               (format t "  project repl isolation OK~%"))
+               (format t "  project repl isolation OK~%")
+
+               (format t "Test: workspace member repl autostart is isolated~%")
+               (multiple-value-bind (rc stdout stderr)
+                   (clpm-workspace-eval "app"
+                                        "(defparameter *clpm-workspace-token* :app)")
+                 (unless (zerop rc)
+                   (fail "workspace app eval failed: ~D~%stdout:~%~A~%stderr:~%~A"
+                         rc stdout stderr))
+                 (assert-contains stdout "=> *CLPM-WORKSPACE-TOKEN*"))
+               (multiple-value-bind (rc stdout stderr)
+                   (clpm-workspace-eval "app" "*clpm-workspace-token*")
+                 (unless (zerop rc)
+                   (fail "workspace app token lookup failed: ~D~%stdout:~%~A~%stderr:~%~A"
+                         rc stdout stderr))
+                 (assert-contains stdout "=> :APP"))
+               (multiple-value-bind (rc stdout stderr)
+                   (clpm-workspace-eval "lib"
+                                        "(boundp '*clpm-workspace-token*)")
+                 (unless (zerop rc)
+                   (fail "workspace lib isolation check failed: ~D~%stdout:~%~A~%stderr:~%~A"
+                         rc stdout stderr))
+                 (assert-contains stdout "=> NIL"))
+               (format t "  workspace member repl isolation OK~%"))
           (stop-daemon proj-a)
           (stop-daemon proj-b)
+          (stop-daemon ws-a)
+          (stop-daemon ws-b)
           (loop for i from 0 below 30
-                while (or (probe-file sock-a) (probe-file sock-b))
+                while (or (probe-file sock-a)
+                          (probe-file sock-b)
+                          (probe-file ws-sock-a)
+                          (probe-file ws-sock-b))
                 do (sleep 0.1)))))))
 
 (format t "~%REPL executable autostart test PASSED!~%")

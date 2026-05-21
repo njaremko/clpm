@@ -588,6 +588,7 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
 
 (defclass server ()
   ((socket-path :initarg :socket-path :reader server-socket-path)
+   (project-root :initarg :project-root :initform nil :reader server-project-root)
    (transport :initarg :transport :initform nil :accessor server-transport)
    (socket :initform nil :accessor server-socket)
    (workers :initform (make-hash-table :test 'equal)
@@ -710,8 +711,11 @@ is NIL."
             (%rotate-event-log log)))))))
 
 (defvar *server* nil
-  "Current server instance, bound during the daemon's lifetime so handlers can
-reach it.")
+  "Current server instance for the executing daemon thread.
+
+This is a special binding, not process identity. A host Lisp may run more
+than one project daemon, so every accept/connection/worker thread must bind
+it to the server that owns that thread.")
 
 (define-condition user-interrupt () ()
   (:documentation "Signaled inside the worker thread when the client closes
@@ -745,6 +749,7 @@ thread died unexpectedly. The next eval response surfaces this as a
 `worker_restarted: true' field so clients can see that history,
 package, and redefinition state may have been lost."
   (name "default" :type string)
+  server
   mailbox
   thread
   (state :idle :type keyword)
@@ -1885,7 +1890,8 @@ while keeping the timer fired count small."
 result-mailbox. Returns when a `:stop' sentinel arrives. Binds
 `*current-worker*' so `%eval-one' and `%record-redefinition' land their
 side-effects on the right worker."
-  (let ((mailbox (worker-mailbox worker)))
+  (let ((*server* (worker-server worker))
+        (mailbox (worker-mailbox worker)))
     (loop
       (let ((job (clpm.repl.compat:receive-message mailbox)))
         (cond
@@ -1922,6 +1928,7 @@ side-effects on the right worker."
 SERVER-WORKERS-MUTEX."
   (let* ((mailbox (clpm.repl.compat:make-mailbox))
          (worker (make-worker :name name
+                              :server server
                               :mailbox mailbox
                               :package (find-package "COMMON-LISP-USER")
                               :concurrent? concurrent?)))
@@ -2084,7 +2091,7 @@ NIL means the handler has already emitted its terminal frame."
                             "required" (and (getf p :required) t)
 	                            "description" (getf p :description))))))
 
-(defparameter +implicit-method-params+ '("token" "explain")
+(defparameter +implicit-method-params+ '("token" "explain" "project_root")
   "Transport/dispatch params accepted for every method without appearing in
 the method-local schema.")
 
@@ -2245,6 +2252,7 @@ so clients can spot a misbehaving RPC without scraping the event log."
       "lisp" (format nil "~A ~A"
                      (lisp-implementation-type)
                      (lisp-implementation-version))
+      "project_root" (server-project-root server)
       "eval_count" (server-eval-count server)
       "method_counts" (%method-counts-json server)
       "recent_error_count" (server-recent-error-count server))))))
@@ -2757,7 +2765,10 @@ out so the watcher's `watch' request finally completes."
                           (clpm.repl.compat:make-mailbox))))
       (setf (watch-thread w)
             (clpm.repl.compat:make-thread
-             (lambda () (%watch-loop server w))
+             (let ((owner server))
+               (lambda ()
+                 (let ((*server* owner))
+                   (%watch-loop owner w))))
              :name (format nil "clpm.repl.watch[~D]" id)))
       (setf (gethash id (server-watches server)) w)
       w)))
@@ -4887,7 +4898,8 @@ as a prin1 string, or NIL for `(values)')."
 ;;; Server: accept loop
 ;;; --------------------------------------------------------------------------
 
-(defun start-server (&key socket-path log-path transport-kind port-path)
+(defun start-server (&key socket-path log-path transport-kind port-path
+                       project-root)
   "Start a daemon listening for JSON-RPC connections. Blocks until a
 `shutdown' request arrives. Cleans up the listener and ensures the worker
 thread is stopped before returning.
@@ -4904,8 +4916,13 @@ When LOG-PATH is supplied, append one JSON line per protocol event
 (accept, request, response, interrupt, worker-died, shutdown) and rotate
 once the file exceeds 10 MB.
 
-Sets the toplevel value of `*server*' (not a dynamic binding) so the worker
-thread sees the same instance; only one daemon may run per process."
+PROJECT-ROOT is the canonical project identity accepted from CLPM CLI
+clients in each request's `project_root' parameter. A NIL PROJECT-ROOT means
+raw test/tooling servers do not enforce a project-root guard.
+
+Each daemon thread binds `*server*' dynamically to its own SERVER. Connection
+and worker threads inherit that identity explicitly so multiple project
+daemons can coexist in one host Lisp process."
   (let* ((kind (or transport-kind (%default-transport-kind)))
          (advertise (ecase kind
                       (:unix (or socket-path
@@ -4914,76 +4931,79 @@ thread sees the same instance; only one daemon may run per process."
                                  (error ":tcp transport requires :port-path")))))
          (transport (make-transport :kind kind :path advertise))
          (server (make-instance 'server :socket-path advertise
+                                        :project-root project-root
                                         :transport transport)))
     (when (and log-path (stringp log-path))
       (setf (server-event-log server) (%open-event-log log-path)))
-    (setf *server* server)
-    (unwind-protect
-         (progn
-           (%open-listener transport)
-           (setf (server-socket server) (transport-listener transport))
-           (%log-event (server-event-log server) "start"
-                       "pid" (clpm.repl.compat:getpid)
-                       "transport" (string-downcase (string kind))
-                       "path" advertise
-                       "port" (transport-port transport))
-           ;; Spawn a thread per connection so eval (which blocks on the worker)
-           ;; doesn't wedge the accept loop. The worker mailbox serializes
-           ;; eval requests; other methods (interrupt, ping, status, ...) run
-           ;; concurrently with whatever the worker is doing.
-           ;;
-           ;; Shutdown path: the `shutdown' handler closes this listening
-           ;; socket so the blocking `socket-accept' below errors out; the
-           ;; handler-case turns that into a clean loop exit.
-           (loop until (server-shutdown-requested? server) do
-             (handler-case
-                 (let ((conn (sb-bsd-sockets:socket-accept
-                              (transport-listener transport))))
-                   (%log-event (server-event-log server) "accept")
-                   (clpm.repl.compat:make-thread
-                    (let ((c conn))
-                      (lambda ()
-                        (unwind-protect
-                             (handler-case
-                                 (%handle-connection server c)
-                               (error (e)
-                                 (%log-event (server-event-log server)
-                                             "handler-error"
-                                             "error" (princ-to-string e))
-                                 (format *error-output*
-                                         "repl handler error: ~A~%" e)))
-                          (ignore-errors (sb-bsd-sockets:socket-close c)))))
-                    :name "clpm.repl.conn"))
-               (error ()
-                 (when (server-shutdown-requested? server)
-                   (loop-finish))))))
-	      ;; Stop every watcher first so its polling threads tear down
-	      ;; before the workers it might be loading code into.
-	      (dolist (w (%all-watches server))
-	        (handler-case (%stop-watch w) (error () nil))
-	        (when (clpm.repl.compat:thread-alive-p (watch-thread w))
-	          (handler-case
-	              (clpm.repl.compat:join-thread (watch-thread w))
-	            (error () nil))))
-	      ;; A worker in the debugger is blocked on its debug mailbox, not on
-	      ;; the worker mailbox. Resolve those stops first so ordinary worker
-	      ;; shutdown can drain below.
-	      (dolist (session (%all-debug-sessions server))
-	        (handler-case
-	            (%abort-debug-session server session "shutdown")
-	          (error () nil)))
-	      ;; Stop every worker we spawned. Best-effort: the daemon is going
-	      ;; away, so failure to join is acceptable.
-	      (dolist (w (%all-workers server))
-	        (when (clpm.repl.compat:thread-alive-p (worker-thread w))
-	          (clpm.repl.compat:send-message (worker-mailbox w) :stop)
+    (let ((*server* server))
+      (unwind-protect
+           (progn
+             (%open-listener transport)
+             (setf (server-socket server) (transport-listener transport))
+             (%log-event (server-event-log server) "start"
+                         "pid" (clpm.repl.compat:getpid)
+                         "transport" (string-downcase (string kind))
+                         "path" advertise
+                         "port" (transport-port transport))
+             ;; Spawn a thread per connection so eval (which blocks on the worker)
+             ;; doesn't wedge the accept loop. The worker mailbox serializes
+             ;; eval requests; other methods (interrupt, ping, status, ...) run
+             ;; concurrently with whatever the worker is doing.
+             ;;
+             ;; Shutdown path: the `shutdown' handler closes this listening
+             ;; socket so the blocking `socket-accept' below errors out; the
+             ;; handler-case turns that into a clean loop exit.
+             (loop until (server-shutdown-requested? server) do
+               (handler-case
+                   (let ((conn (sb-bsd-sockets:socket-accept
+                                (transport-listener transport))))
+                     (%log-event (server-event-log server) "accept")
+                     (clpm.repl.compat:make-thread
+                      (let ((c conn)
+                            (owner server))
+                        (lambda ()
+                          (let ((*server* owner))
+                            (unwind-protect
+                                 (handler-case
+                                     (%handle-connection owner c)
+                                   (error (e)
+                                     (%log-event (server-event-log owner)
+                                                 "handler-error"
+                                                 "error" (princ-to-string e))
+                                     (format *error-output*
+                                             "repl handler error: ~A~%" e)))
+                              (ignore-errors
+                               (sb-bsd-sockets:socket-close c))))))
+                      :name "clpm.repl.conn"))
+                 (error ()
+                   (when (server-shutdown-requested? server)
+                     (loop-finish))))))
+        ;; Stop every watcher first so its polling threads tear down
+        ;; before the workers it might be loading code into.
+        (dolist (w (%all-watches server))
+          (handler-case (%stop-watch w) (error () nil))
+          (when (clpm.repl.compat:thread-alive-p (watch-thread w))
+            (handler-case
+                (clpm.repl.compat:join-thread (watch-thread w))
+              (error () nil))))
+        ;; A worker in the debugger is blocked on its debug mailbox, not on
+        ;; the worker mailbox. Resolve those stops first so ordinary worker
+        ;; shutdown can drain below.
+        (dolist (session (%all-debug-sessions server))
           (handler-case
-              (clpm.repl.compat:join-thread (worker-thread w))
-            (error () nil))))
-      (%log-event (server-event-log server) "stop")
-      (%close-event-log (server-event-log server))
-      (%close-listener transport)
-      (setf *server* nil))))
+              (%abort-debug-session server session "shutdown")
+            (error () nil)))
+        ;; Stop every worker we spawned. Best-effort: the daemon is going
+        ;; away, so failure to join is acceptable.
+        (dolist (w (%all-workers server))
+          (when (clpm.repl.compat:thread-alive-p (worker-thread w))
+            (clpm.repl.compat:send-message (worker-mailbox w) :stop)
+            (handler-case
+                (clpm.repl.compat:join-thread (worker-thread w))
+              (error () nil))))
+        (%log-event (server-event-log server) "stop")
+        (%close-event-log (server-event-log server))
+        (%close-listener transport)))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Request context: per-in-flight-request handle used by dispatch to emit
@@ -5315,6 +5335,14 @@ Used by both the inline path and the threaded path."
       (%emit-terminal ctx response))
     (%unregister-in-flight cstate id)))
 
+(defun %project-root-mismatch-p (server params)
+  "Return true when PARAMS do not authorize access to SERVER's project."
+  (let ((expected (server-project-root server)))
+    (and expected
+         (let ((actual (%json-getf params "project_root")))
+           (or (not (stringp actual))
+               (not (string= actual expected)))))))
+
 (defun %handle-incoming-line (server cstate line)
   "Parse one line off the connection. Continuation messages (query-response,
 ...) are routed inline and produce no terminal frame. New requests are
@@ -5344,6 +5372,11 @@ with v2 toggles requiring continuations)."
                        "id" id "method" method)
            (%write-error-inline cstate id "protocol-error"
                                 "missing or invalid `token`"))
+          ((%project-root-mismatch-p server params)
+           (%log-event (server-event-log server) "project-rejected"
+                       "id" id "method" method)
+           (%write-error-inline cstate id "protocol-error"
+                                "missing or invalid `project_root`"))
 	          ;; Continuation: the user's reply to an `event:query'.
 	          ((string= method "query-response")
 	           (multiple-value-bind (decoded-params decode-error)
@@ -5371,16 +5404,18 @@ with v2 toggles requiring continuations)."
            (%log-event (server-event-log server) "request"
                        "id" id "method" method)
            (clpm.repl.compat:make-thread
-            (lambda ()
-              (handler-case
-                  (%dispatch-and-finalize server cstate id method params)
-                (error (c)
-                  (%log-event (server-event-log server)
-                              "dispatch-thread-error"
-                              "id" id "error" (princ-to-string c))
-                  (%write-error-inline cstate id "protocol-error"
-                                       (princ-to-string c))
-                  (%unregister-in-flight cstate id))))
+            (let ((owner server))
+              (lambda ()
+                (let ((*server* owner))
+                  (handler-case
+                      (%dispatch-and-finalize owner cstate id method params)
+                    (error (c)
+                      (%log-event (server-event-log owner)
+                                  "dispatch-thread-error"
+                                  "id" id "error" (princ-to-string c))
+                      (%write-error-inline cstate id "protocol-error"
+                                           (princ-to-string c))
+                      (%unregister-in-flight cstate id))))))
             :name "clpm.repl.dispatch"))
           (t
            (%log-event (server-event-log server) "request"

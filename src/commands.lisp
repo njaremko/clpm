@@ -1733,6 +1733,24 @@ giving the loopback port and a 32-hex shared token)."
             (namestring (merge-pathnames "repl.pid" dir))
             (namestring (merge-pathnames "repl.log" dir)))))
 
+(defun %bridge-project-root-id (project-root)
+  "Return the canonical project identity used by the repl daemon protocol."
+  (namestring (uiop:ensure-directory-pathname (truename project-root))))
+
+(defun %bridge-params-with-project-root (params project-root)
+  "Return PARAMS with the daemon project identity attached."
+  (let ((project-id (%bridge-project-root-id project-root)))
+    (cond
+      ((null params)
+       (list :object (list (cons "project_root" project-id))))
+      ((and (consp params) (eq (car params) :object))
+       (list :object
+             (acons "project_root" project-id
+                    (remove "project_root" (cadr params)
+                            :key #'car
+                            :test #'string=))))
+      (t params))))
+
 (defun %bridge-read-pidfile (path)
   "Return the integer PID stored in PATH, or NIL if the file is missing /
 malformed."
@@ -1908,14 +1926,15 @@ because the daemon couldn't come up."
                                (when no-load (list "--no-load")))))
              (ensure-directories-exist log)
              (handler-case
-                 (with-open-file (log-stream log :direction :output
-                                                  :if-exists :append
-                                                  :if-does-not-exist :create
-                                                  :external-format :utf-8)
-                   (uiop:launch-program argv
-                                        :output log-stream
-                                        :error-output log-stream
-                                        :input nil))
+                 (uiop:with-current-directory (project-root)
+                   (with-open-file (log-stream log :direction :output
+                                                    :if-exists :append
+                                                    :if-does-not-exist :create
+                                                    :external-format :utf-8)
+                     (uiop:launch-program argv
+                                          :output log-stream
+                                          :error-output log-stream
+                                          :input nil)))
                (error (c)
                  (log-error "Failed to launch daemon: ~A" c)
                  (return-from %bridge-daemon-start 1)))
@@ -1941,11 +1960,13 @@ because the daemon couldn't come up."
                         (clpm.repl:start-server
                          :transport-kind :tcp
                          :port-path sock
-                         :log-path log)
+                         :log-path log
+                         :project-root (%bridge-project-root-id project-root))
                         (clpm.repl:start-server
                          :transport-kind :unix
                          :socket-path sock
-                         :log-path log))
+                         :log-path log
+                         :project-root (%bridge-project-root-id project-root)))
                     0)
                 (error (c)
                   (format *error-output* "daemon crashed: ~A~%" c)
@@ -2139,11 +2160,12 @@ own renderer so this fallback is rarely hit."
 (defun %bridge-send-or-autostart (sock pid project-root method
                                   &key params (autostart t) on-event)
   "Send a request, auto-starting the daemon on connect failure."
-  (declare (ignore pid project-root))
-  (let ((resp (clpm.repl:send-request sock method
-                                             :params params
-                                             :connect-timeout 1
-                                             :on-event on-event)))
+  (declare (ignore pid))
+  (let* ((wire-params (%bridge-params-with-project-root params project-root))
+         (resp (clpm.repl:send-request sock method
+                                       :params wire-params
+                                       :connect-timeout 1
+                                       :on-event on-event)))
     (cond
       ((eq resp :no-daemon)
        (cond
@@ -2153,9 +2175,10 @@ own renderer so this fallback is rarely hit."
          (t
           (let ((rc (%bridge-daemon-start (list "--detach"))))
             (declare (ignore rc))
-            (clpm.repl:send-request sock method :params params
-                                           :connect-timeout 5
-                                           :on-event on-event)))))
+            (clpm.repl:send-request sock method
+                                    :params wire-params
+                                    :connect-timeout 5
+                                    :on-event on-event)))))
       (t resp))))
 
 (defun %bridge-split-on (char string)
@@ -2315,6 +2338,7 @@ server-owned session for later `call debug-* ...' requests."
              (t
               (let ((opts (list :package package
                                 :worker worker
+                                :project-root project-root
                                 :restart restart
                                 :arg (nreverse restart-args)
                                 :frame frame
@@ -2385,7 +2409,9 @@ server-owned session for later `call debug-* ...' requests."
            0)
           (t
            (let ((ping (clpm.repl:send-request sock "ping"
-                                                     :connect-timeout 1)))
+                                               :params (%bridge-params-with-project-root
+                                                        nil project-root)
+                                               :connect-timeout 1)))
              (cond
                ((consp ping)
                 (let* ((result (cdr (assoc "result" (cadr ping)
@@ -2453,7 +2479,10 @@ are dropped, matching `%bridge-make-params'."
          ;; an editor) that hosts the daemon as one of many threads, so we
          ;; can't safely SIGTERM on pid-liveness alone.
          (handler-case
-             (clpm.repl:send-request sock "shutdown" :connect-timeout 1)
+             (clpm.repl:send-request sock "shutdown"
+                                     :params (%bridge-params-with-project-root
+                                              nil project-root)
+                                     :connect-timeout 1)
            (error () nil))
          ;; Poll for the socket file going away. `probe-file' isn't safe here
          ;; because on macOS it can fault on a Unix-socket path during the
@@ -2726,70 +2755,79 @@ quotes around every non-JSON atom."
 (defun %bridge-debug-on-connection (conn opts form)
   "The continuation-aware debugger loop, run on an open CONNECTION."
   (let* ((eval-id 1001)
+         (project-root (getf opts :project-root))
          (resolved nil)
          (kept nil)
-         (params (%bridge-make-params
-                  (list (cons "form" form)
-                        (cons "package" (getf opts :package))
-                        (cons "worker" (getf opts :worker))
-                        (cons "debug" t)
-                        (cons "break_on" (getf opts :break-on))
-                        (cons "max_real_ms" (getf opts :timeout-ms))
-                        (cons "handlers" (getf opts :handlers))))))
-    (flet ((handle-stop (event)
-             (let* ((cobj (%bridge-unwrap (%bridge-frame-field event "condition")))
-                    (session (%bridge-frame-field event "session"))
-                    (restarts (%bridge-array-items
-                               (%bridge-field cobj "restarts")))
-                    (frames (%bridge-array-items
-                             (%bridge-field cobj "backtrace"))))
-               (cond
-                 ((and (getf opts :frame) (getf opts :frame-eval))
-                  (clpm.repl:send-continuation-on-connection
-                   conn eval-id "debug-eval-in-frame"
-                   :params (%bridge-make-params
-                            (list (cons "frame" (getf opts :frame))
-                                  (cons "form"  (getf opts :frame-eval))))))
-                 ((getf opts :restart)
-                  (clpm.repl:send-continuation-on-connection
-                   conn eval-id "debug-invoke-restart"
-                   :params (%bridge-make-params
-                            (list (cons "name" (getf opts :restart))
-                                  (cons "args"
-                                        (and (getf opts :arg)
-                                             (%bridge-string-list
-                                              (getf opts :arg)))))))
-                  (setf resolved t))
-                 (t
-                  (cond
-                    (*bridge-cli-json* (%bridge-emit-json event))
-                    (t
-                     (format *error-output* "~&!! debugger entered: ~A~%"
-                             (or (%bridge-field cobj "message")
-                                 (%bridge-field cobj "report")
-                                 "(no condition)"))
-                     (when session
-                       (format *error-output* "session: ~A~%" session))
-                     (when restarts
-                       (format *error-output* "restarts (~D):~%" (length restarts))
-                       (dolist (r restarts)
-                         (%bridge-print-restart *error-output* (cadr r))))
-                     (let ((user (%bridge-user-frames (list :array frames))))
-                       (when user
-                         (%bridge-print-frames *error-output* user)))))
-                  (cond
-                    ((getf opts :keep)
-                     (setf kept t
-                           resolved :kept)
-                     :stop)
-                    ((getf opts :abort)
-                     (clpm.repl:send-continuation-on-connection
-                      conn eval-id "debug-abort")
-                     (setf resolved :aborted))
-                    (t
-                     (clpm.repl:send-continuation-on-connection
-                      conn eval-id "debug-abort")
-                     (setf resolved :aborted))))))))
+         (params (%bridge-params-with-project-root
+                  (%bridge-make-params
+                   (list (cons "form" form)
+                         (cons "package" (getf opts :package))
+                         (cons "worker" (getf opts :worker))
+                         (cons "debug" t)
+                         (cons "break_on" (getf opts :break-on))
+                         (cons "max_real_ms" (getf opts :timeout-ms))
+                         (cons "handlers" (getf opts :handlers))))
+                  project-root)))
+    (labels ((project-params (raw)
+               (%bridge-params-with-project-root raw project-root))
+             (handle-stop (event)
+               (let* ((cobj (%bridge-unwrap (%bridge-frame-field event "condition")))
+                      (session (%bridge-frame-field event "session"))
+                      (restarts (%bridge-array-items
+                                 (%bridge-field cobj "restarts")))
+                      (frames (%bridge-array-items
+                               (%bridge-field cobj "backtrace"))))
+                 (cond
+                   ((and (getf opts :frame) (getf opts :frame-eval))
+                    (clpm.repl:send-continuation-on-connection
+                     conn eval-id "debug-eval-in-frame"
+                     :params (project-params
+                              (%bridge-make-params
+                               (list (cons "frame" (getf opts :frame))
+                                     (cons "form"  (getf opts :frame-eval)))))))
+                   ((getf opts :restart)
+                    (clpm.repl:send-continuation-on-connection
+                     conn eval-id "debug-invoke-restart"
+                     :params (project-params
+                              (%bridge-make-params
+                               (list (cons "name" (getf opts :restart))
+                                     (cons "args"
+                                           (and (getf opts :arg)
+                                                (%bridge-string-list
+                                                 (getf opts :arg))))))))
+                    (setf resolved t))
+                   (t
+                    (cond
+                      (*bridge-cli-json* (%bridge-emit-json event))
+                      (t
+                       (format *error-output* "~&!! debugger entered: ~A~%"
+                               (or (%bridge-field cobj "message")
+                                   (%bridge-field cobj "report")
+                                   "(no condition)"))
+                       (when session
+                         (format *error-output* "session: ~A~%" session))
+                       (when restarts
+                         (format *error-output* "restarts (~D):~%" (length restarts))
+                         (dolist (r restarts)
+                           (%bridge-print-restart *error-output* (cadr r))))
+                       (let ((user (%bridge-user-frames (list :array frames))))
+                         (when user
+                           (%bridge-print-frames *error-output* user)))))
+                    (cond
+                      ((getf opts :keep)
+                       (setf kept t
+                             resolved :kept)
+                       :stop)
+                      ((getf opts :abort)
+                       (clpm.repl:send-continuation-on-connection
+                        conn eval-id "debug-abort"
+                        :params (project-params nil))
+                       (setf resolved :aborted))
+                      (t
+                       (clpm.repl:send-continuation-on-connection
+                        conn eval-id "debug-abort"
+                        :params (project-params nil))
+                       (setf resolved :aborted))))))))
       (let ((resp
               (clpm.repl:send-on-connection
                conn "eval"
@@ -2814,7 +2852,8 @@ quotes around every non-JSON atom."
                       ;; After printing the frame result we always abort the
                       ;; session: stays single-shot.
                       (clpm.repl:send-continuation-on-connection
-                       conn eval-id "debug-abort")
+                       conn eval-id "debug-abort"
+                       :params (project-params nil))
                       (setf resolved t)))
                    action)))))
         (cond
