@@ -1280,6 +1280,30 @@ but output kind and machine-readable shape are semantic.
     This is intentional while `repl eval` remains the single evaluation
     constructor.
 
+### Iteration 34: Reject Inert Daemon Action Flags
+
+- Commands deleted:
+  - `repl daemon --status --detach`.
+  - `repl daemon --status --no-load`.
+  - `repl daemon --stop --detach`.
+  - `repl daemon --stop --no-load`.
+- Commands merged:
+  - No lifecycle action was removed. `--detach` and `--no-load` remain
+    start-only modifiers for the bare daemon start action.
+- Commands derived instead of exposed:
+  - Status and stop are terminal daemon actions; they do not derive from
+    start options.
+- Commands that survived and why:
+  - `repl daemon --status --json` survives because `--json` changes the
+    observation format of the status action.
+- Laws/protocol invariants added:
+  - `daemonAction in {status, stop} => startOptions = empty`.
+  - Inert start options on non-start daemon actions fail before project state
+    is observed or mutated.
+- Remaining discomfort:
+  - `repl eval --no-autostart` still exposes lifecycle policy on eval. It is
+    useful for tests and scripts, but should remain under suspicion.
+
 ## Constructors
 
 Terminal constructors:

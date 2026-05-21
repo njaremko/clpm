@@ -2522,6 +2522,10 @@ foreground, `--detach' starts background, `--status' observes state, and
     (when (and status stop)
       (log-error "Use only one of --status or --stop")
       (return-from %bridge-daemon 1))
+    (when (and (or status stop) start-args)
+      (log-error "Daemon start options are incompatible with --status/--stop: ~{~A~^ ~}"
+                 (nreverse start-args))
+      (return-from %bridge-daemon 1))
     (when (and json (not status))
       (log-error "Use --json only with `clpm repl daemon --status`")
       (return-from %bridge-daemon 1))

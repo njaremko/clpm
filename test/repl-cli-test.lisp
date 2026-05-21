@@ -151,6 +151,14 @@
             (assert-contains stdout "\"pid\""))
           (format t "  status --json OK~%")
 
+          (format t "Test: daemon action flags reject inert start options~%")
+          (multiple-value-bind (rc stdout stderr)
+              (run-cli-captured '("repl" "daemon" "--status" "--detach"))
+            (declare (ignore stdout))
+            (assert-eql 1 rc)
+            (assert-contains stderr "incompatible with --status/--stop"))
+          (format t "  daemon action flag rejection OK~%")
+
           (format t "Test: eval --no-autostart fails after stop~%")
           (multiple-value-bind (rc stdout stderr)
               (run-cli-captured '("repl" "daemon" "--stop"))
