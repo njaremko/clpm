@@ -211,6 +211,15 @@
   (assert-true (not (search "--refresh-trust" stdout :test #'char-equal))
                "registry update help still advertises trust refresh:~%~A" stdout))
 
+;; registry add: Quicklisp add accepts explicit trust, so help must say so.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "registry" "add"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm registry add")
+  (assert-contains stdout "--quicklisp")
+  (assert-contains stdout "--trust tofu|sha256:<64-hex-digest>"))
+
 ;; registry publish: writes CLPM artifacts only, no VCS side effects.
 (multiple-value-bind (code stdout stderr)
     (run-cli-captured '("help" "registry" "publish"))

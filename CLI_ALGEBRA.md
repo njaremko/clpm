@@ -271,6 +271,7 @@ clpm [options] deps audit [--json]
 clpm [options] deps sbom --format <format> [--out <path>]
 
 clpm [options] registry list|add|update|trust|init ...
+clpm [options] registry add --quicklisp [--name quicklisp] [--url <dist-url>] [--trust tofu|sha256:<64-hex-digest>]
 clpm [options] registry key generate|list|import|verify ...
 clpm [options] registry publish ...
 
@@ -284,7 +285,7 @@ clpm [options] store clean [--dist] [--store]
 clpm [options] store gc [--dry-run]
 
 clpm [options] repl daemon [--detach] [--no-load] [--status [--json]] [--stop]
-clpm [options] repl eval FORM [--package P] [--worker W] [--debug] ...
+clpm [options] repl eval FORM [--package P] [--worker W] [--debug] [--no-autostart] ...
 clpm [options] repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
 
@@ -1301,8 +1302,61 @@ but output kind and machine-readable shape are semantic.
   - Inert start options on non-start daemon actions fail before project state
     is observed or mutated.
 - Remaining discomfort:
-  - `repl eval --no-autostart` still exposes lifecycle policy on eval. It is
-    useful for tests and scripts, but should remain under suspicion.
+  - `registry add --quicklisp --trust` was accepted by the parser but hidden
+    from help, leaving a useful trust constructor in a half-public state.
+
+### Iteration 35: Defend `repl eval --no-autostart`
+
+- Commands deleted:
+  - None. The option survives the attack.
+- Commands merged:
+  - No lifecycle action was merged into eval. The option is a precondition on
+    eval, not a daemon lifecycle constructor.
+- Commands derived instead of exposed:
+  - `repl eval FORM --no-autostart` is `repl eval FORM` with the daemon
+    creation transition removed from the admissible world transitions.
+- Commands that survived and why:
+  - `repl eval --no-autostart` survives because it is the only ergonomic way
+    for scripts and tests to say "talk to the selected existing project image
+    or fail." Without it, `repl eval` can silently create a new daemon and
+    destroy the observation needed to prove project isolation.
+- Laws/protocol invariants added:
+  - If no daemon exists for the selected project root,
+    `denote(repl eval form --no-autostart) = Failed no-daemon`.
+  - `repl eval --no-autostart` never adds an entry to `world.repls`.
+  - If a daemon exists, `repl eval FORM --no-autostart` and
+    `repl eval FORM` observe the same selected daemon.
+- Remaining discomfort:
+  - None. The option is now defended as an eval precondition modifier, not as
+    public lifecycle policy.
+
+### Iteration 36: Expose Quicklisp Add Trust
+
+- Commands deleted:
+  - No command token. The hidden parser surface becomes documented instead of
+    accidental.
+- Commands merged:
+  - `registry trust set quicklisp tofu` is not needed after
+    `registry add --quicklisp --trust tofu`; add-time trust is the constructor
+    for the initial registry config.
+- Commands derived instead of exposed:
+  - `registry add --quicklisp` derives to
+    `registry add --quicklisp --trust tofu` with the default Quicklisp dist
+    URL and name.
+- Commands that survived and why:
+  - `registry add --quicklisp --trust tofu|sha256:<digest>` survives because
+    trust is part of the Quicklisp registry value, not a later optional
+    decoration. Add-time `sha256:` lets a known distinfo pin be installed
+    without a temporary TOFU state.
+- Laws/protocol invariants added:
+  - Quicklisp add trust domain is closed:
+    `trust in {tofu} union sha256Digest`.
+  - Git registry add trust domain is disjoint:
+    `trust = ed25519:keyId`.
+  - Help output must advertise every accepted add-time registry trust domain.
+- Remaining discomfort:
+  - None for registry add trust. Future attacks should check whether README
+    examples reintroduce redundant `trust set quicklisp tofu` flows.
 
 ## Constructors
 

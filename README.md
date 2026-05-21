@@ -32,9 +32,8 @@ curl -fsSL https://github.com/clpm/clpm/releases/download/v0.1.0/clpm-bootstrap.
 # Check your environment (will report issues if not configured)
 clpm doctor
 
-# Quicklisp (online): configure + pin distinfo on first use
-clpm registry add --quicklisp
-clpm registry trust set quicklisp tofu
+# Quicklisp (online): configure + pin distinfo on first update
+clpm registry add --quicklisp --trust tofu
 clpm registry update quicklisp
 
 # Create a new project
@@ -60,12 +59,14 @@ clpm registry add --name main --url https://github.com/clpm/clpm-registry.git --
 
 ## Trust & provenance
 
-Quicklisp dists are not signed. CLPM supports explicit “trust” modes for Quicklisp by pinning the `distinfo.txt` hash:
+Quicklisp dists are not signed. CLPM supports explicit trust modes for
+Quicklisp by pinning the `distinfo.txt` hash. Configure TOFU when adding the
+registry, then let the first update record the observed digest:
 
 ```bash
-clpm registry trust list
-clpm registry trust set quicklisp tofu
+clpm registry add --quicklisp --trust tofu
 clpm registry update quicklisp
+clpm registry trust list
 ```
 
 If Quicklisp changes and your pin no longer matches, refresh it explicitly:
