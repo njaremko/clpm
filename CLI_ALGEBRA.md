@@ -888,6 +888,33 @@ but output kind and machine-readable shape are semantic.
   - Root help still groups leaf-scoped options under the top-level usage
     banner. That should be attacked next as help/schema drift.
 
+### Iteration 19: Attack Run Argument Boundary
+
+- Commands deleted:
+  - Bare `clpm run ARG...` as an implicit entrypoint-argument form.
+- Commands merged:
+  - Entrypoint execution has exactly two surface forms: `clpm run` and
+    `clpm run -- ARG...`.
+- Commands derived instead of exposed:
+  - Application arguments are not CLPM subcommands. The `--` separator is the
+    only constructor that moves subsequent words from the CLPM command algebra
+    into the application argument payload.
+- Commands that survived and why:
+  - `clpm run` survives as entrypoint execution with empty argv.
+  - `clpm run -- ARG...` survives as entrypoint execution with explicit argv.
+  - `clpm run exec|test|script|scripts ...` survive as named execution
+    operations.
+- Laws/protocol invariants added:
+  - The first token after `run` is interpreted only by the run algebra:
+    `parse ["run", token, args...] = Error` when `token` is not one of
+    `--`, `exec`, `test`, `script`, `scripts`, `help`, or `--help`.
+  - Entrypoint argv crosses the boundary only after `--`:
+    `parse ["run", "--", args...] = Right (run (EntryPoint args))`.
+- Remaining discomfort:
+  - `run` still combines "execute a Lisp entrypoint" and "execute external
+    process" under one resource. The current defense is activation context:
+    both are observations of the project activation, not dependency mutation.
+
 ## Constructors
 
 Terminal constructors:
@@ -1105,6 +1132,12 @@ Law: "eval has no default-output alias"
   parse ["repl", "eval", form] = Right (repl (eval form Human))
   parse ["repl", "eval", form, "--json"] = Right (repl (eval form Json))
 
+Law: "run entrypoint args require an explicit boundary"
+  parse ["run"] = Right (run (EntryPoint []))
+  parse ["run", "--", args...] = Right (run (EntryPoint args))
+  token notin {"--", "exec", "test", "script", "scripts", "help", "--help"}
+    => parse ["run", token, args...] = Error
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -1305,6 +1338,8 @@ Failed-counterexample regressions:
   VCS commands.
 - `clpm repl eval FORM --pretty` is rejected; human output is the default and
   has no flag alias.
+- `clpm run bare args` is rejected; entrypoint arguments require
+  `clpm run -- bare args`.
 
 Reference versus optimized equivalence:
 

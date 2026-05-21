@@ -118,6 +118,8 @@
            (let ((args (clpm.io.sexp:read-safe-sexp-from-file args-path)))
              (assert-true (equal '("hello" "world") args)
                           "Unexpected args: ~S" args))
+           (uiop:with-current-directory (project-root)
+             (assert-eql 1 (clpm:run-cli '("run" "bare" "args"))))
 
            ;; `clpm run exec` should set CLPM_PROJECT_ROOT for non-sbcl commands.
            (uiop:with-current-directory (project-root)
