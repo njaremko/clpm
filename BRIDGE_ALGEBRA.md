@@ -316,6 +316,9 @@ Consequences:
 
 - A socket connection is a delivery path, not ownership of a debug,
   query, inspector, or watch resource.
+- Project root is part of the REPL carrier identity. Two different project
+  roots denote different daemon images even when their forms, packages,
+  worker names, or symbol names coincide.
 - A cache hit, thread reuse, method-handler arrangement, or fresh-id counter
   value may not alter semantic observations except through alpha-renamed
   capabilities.
@@ -472,6 +475,15 @@ Law: "same-worker-serial"
 forall a b worker.
   target a = worker and target b = worker
   => run [a,b] observes a before b
+```
+
+```haskell
+Law: "project images are isolated"
+forall projectA projectB actionsA actionsB.
+  projectA /= projectB
+  => run actionsA (repl projectA) cannot create, mutate, or observe
+     bindings, workers, debugger sessions, inspectors, watches, traces, or
+     history in repl projectB
 ```
 
 ```haskell

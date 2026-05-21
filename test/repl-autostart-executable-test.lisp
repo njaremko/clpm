@@ -85,28 +85,73 @@
        (repo-root (uiop:pathname-parent-directory-pathname test-dir)))
   (with-short-temp-dir (tmp)
     (let* ((exe (merge-pathnames "clpm" tmp))
-           (proj (merge-pathnames "proj/" tmp))
-           (sock (merge-pathnames ".clpm/repl.sock" proj)))
+           (proj-a (merge-pathnames "proj-a/" tmp))
+           (proj-b (merge-pathnames "proj-b/" tmp))
+           (sock-a (merge-pathnames ".clpm/repl.sock" proj-a))
+           (sock-b (merge-pathnames ".clpm/repl.sock" proj-b)))
       (format t "Test: saved executable autostarts repl daemon~%")
       (build-clpm-executable repo-root exe)
-      (write-minimal-project proj)
-      (unwind-protect
-           (multiple-value-bind (rc stdout stderr)
+      (write-minimal-project proj-a)
+      (write-minimal-project proj-b)
+      (flet ((clpm-eval (project form)
                (run-program-captured
-                (list (namestring exe) "repl" "eval" "(+ 1 2)")
-                :directory proj)
-             (unless (zerop rc)
-               (fail "expected eval autostart to succeed, got rc ~D~%stdout:~%~A~%stderr:~%~A"
-                     rc stdout stderr))
-             (assert-contains stdout "=> 3")
-             (format t "  saved executable autostart OK~%"))
-        (ignore-errors
-          (run-program-captured
-           (list (namestring exe) "repl" "daemon" "--stop")
-           :directory proj))
-        (loop for i from 0 below 30
-              while (probe-file sock)
-              do (sleep 0.1))))))
+                (list (namestring exe) "repl" "eval" form)
+                :directory project))
+             (stop-daemon (project)
+               (ignore-errors
+                 (run-program-captured
+                  (list (namestring exe) "repl" "daemon" "--stop")
+                  :directory project))))
+        (unwind-protect
+             (progn
+               (multiple-value-bind (rc stdout stderr)
+                   (clpm-eval proj-a "(+ 1 2)")
+                 (unless (zerop rc)
+                   (fail "expected eval autostart to succeed, got rc ~D~%stdout:~%~A~%stderr:~%~A"
+                         rc stdout stderr))
+                 (assert-contains stdout "=> 3")
+                 (format t "  saved executable autostart OK~%"))
+
+               (format t "Test: project repl daemons are isolated~%")
+               (multiple-value-bind (rc stdout stderr)
+                   (clpm-eval proj-a
+                              "(defparameter *clpm-repl-isolation-token* :project-a)")
+                 (unless (zerop rc)
+                   (fail "project A token definition failed: ~D~%stdout:~%~A~%stderr:~%~A"
+                         rc stdout stderr))
+                 (assert-contains stdout "=> *CLPM-REPL-ISOLATION-TOKEN*"))
+               (multiple-value-bind (rc stdout stderr)
+                   (clpm-eval proj-a "*clpm-repl-isolation-token*")
+                 (unless (zerop rc)
+                   (fail "project A token lookup failed: ~D~%stdout:~%~A~%stderr:~%~A"
+                         rc stdout stderr))
+                 (assert-contains stdout "=> :PROJECT-A"))
+               (multiple-value-bind (rc stdout stderr)
+                   (clpm-eval proj-b
+                              "(boundp '*clpm-repl-isolation-token*)")
+                 (unless (zerop rc)
+                   (fail "project B isolation check failed: ~D~%stdout:~%~A~%stderr:~%~A"
+                         rc stdout stderr))
+                 (assert-contains stdout "=> NIL"))
+               (multiple-value-bind (rc stdout stderr)
+                   (clpm-eval proj-b
+                              "(defparameter *clpm-repl-isolation-token* :project-b)")
+                 (unless (zerop rc)
+                   (fail "project B token definition failed: ~D~%stdout:~%~A~%stderr:~%~A"
+                         rc stdout stderr))
+                 (assert-contains stdout "=> *CLPM-REPL-ISOLATION-TOKEN*"))
+               (multiple-value-bind (rc stdout stderr)
+                   (clpm-eval proj-a "*clpm-repl-isolation-token*")
+                 (unless (zerop rc)
+                   (fail "project A token lookup failed: ~D~%stdout:~%~A~%stderr:~%~A"
+                         rc stdout stderr))
+                 (assert-contains stdout "=> :PROJECT-A"))
+               (format t "  project repl isolation OK~%"))
+          (stop-daemon proj-a)
+          (stop-daemon proj-b)
+          (loop for i from 0 below 30
+                while (or (probe-file sock-a) (probe-file sock-b))
+                do (sleep 0.1)))))))
 
 (format t "~%REPL executable autostart test PASSED!~%")
 (sb-ext:exit :code 0)
