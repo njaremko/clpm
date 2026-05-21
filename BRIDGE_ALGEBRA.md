@@ -2,10 +2,10 @@
 
 Mode: semantic design specification.
 
-Implementation allowed: no. This document is the algebra gate for future
-implementation work; code changes should follow only after this spec remains
-lawful under the current evidence and a user explicitly asks for
-implementation.
+Implementation allowed: yes for the current rewrite, because the denotation
+gate passed and the user explicitly requested implementation. Code changes
+must preserve this spec; if a desired change alters meaning, equality,
+observations, or laws, update this algebra before implementation.
 
 ## Intent
 
@@ -22,7 +22,8 @@ This algebra models the public meaning of the bridge:
 2. Server frames observable by JSON-RPC clients.
 3. Persistent resources that must be queryable: workers, debug sessions,
    inspectors, watches, redefinitions, traces, and method schemas.
-4. CLI commands as renderings of the same typed actions.
+4. A deliberately tiny CLI algebra that renders or composes the same typed
+   actions instead of duplicating the RPC registry.
 
 This algebra deliberately ignores:
 
@@ -48,8 +49,9 @@ Representative examples:
 3. Open an inspector on a value, traverse into a part, evaluate with `*`
    bound to the focus, then close the session.
 4. Watch `src/*.lisp`, reload on save, then check `diff` before handoff.
-5. Ask `methods` or `help` to discover the exact request schema rather than
-   relying on stale documentation.
+5. Ask the registry through `call methods` or `call help --method eval` to
+   discover the exact request schema rather than relying on stale
+   documentation.
 
 Edge cases and failures:
 
@@ -334,18 +336,31 @@ Action families:
 | Family | Constructors | One semantic responsibility |
 | --- | --- | --- |
 | Discovery | `Ping`, `Methods`, `Help method` | observe daemon and registry facts |
-| Lifecycle | `Shutdown`, CLI `Serve`, CLI `Status`, CLI `Stop` | start/observe/stop the service boundary |
+| Lifecycle | `Shutdown`, CLI `Daemon mode` | start/observe/stop the service boundary |
 | Worker | `CurrentPackage`, `SetPackage`, `ListWorkers`, `KillWorker`, `Reset`, `Interrupt` | manage worker state and current eval |
 | Eval | `Eval`, `TimeEval`, `ProfileEval` | run one form in a worker with options |
 | Condition/query | `QueryResponse`, `ListDebugSessions`, `DebugEvalInFrame`, `DebugInvokeRestart`, `DebugContinue`, `DebugAbort` | drive live continuations |
 | Inspector | `Inspect`, `InspectInto`, `InspectPop`, `InspectEval`, `InspectMutate`, `InspectPage`, `InspectClose` | navigate or mutate a focused value |
 | Watch | `Watch`, `ListWatches`, `Unwatch`, `Tick` | stream file-change induced loads |
 | Source/image | `Apropos`, `Documentation`, `Arglist`, `CompleteSymbol`, `PackageInfo`, `ClassInfo`, `FunctionInfo`, `FindDefinition`, `Xref`, `Describe`, `DescribeSystem`, `Macroexpand`, `CompileFile`, `LoadFile`, `Disassemble`, `ImageInfo`, `LoadedSystems`, `ListPackages`, `Gc`, `Trace`, `Untrace`, `ListTraced`, `ListRedefinitions` | observe or mutate the SBCL image through standard Lisp capabilities |
-| CLI derived | `Doc`, `WhoCalls`, `WhoReferences`, `WhoSets`, `WhoBinds`, `Workers`, `Diff`, `Debug` | render or compose primitive RPC actions |
+| CLI core | `Daemon`, `Eval`, `Call` | provide the smallest command surface that can construct every public action |
 
 Every public method in `src/repl_bridge.lisp` is covered by one row above.
-Every public CLI subcommand in `src/commands.lisp` is either a primitive action
-renderer or a derived action sequence.
+The public CLI surface is intentionally not one subcommand per method. It is a
+small constructor algebra:
+
+```text
+clpm repl-bridge daemon [--detach] [--no-load] [--status] [--stop]
+clpm repl-bridge eval FORM [eval/debug flags]
+clpm repl-bridge call METHOD [--PARAM VALUE | --params-json JSON]...
+```
+
+`daemon` is the lifecycle constructor. `eval` is a derived but privileged
+constructor for the interactive REPL/debug loop because it must hold a
+connection while debugger/query continuations are exchanged. `call` is the
+generic typed constructor for every daemon method in the registry; it uses the
+same method schema as the daemon, so convenience aliases are recipes rather
+than public constructors.
 
 Current RPC inventory from the method registry:
 
@@ -362,7 +377,7 @@ inspect-pop, inspect-eval, inspect-mutate, inspect-page, inspect-close,
 load-file
 ```
 
-Current CLI inventory from the repl-bridge dispatcher:
+Legacy CLI wrappers that should disappear during the rewrite:
 
 ```text
 serve, eval, interrupt, ping, status, stop, methods, describe, diff,
@@ -375,6 +390,10 @@ untrace, list-traced, workers/list-workers, kill-worker, reset, list-watches,
 unwatch, watch, inspect, debug, list-debug-sessions, debug-eval-in-frame,
 debug-invoke-restart, debug-continue, debug-abort
 ```
+
+Each legacy wrapper must either become a `call METHOD ...` recipe, become part
+of `daemon`, or disappear. Keeping a wrapper whose denotation is only
+`Call method params` violates parsimony.
 
 ## Denotation Laws
 
@@ -748,23 +767,36 @@ forall command action s w.
   => runCli command s w = renderCli command (frames (step s w action))
 ```
 
-Derived aliases:
+Core CLI constructors:
 
 ```haskell
-Doc symbol args          = Documentation symbol args
-Workers                  = ListWorkers
-Diff worker              = ListRedefinitions worker
-WhoCalls symbol          = Xref symbol Calls
-WhoReferences symbol     = Xref symbol References
-WhoSets symbol           = Xref symbol Sets
-WhoBinds symbol          = Xref symbol Binds
-Debug form selectors     = Eval form debug=true followed by selected
-                           debug continuation and cleanup
+Daemon Start opts        = lifecycleStart opts
+Daemon Status            = lifecycleStatus
+Daemon Stop              = lifecycleStop
+
+Call method params       =
+  dispatch (encode method params)
+
+Eval form opts           =
+  Call "eval" (evalParams form opts)
+  with an interactive continuation policy for debug/query events
 ```
 
-Failure pressure: a CLI wrapper that observes or mutates extra state is a
-separate action, not a renderer. Repair: make it explicit or derive it from
-primitive actions.
+Rejected derived wrappers:
+
+```haskell
+Doc symbol args          = Call "documentation" ...
+Workers                  = Call "list-workers" ...
+Diff worker              = Call "list-redefinitions" ...
+WhoCalls symbol          = Call "xref" --direction calls ...
+Inspect form opts        = Call "inspect" ...
+Debug form selectors     = Eval form debug=true selectors
+```
+
+Failure pressure: one wrapper per RPC recreates the bag-of-handlers model at
+the CLI layer. Repair: expose `Call` as the typed morphism from CLI syntax to
+the method registry, and keep only `Eval` where the connection-continuation law
+requires a specialized client loop.
 
 ### Worker product
 
@@ -876,6 +908,17 @@ Iteration 5: complete observation set.
 - Remaining weakness: none that changes denotation for the current surface.
 - Next pressure test: property laws over generated action sequences.
 
+Iteration 6: broad CLI wrapper surface.
+
+- Candidate tried: one CLI subcommand for most RPC methods.
+- Evidence/law pressure: nearly every wrapper denotes `Call method params`,
+  so the CLI has many constructors with no independent semantic law. This
+  violates constructor parsimony and makes documentation drift more likely.
+- Simplification made: collapse the CLI to `daemon`, `eval`, and `call`.
+- Remaining weakness: `eval` is still special.
+- Next pressure test: `eval` must justify itself by connection-held
+  debug/query continuation laws; otherwise it should collapse into `call`.
+
 ## Property-Test Plan
 
 Generate only well-typed actions through the method registry, plus malformed
@@ -899,8 +942,9 @@ JSON for decoder tests.
 9. Watch laws: watch acknowledgement creates a discoverable watch; unwatch is
    idempotent; file modification emits reload or failure; auto-revert emits
    revert-applied after successful load.
-10. CLI morphism: CLI aliases (`doc`, `workers`, `diff`, `who-calls`, debug
-    single-shot) render the same underlying RPC/action results.
+10. CLI morphism: `call METHOD` produces the same frames as directly
+    dispatching the typed action for METHOD; all old wrapper names are absent
+    or documented as recipes.
 11. Lifecycle: shutdown resolves kept sessions and watches before worker
     teardown.
 
