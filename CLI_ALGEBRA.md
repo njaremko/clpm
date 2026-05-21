@@ -300,6 +300,9 @@ active dependency realization, project packaging, and `run` operations that
 execute Lisp entrypoints/tests/scripts.
 Optional dependency flags are accepted only by dependency resolution:
 `deps sync` and `deps update`.
+Fetch tuning flags are accepted only by CLPM-managed network fetch
+operations: `deps sync`, `deps update`, `deps search`, `deps info`,
+`deps sbom`, `registry update`, and `registry trust refresh`.
 
 ## Current Surface Classification
 
@@ -610,6 +613,34 @@ Optional dependency flags are accepted only by dependency resolution:
   - Fetch tuning is still accepted as a broad parser option and needs the same
     denotational audit.
 
+### Iteration 12: Attack Fetch-Tuning Scope
+
+- Commands deleted:
+  - No commands. The cut removes inert fetch retry/timeout flag placements.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - `--fetch-retries` and `--fetch-timeout` denote CLPM-managed network fetch
+    policy. They are not general process options, not REPL transport options,
+    and not help/output modifiers.
+- Commands that survived and why:
+  - Fetch tuning survives on `deps sync`, `deps update`, `deps search`,
+    `deps info`, `deps sbom`, `registry update`, and
+    `registry trust refresh` because those operations may fetch registry or
+    dependency metadata/artifacts through CLPM.
+  - `--fetch-retries N help` and `--fetch-timeout N repl` are rejected as
+    inert parser decoration.
+- Laws/protocol invariants added:
+  - Fetch tuning is fetch-scoped:
+    `parse ["--fetch-retries", n, "help"] = Error`.
+  - Fetching observations may carry a retry budget:
+    `parse ["--fetch-retries", n, "deps", "search", query] =
+     Right (deps (search query) with FetchBudget n)`.
+- Remaining discomfort:
+  - `repl call METHOD` still accepts all registered non-eval protocol methods.
+    The next attack is whether parameter construction is too loose at the CLI
+    boundary.
+
 ### Iteration 7: Attack Eval-as-Raw-RPC Alias
 
 - Commands deleted:
@@ -817,6 +848,14 @@ Law: "optional dependency flags are solve-scoped"
   parse ["--with-optional", sys, "deps", "sync", "--to", "lock"] =
     Right (deps (sync Lock) with OptionalOptIns {sys})
 
+Law: "fetch tuning is fetch-scoped"
+  parse ["--fetch-retries", n, "help"] = Error
+  parse ["--fetch-timeout", n, "repl"] = Error
+  parse ["--fetch-retries", n, "deps", "search", query] =
+    Right (deps (search query) with FetchBudget n)
+  parse ["--fetch-timeout", n, "registry", "update"] =
+    Right (registry update with FetchTimeout n)
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -1006,6 +1045,8 @@ Failed-counterexample regressions:
 - `clpm --with-optional foo help` and
   `clpm --with-all-optional repl` are rejected; optional opt-ins are only for
   dependency solving.
+- `clpm --fetch-retries 2 help` and `clpm --fetch-timeout 3 repl` are
+  rejected; fetch tuning is only for CLPM-managed fetch operations.
 
 Reference versus optimized equivalence:
 

@@ -263,8 +263,8 @@ explicit resource operations.
 - `-p, --package <member>` - Workspace member to target from workspace root
 - `--offline` - Use cached artifacts for `deps sync` realization and `deps sbom`
 - `--insecure` - Skip signature verification for registry-loading commands
-- `--fetch-retries N` - HTTP retry budget (default: 3, env: `CLPM_FETCH_RETRIES`)
-- `--fetch-timeout SECS` - Per-request timeout (default: 60, env: `CLPM_FETCH_TIMEOUT`)
+- `--fetch-retries N` - Retry budget for CLPM-managed fetches (default: 3, env: `CLPM_FETCH_RETRIES`)
+- `--fetch-timeout SECS` - Per-request CLPM fetch timeout (default: 60, env: `CLPM_FETCH_TIMEOUT`)
 - `--with-optional <sys>` - Opt in to an optional dependency for `deps sync/update` (repeatable)
 - `--with-all-optional` - Opt in to every optional dependency for `deps sync/update`
 

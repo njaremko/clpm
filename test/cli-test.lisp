@@ -150,6 +150,27 @@
       (fail "Expected inert optional-dependency flag to be rejected, got: ~A" err))))
 (format t "  Optional dependency option scope PASSED~%")
 
+(format t "Testing fetch tuning option scope...~%")
+(dolist (args '(("--fetch-retries" "2" "help")
+                ("--fetch-timeout" "3" "repl")))
+  (multiple-value-bind (code _out err)
+      (run-cli-captured args)
+    (declare (ignore _out))
+    (assert-eql 1 code)
+    (unless (search "fetch tuning only applies" err)
+      (fail "Expected inert fetch tuning to be rejected, got: ~A" err))))
+(dolist (args '(("--fetch-retries" "2" "deps" "search" "alexandria")
+                ("--fetch-timeout" "3" "registry" "update")
+                ("--fetch-timeout" "3" "registry" "trust" "refresh")))
+  (multiple-value-bind (command command-args options)
+      (clpm::parse-args args)
+    (handler-case
+        (clpm::validate-option-scope command command-args options)
+      (clpm.errors:clpm-user-error (c)
+        (fail "Expected fetch tuning to be accepted for ~S, got: ~A"
+              args c)))))
+(format t "  Fetch tuning option scope PASSED~%")
+
 (format t "Testing run-program :timeout keyword...~%")
 (multiple-value-bind (output error-output exit-code)
     (clpm.platform:run-program (list "sh" "-c" "exit 0") :timeout 1)

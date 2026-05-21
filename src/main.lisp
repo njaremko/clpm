@@ -40,8 +40,8 @@ Options:
   -p, --package M  Workspace member to target
   --offline        Use cached artifacts for dependency realization/SBOM
   --insecure       Skip signature verification for registry-loading commands
-  --fetch-retries N      Retry budget for HTTP fetches (default: 3, env: CLPM_FETCH_RETRIES)
-  --fetch-timeout SECS   Per-request timeout for HTTP fetches (default: 60, env: CLPM_FETCH_TIMEOUT)
+  --fetch-retries N      Retry budget for CLPM-managed fetches (default: 3, env: CLPM_FETCH_RETRIES)
+  --fetch-timeout SECS   Per-request CLPM fetch timeout (default: 60, env: CLPM_FETCH_TIMEOUT)
   --with-optional SYS    Include optional dependency in deps sync/update
   --with-all-optional    Include all optional dependencies in deps sync/update
   -h, --help       Show this help
@@ -281,6 +281,25 @@ Returns (values command command-args options)."
             (member subcommand '("sync" "update") :test #'string=))))
     (t nil)))
 
+(defun fetch-tuning-command-p (command command-args)
+  "Return true when COMMAND may perform CLPM-managed HTTP fetches."
+  (case command
+    (:deps
+     (let ((subcommand (first command-args)))
+       (and (stringp subcommand)
+            (member subcommand '("sync" "update" "search" "info" "sbom")
+                    :test #'string=))))
+    (:registry
+     (let ((subcommand (first command-args))
+           (nested (second command-args)))
+       (or (and (stringp subcommand)
+                (string= subcommand "update"))
+           (and (stringp subcommand)
+                (string= subcommand "trust")
+                (stringp nested)
+                (string= nested "refresh")))))
+    (t nil)))
+
 (defun parallel-realization-command-p (command command-args)
   "Return true when COMMAND may use the parallel dependency job budget."
   (case command
@@ -317,7 +336,13 @@ Returns (values command command-args options)."
              (not (optional-dependency-command-p command command-args)))
     (clpm.errors:signal-error
      'clpm.errors:clpm-user-error
-     "optional dependency flags only apply to dependency resolution: clpm deps sync or clpm deps update")))
+     "optional dependency flags only apply to dependency resolution: clpm deps sync or clpm deps update"))
+  (when (and (or (option-present-p :fetch-retries options)
+                 (option-present-p :fetch-timeout options))
+             (not (fetch-tuning-command-p command command-args)))
+    (clpm.errors:signal-error
+     'clpm.errors:clpm-user-error
+     "fetch tuning only applies to CLPM-managed fetches: clpm deps sync/update/search/info/sbom, clpm registry update, or clpm registry trust refresh")))
 
 (defun apply-options (options)
   "Apply parsed options to global variables."
