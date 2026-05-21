@@ -57,11 +57,17 @@
   (assert-contains stdout "clpm deps sync")
   (assert-contains stdout "Strongly prefer it")
   (assert-contains stdout "Debug-first workflow")
-  (assert-contains stdout "clpm repl-bridge eval '(error")
-  (assert-contains stdout "clpm repl-bridge call list-watches")
-  (assert-contains stdout "clpm repl-bridge call debug-abort --session 1")
+  (assert-contains stdout "clpm repl eval '(error")
+  (assert-contains stdout "clpm repl call list-watches")
+  (assert-contains stdout "clpm repl call debug-abort --session 1")
   (assert-contains stdout "Do not leave kept debug sessions")
-  (assert-contains stdout "clpm skill"))
+  (assert-contains stdout "clpm skill")
+  (assert-true (not (search "clpm run repl" stdout))
+               "skill output still advertises ordinary REPL:~%~A"
+               stdout)
+  (assert-true (not (search "repl-bridge" stdout :test #'char-equal))
+               "skill output still advertises obsolete repl-bridge:~%~A"
+               stdout))
 (format t "  `clpm skill` output PASSED~%")
 
 (format t "Testing `clpm skill` rejects extra args...~%")

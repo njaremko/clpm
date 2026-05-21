@@ -23,12 +23,12 @@
   (sbcl-constraints nil :type list)
   (build-options nil :type list)
   (scripts nil :type list)
-  ;; Plist controlling the persistent Lisp daemon (`clpm repl-bridge'):
+  ;; Plist controlling the persistent Lisp daemon (`clpm repl'):
   ;;   (:autostart t :preload ("alexandria"))
   ;; AUTOSTART means `clpm deps sync' ends by launching `daemon --detach' if
   ;; no daemon is already running. PRELOAD is a list of additional ASDF system
   ;; names to load after the project's own :systems.
-  (repl-bridge nil :type list))
+  (repl nil :type list))
 
 (defstruct dependency
   "A project dependency."
@@ -188,10 +188,10 @@
          (setf (project-build-options project) val))
         (:scripts
          (setf (project-scripts project) val))
-        (:repl-bridge
+        (:repl
          (unless (listp val)
-           (error "Invalid :repl-bridge value: expected a plist, got ~S" val))
-         (setf (project-repl-bridge project) val))))
+           (error "Invalid :repl value: expected a plist, got ~S" val))
+         (setf (project-repl project) val))))
     project))
 
 ;;; Parsing lockfiles
@@ -452,8 +452,8 @@ directory pathnames (as strings) for determinism."
     :sbcl ,(project-sbcl-constraints project)
     :build ,(project-build-options project)
     :scripts ,(project-scripts project)
-    ,@(when (project-repl-bridge project)
-        (list :repl-bridge (project-repl-bridge project)))))
+    ,@(when (project-repl project)
+        (list :repl (project-repl project)))))
 
 (defun write-project-file (project path)
   "Write a project struct to a clpm.project file."

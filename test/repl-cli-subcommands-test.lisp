@@ -1,5 +1,5 @@
-;;;; test/repl-bridge-cli-subcommands-test.lisp -- end-to-end test for the
-;;;; small repl-bridge CLI algebra: daemon, eval, and call.
+;;;; test/repl-cli-subcommands-test.lisp -- end-to-end test for the
+;;;; small repl CLI algebra: daemon, eval, and call.
 
 (require :asdf)
 (require :sb-posix)
@@ -70,12 +70,12 @@
     (uiop:with-current-directory (proj)
       (let ((srv (sb-thread:make-thread
                   (lambda ()
-                    (handler-case (run-cli-captured '("repl-bridge" "daemon"))
+                    (handler-case (run-cli-captured '("repl" "daemon"))
                       (error (c)
                         (format *error-output* "daemon thread died: ~A~%" c)
                         (force-output *error-output*))))
                   :name "test-cli-small-daemon"))
-            (sock (namestring (merge-pathnames ".clpm/repl-bridge.sock" proj))))
+            (sock (namestring (merge-pathnames ".clpm/repl.sock" proj))))
         (declare (ignorable srv))
         (sleep 0.05)
         (unwind-protect
@@ -89,19 +89,19 @@
 
                (format t "Test: call methods + help expose registry schema~%")
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call" "methods"))
+                   (run-cli-captured '("repl" "call" "methods"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "\"eval\"")
                  (assert-contains stdout "\"methods\""))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call" "help"
+                   (run-cli-captured '("repl" "call" "help"
                                        "--method" "eval"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "\"params\"")
                  (assert-contains stdout "\"form\""))
                (multiple-value-bind (rc stdout)
                    (run-cli-captured
-                    '("repl-bridge" "call" "help"
+                    '("repl" "call" "help"
                       "--params-json" "{\"method\":\"eval\"}"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "\"params\"")
@@ -110,28 +110,28 @@
 
                (format t "Test: call dispatches ordinary RPCs~%")
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call" "image-info"))
+                   (run-cli-captured '("repl" "call" "image-info"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "\"pid\"")
                  (assert-contains stdout "\"lisp\""))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call" "current-package"))
+                   (run-cli-captured '("repl" "call" "current-package"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "COMMON-LISP-USER"))
-               (run-cli-captured '("repl-bridge" "call" "set-package"
+               (run-cli-captured '("repl" "call" "set-package"
                                    "--name" "COMMON-LISP"))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call" "current-package"))
+                   (run-cli-captured '("repl" "call" "current-package"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "COMMON-LISP"))
-               (run-cli-captured '("repl-bridge" "call" "set-package"
+               (run-cli-captured '("repl" "call" "set-package"
                                    "--name" "COMMON-LISP-USER"))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call" "list-workers"))
+                   (run-cli-captured '("repl" "call" "list-workers"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "default"))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call" "gc"
+                   (run-cli-captured '("repl" "call" "gc"
                                        "--full" "true"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "\"result\""))
@@ -139,28 +139,28 @@
 
                (format t "Test: eval remains human-readable and persistent~%")
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "eval" "(+ 1 2)"))
+                   (run-cli-captured '("repl" "eval" "(+ 1 2)"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "=> 3")
                  (assert-true (not (search "\"result\"" stdout))
                               "default eval should not be JSON: ~A" stdout))
-               (run-cli-captured '("repl-bridge" "eval"
+               (run-cli-captured '("repl" "eval"
                                    "(defparameter *cli-x* 41)"))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "eval" "*cli-x*"))
+                   (run-cli-captured '("repl" "eval" "*cli-x*"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "=> 41"))
                (format t "  eval OK~%")
 
                (format t "Test: eval --debug handles debugger continuations~%")
                (multiple-value-bind (rc stdout stderr)
-                   (run-cli-captured '("repl-bridge" "eval"
+                   (run-cli-captured '("repl" "eval"
                                        "(error \"boom\")" "--debug"))
                  (declare (ignore stdout))
                  (assert-eql 3 rc)
                  (assert-contains stderr "debugger entered"))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "eval"
+                   (run-cli-captured '("repl" "eval"
                                        "(restart-case (/ 1 0) (use-value (v) v))"
                                        "--debug" "--restart" "USE-VALUE"
                                        "--arg" "42"))
@@ -171,7 +171,7 @@
                (format t "Test: kept debug sessions are managed through call~%")
                (multiple-value-bind (rc stdout stderr)
                    (run-cli-captured
-                    '("repl-bridge" "eval"
+                    '("repl" "eval"
                       "(progn
                          (declaim (optimize (debug 3) (safety 3) (speed 0)))
                          (defun rb-cli-debug-keep-target (x)
@@ -183,26 +183,26 @@
                  (assert-contains stderr "session:")
                  (assert-contains stderr "RB-CLI-DEBUG-KEEP-TARGET"))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call"
+                   (run-cli-captured '("repl" "call"
                                        "list-debug-sessions"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "\"sessions\""))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call"
+                   (run-cli-captured '("repl" "call"
                                        "debug-eval-in-frame"
                                        "--frame" "4"
                                        "--form" "(* x 2)"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "14"))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call" "debug-abort"))
+                   (run-cli-captured '("repl" "call" "debug-abort"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "aborted"))
                (format t "  kept debug session OK~%")
 
                (format t "Test: source RPCs and redefinition drift use call~%")
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call" "macroexpand"
+                   (run-cli-captured '("repl" "call" "macroexpand"
                                        "--form" "(when t :ok)"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "IF"))
@@ -211,25 +211,25 @@
                                         :if-exists :supersede)
                    (write-string "(defun hello () \"hi\")" s))
                  (multiple-value-bind (rc stdout)
-                     (run-cli-captured (list "repl-bridge" "call"
+                     (run-cli-captured (list "repl" "call"
                                              "compile-file"
                                              "--path" (namestring src)))
                    (assert-eql 0 rc)
                    (assert-contains stdout "\"result\""))
                  (multiple-value-bind (rc stdout)
-                     (run-cli-captured (list "repl-bridge" "call"
+                     (run-cli-captured (list "repl" "call"
                                              "load-file"
                                              "--path" (namestring src)))
                    (assert-eql 0 rc)
                    (assert-contains stdout "\"result\""))
                  (multiple-value-bind (rc stdout)
-                     (run-cli-captured '("repl-bridge" "eval" "(hello)"))
+                     (run-cli-captured '("repl" "eval" "(hello)"))
                    (assert-eql 0 rc)
                    (assert-contains stdout "hi")))
-               (run-cli-captured '("repl-bridge" "eval"
+               (run-cli-captured '("repl" "eval"
                                    "(defun diff-fn-x () 1)"))
                (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl-bridge" "call"
+                   (run-cli-captured '("repl" "call"
                                        "list-redefinitions"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "DIFF-FN-X"))
@@ -237,23 +237,23 @@
 
                (format t "Test: legacy wrappers are gone~%")
                (multiple-value-bind (rc stdout stderr)
-                   (run-cli-captured '("repl-bridge" "ping"))
+                   (run-cli-captured '("repl" "ping"))
                  (declare (ignore stdout))
                  (assert-true (not (zerop rc)) "expected nonzero rc")
                  (assert-contains stderr "Unknown subcommand"))
                (multiple-value-bind (rc stdout stderr)
-                   (run-cli-captured '("repl-bridge" "debug"
+                   (run-cli-captured '("repl" "debug"
                                        "(error \"x\")"))
                  (declare (ignore stdout))
                  (assert-true (not (zerop rc)) "expected nonzero rc")
                  (assert-contains stderr "Unknown subcommand"))
                (format t "  legacy wrappers rejected OK~%"))
-          (ignore-errors (run-cli-captured '("repl-bridge" "daemon" "--stop")))
+          (ignore-errors (run-cli-captured '("repl" "daemon" "--stop")))
           (loop for i from 0 below 30
                 while (sb-thread:thread-alive-p srv)
                 do (sleep 0.1))
           (when (sb-thread:thread-alive-p srv)
             (ignore-errors (sb-thread:terminate-thread srv))))))))
 
-(format t "~%REPL-bridge small CLI tests PASSED!~%")
+(format t "~%REPL small CLI tests PASSED!~%")
 (sb-ext:exit :code 0)

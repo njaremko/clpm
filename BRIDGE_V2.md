@@ -1,4 +1,4 @@
-# `clpm repl-bridge` v2 — the design for "actually using SBCL"
+# `clpm repl` v2 — the design for "actually using SBCL"
 
 The v1 bridge (see `BRIDGE.md`) shipped a stateless one-shot eval channel:
 LLM sends a form, daemon evaluates it, daemon returns one line of JSON.
@@ -44,7 +44,7 @@ exist to prevent feature creep and to bias decisions toward
 
 3. **Backward compatible.** A v1 client sending a v1 `eval` still
    gets a v1 response. New behavior is opt-in via flags / new methods.
-   Tests under `test/repl-bridge-*` continue to pass.
+   Tests under `test/repl-*` continue to pass.
 
 4. **One transport, one wire format, many shapes.** Line-delimited
    JSON over the existing socket. No websockets, no binary
@@ -69,8 +69,8 @@ exist to prevent feature creep and to bias decisions toward
    `*error-output*`, whether a condition was *signaled and handled*
    (lurking, possibly meaningful) or *unhandled* (the eval crashed).
 
-8. **Discoverable.** `clpm repl-bridge methods` enumerates every RPC
-   the daemon answers. `clpm repl-bridge help <method>` returns its
+8. **Discoverable.** `clpm repl call methods` enumerates every RPC
+   the daemon answers. `clpm repl call help --method <method>` returns its
    parameter schema and one-line description. An LLM that knows
    nothing about the bridge can introspect its way to competence.
 
@@ -458,7 +458,7 @@ image where any definition lives.
   FILE --source-line N '(defun foo ...)'`. The redefinition log
   records `(:source FILE :line N)` so the existing `diff` machinery
   can show a real diff instead of "differs from source." Cheap; closes
-  a long-standing limitation in `clpm repl-bridge diff`.
+  a long-standing limitation in `clpm repl call list-redefinitions`.
 
 - **`#135 P2 source` `revert SYMBOL`.** Reads the on-disk definition
   (via `find-definition`) and re-evaluates it, undoing an in-image
@@ -698,11 +698,11 @@ seen this skill should be able to discover its capabilities.
 - **`#201 P1 docs` `help METHOD` RPC.** Same source, returns the
   long-form docstring + a tiny worked example for each method.
 
-- **`#202 P1 docs` `clpm repl-bridge methods` CLI.** Prints the
+- **`#202 P1 docs` `clpm repl call methods` CLI.** Prints the
   `methods` table as a human-readable list. Useful from a shell.
 
 - **`#203 P1 docs` Skill update.** Rewrite
-  `.claude/skills/clpm-repl-bridge.md` to cover v2: the debugger
+  `.claude/skills/clpm-repl.md` to cover v2: the debugger
   workflow, the inspector workflow, compile diagnostics, source
   navigation. Keep the doc under 250 lines; structure as recipes the
   LLM can copy-paste.
@@ -750,7 +750,7 @@ abusive.
   count, ...}` and a recent-error count.
 
 - **`#214 P2 obs` Slowlog.** Evals taking > 1 s automatically log
-  `event: slow-eval` to `.clpm/repl-bridge.log` with the elapsed time
+  `event: slow-eval` to `.clpm/repl.log` with the elapsed time
   and the first 200 chars of the form. Helps a future operator (the
   LLM or the human) find pathological evals retroactively.
 
@@ -840,42 +840,42 @@ with no other tools:
 ```sh
 # 1. Start a daemon for this project, with its lockfile-resolved
 #    systems loaded.
-clpm repl-bridge serve --detach
+clpm repl daemon --detach
 
 # 2. Find where a function is defined; read its source.
-clpm repl-bridge find-definition my-app:slow-fn
+clpm repl call find-definition --symbol my-app:slow-fn
 # → src/my-app/core.lisp:142
 
 # 3. Trace it, then run a workload.
-clpm repl-bridge trace my-app:slow-fn
-clpm repl-bridge eval --trace --stream '(my-app:run-suite)'
+clpm repl call trace --symbol my-app:slow-fn
+clpm repl eval '(my-app:run-suite)'
 # (stream of `trace` events; final timing in result.timing)
 
 # 4. A test errors; enter the debugger.
-clpm repl-bridge eval --debug '(my-app:run-test-7)'
+clpm repl eval --debug '(my-app:run-test-7)'
 # → event: debugger-entered { condition: ... frames: [...] }
 
 # 5. Inspect the bound variable in frame 3.
-clpm repl-bridge debug-eval-in-frame 3 'STATE'
+clpm repl call debug-eval-in-frame --frame 3 --form 'STATE'
 
 # 6. Patch it, then continue.
-clpm repl-bridge debug-eval-in-frame 3 '(setf state :ok)'
-clpm repl-bridge debug-continue
+clpm repl call debug-eval-in-frame --frame 3 --form '(setf state :ok)'
+clpm repl call debug-continue
 # → result: success
 
 # 7. Fix the function and re-evaluate from source.
-clpm repl-bridge load-file src/my-app/core.lisp
+clpm repl call load-file --path src/my-app/core.lisp
 # (any compile diagnostics stream; final result.success: true)
 
 # 8. Did the redefinition land where the file says?
-clpm repl-bridge diff
+clpm repl call list-redefinitions
 # → list-redefinitions, all up-to-date with source
 
 # 9. Profile a hot path.
-clpm repl-bridge profile-eval --top 10 '(my-app:bench-1)'
+clpm repl call profile-eval --top 10 --form '(my-app:bench-1)'
 
 # 10. Done.
-clpm repl-bridge stop
+clpm repl daemon --stop
 ```
 
 If at any step the LLM hits a wall — an error it can't introspect, a

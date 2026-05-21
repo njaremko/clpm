@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-tcp-test.lisp - TCP loopback transport + token auth.
+;;;; test/repl-tcp-test.lisp - TCP loopback transport + token auth.
 ;;;;
 ;;;; The TCP transport is the Windows fallback (#024). It works on any OS, so
 ;;;; we exercise it directly here by forcing :transport-kind :tcp. The CLI
@@ -52,13 +52,13 @@
          (uiop:delete-directory-tree ,var :validate t)))))
 
 ;;; ----------------------------------------------------------------------------
-;;; #024 acceptance: cmd-repl-bridge detects the OS and uses the right
+;;; #024 acceptance: cmd-repl detects the OS and uses the right
 ;;; transport. We can't *change* OSes inside a single test run, so we assert
 ;;; the dispatch function picks `:tcp` on Windows hosts and `:unix` elsewhere.
 
 (format t "Test: %default-transport-kind dispatches on host OS~%")
 (let* ((sym (find-symbol "%DEFAULT-TRANSPORT-KIND"
-                         (find-package "CLPM.REPL-BRIDGE")))
+                         (find-package "CLPM.REPL")))
        (kind (funcall sym))
        (windows-p (and (find-package "UIOP/OS")
                        (fboundp (find-symbol "OS-WINDOWS-P" "UIOP/OS"))
@@ -79,7 +79,7 @@
            (sb-thread:make-thread
             (lambda ()
               (handler-case
-                  (clpm.repl-bridge:start-server :transport-kind :tcp
+                  (clpm.repl:start-server :transport-kind :tcp
                                                  :port-path port-path)
                 (error (c)
                   (format *error-output* "daemon: ~A~%" c))))
@@ -104,7 +104,7 @@
                           "expected 32-hex token, got ~S" token))
 
            ;; send-request reads the port file and injects the token.
-           (let ((resp (clpm.repl-bridge:send-request port-path "ping")))
+           (let ((resp (clpm.repl:send-request port-path "ping")))
              (assert-true (not (eq resp :no-daemon)) "TCP daemon unreachable")
              (assert-true (not (eq resp :io-error)) "I/O error talking to TCP daemon")
              (let ((result (lookup resp "result")))
@@ -114,14 +114,14 @@
                             "ping result missing pid: ~S" result)))
 
            ;; eval round-trip.
-           (let* ((resp (clpm.repl-bridge:send-request
+           (let* ((resp (clpm.repl:send-request
                          port-path "eval"
                          :params (list :object (list (cons "form" "(+ 40 2)"))))))
              (let ((result (lookup resp "result")))
                (assert-true (and (stringp (lookup result "value"))
                                  (string= "42" (lookup result "value")))
                             "eval did not return 42: ~S" result))))
-      (handler-case (clpm.repl-bridge:send-request port-path "shutdown")
+      (handler-case (clpm.repl:send-request port-path "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p server-thread)
@@ -141,7 +141,7 @@
            (sb-thread:make-thread
             (lambda ()
               (handler-case
-                  (clpm.repl-bridge:start-server :transport-kind :tcp
+                  (clpm.repl:start-server :transport-kind :tcp
                                                  :port-path port-path)
                 (error (c)
                   (format *error-output* "daemon: ~A~%" c))))
@@ -180,10 +180,10 @@
              ;; Sanity check: a connection that DOES supply the token (via
              ;; the normal send-request path) still succeeds, proving the
              ;; daemon survived the rejection.
-             (let ((resp (clpm.repl-bridge:send-request port-path "ping")))
+             (let ((resp (clpm.repl:send-request port-path "ping")))
                (assert-true (lookup resp "result")
                             "daemon broke after auth rejection: ~S" resp))))
-      (handler-case (clpm.repl-bridge:send-request port-path "shutdown")
+      (handler-case (clpm.repl:send-request port-path "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p server-thread)
@@ -203,7 +203,7 @@
            (sb-thread:make-thread
             (lambda ()
               (handler-case
-                  (clpm.repl-bridge:start-server :transport-kind :tcp
+                  (clpm.repl:start-server :transport-kind :tcp
                                                  :port-path port-path)
                 (error (c)
                   (format *error-output* "daemon: ~A~%" c))))
@@ -239,7 +239,7 @@
                                      "wrong-token code: ~S" err)))
                  (ignore-errors (close stream))
                  (ignore-errors (sb-bsd-sockets:socket-close sock))))))
-      (handler-case (clpm.repl-bridge:send-request port-path "shutdown")
+      (handler-case (clpm.repl:send-request port-path "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p server-thread)
@@ -266,7 +266,7 @@
              (sb-thread:make-thread
               (lambda ()
                 (handler-case
-                    (clpm.repl-bridge:start-server :transport-kind :unix
+                    (clpm.repl:start-server :transport-kind :unix
                                                    :socket-path sock-path)
                   (error (c)
                     (format *error-output* "daemon: ~A~%" c))))
@@ -276,10 +276,10 @@
              (loop for i from 0 below 50
                    while (not (probe-file sock-path))
                    do (sleep 0.1))
-             (let ((resp (clpm.repl-bridge:send-request sock-path "ping")))
+             (let ((resp (clpm.repl:send-request sock-path "ping")))
                (assert-true (lookup resp "result")
                             "Unix daemon ping failed: ~S" resp)))
-        (handler-case (clpm.repl-bridge:send-request sock-path "shutdown")
+        (handler-case (clpm.repl:send-request sock-path "shutdown")
           (error () nil))
         (loop for i from 0 below 30
               while (sb-thread:thread-alive-p server-thread)
@@ -288,5 +288,5 @@
           (ignore-errors (sb-thread:terminate-thread server-thread))))))
   (format t "  Unix transport OK~%"))
 
-(format t "~%REPL-bridge TCP transport tests PASSED!~%")
+(format t "~%REPL TCP transport tests PASSED!~%")
 (sb-ext:exit :code 0)

@@ -157,7 +157,7 @@
            #:project-sbcl-constraints
            #:project-build-options
            #:project-scripts
-           #:project-repl-bridge
+           #:project-repl
            #:dependency
            #:make-dependency
            #:dependency-system
@@ -331,7 +331,7 @@
            #:resolution-to-lockfile
            #:conflict-explanation))
 
-(defpackage #:clpm.repl-bridge.compat
+(defpackage #:clpm.repl.compat
   (:use #:cl)
   (:export #:host-impl
            #:make-thread
@@ -349,7 +349,7 @@
            #:getpid
            #:list-backtrace))
 
-(defpackage #:clpm.repl-bridge
+(defpackage #:clpm.repl
   (:use #:cl #:clpm.log #:clpm.errors)
   (:export #:start-server
            #:send-request
@@ -415,7 +415,6 @@
            #:cmd-workspace
            #:cmd-registry
            #:cmd-repl
-           #:cmd-repl-bridge
            #:cmd-skill
            #:cmd-run
            #:cmd-exec

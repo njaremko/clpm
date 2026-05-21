@@ -1,4 +1,4 @@
-# `clpm repl-bridge` denotational algebra
+# `clpm repl` denotational algebra
 
 Mode: semantic design specification.
 
@@ -346,14 +346,14 @@ Action families:
 | Source/image | `Apropos`, `Documentation`, `Arglist`, `CompleteSymbol`, `PackageInfo`, `ClassInfo`, `FunctionInfo`, `FindDefinition`, `Xref`, `Describe`, `DescribeSystem`, `Macroexpand`, `CompileFile`, `LoadFile`, `Disassemble`, `ImageInfo`, `LoadedSystems`, `ListPackages`, `Gc`, `Trace`, `Untrace`, `ListTraced`, `ListRedefinitions` | observe or mutate the SBCL image through standard Lisp capabilities |
 | CLI core | `Daemon`, `Eval`, `Call` | provide the smallest command surface that can construct every public action |
 
-Every public method in `src/repl_bridge.lisp` is covered by one row above.
+Every public method in `src/repl.lisp` is covered by one row above.
 The public CLI surface is intentionally not one subcommand per method. It is a
 small constructor algebra:
 
 ```text
-clpm repl-bridge daemon [--detach] [--no-load] [--status] [--stop]
-clpm repl-bridge eval FORM [eval/debug flags]
-clpm repl-bridge call METHOD [--PARAM VALUE | --params-json JSON]...
+clpm repl daemon [--detach] [--no-load] [--status] [--stop]
+clpm repl eval FORM [eval/debug flags]
+clpm repl call METHOD [--PARAM VALUE | --params-json JSON]...
 ```
 
 `daemon` is the lifecycle constructor. `eval` is a derived but privileged
@@ -949,7 +949,7 @@ JSON for decoder tests.
 11. Lifecycle: shutdown resolves kept sessions and watches before worker
     teardown.
 
-Existing evidence lives mostly in `test/repl-bridge-*-test.lisp`; future
+Existing evidence lives mostly in `test/repl-*-test.lisp`; future
 properties should be phrased against these laws rather than private structs.
 
 ## Open Semantic Decisions

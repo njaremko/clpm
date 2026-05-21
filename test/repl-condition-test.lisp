@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-condition-test.lisp - rich condition serialization.
+;;;; test/repl-condition-test.lisp - rich condition serialization.
 ;;;;
 ;;;; BRIDGE_V2 #110 acceptance: a known-shape condition (simple-type-error)
 ;;;; round-trips its slots; `interactive' reflects whether the restart was
@@ -41,7 +41,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-cond")))
     (unwind-protect
@@ -51,7 +51,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -61,7 +61,7 @@
       (ignore-errors (delete-file sock)))))
 
 (defun do-eval (sock form)
-  (clpm.repl-bridge:send-request
+  (clpm.repl:send-request
    sock "eval"
    :params (list :object (list (cons "form" form)))))
 
@@ -152,5 +152,5 @@
                      "frame missing name, got ~S" top)))))
 (format t "  structured backtrace OK~%")
 
-(format t "~%REPL-bridge condition tests PASSED!~%")
+(format t "~%REPL condition tests PASSED!~%")
 (sb-ext:exit :code 0)

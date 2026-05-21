@@ -1542,11 +1542,11 @@ lockfile; NIL persists no opt-ins."
                                      :lisp-kind kind
                                      :lisp-version lisp-version))
       (log-info "Project installed successfully")
-      (log-info "Run 'clpm run repl' to start a REPL with the project loaded")
-      ;; Manifest may request that the repl-bridge daemon come up automatically
+      (log-info "Run 'clpm repl eval FORM' or 'clpm repl daemon --detach' for live Lisp debugging")
+      ;; Manifest may request that the repl daemon come up automatically
       ;; on install. Skipped when a daemon for this project is already running,
       ;; or when stdout isn't a tty (we don't want this happening inside CI).
-      (let* ((rb (and project (clpm.project:project-repl-bridge project)))
+      (let* ((rb (and project (clpm.project:project-repl project)))
              (autostart (and rb (getf rb :autostart))))
         (when autostart
           (%bridge-maybe-autostart project-root))))
@@ -1701,50 +1701,12 @@ deps don't churn)."
          (log-error "Unknown deps subcommand: ~A" sub)
          (usage))))))
 
-;;; repl command
-
-(defun cmd-repl (&key load-system)
-  "Start a REPL with the project activated."
-  (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
-      (find-effective-project-root)
-    (declare (ignore _workspace-path))
-    (unless manifest-path
-      (when (null workspace-root)
-        (log-no-project-found))
-      (return-from cmd-repl 1))
-    (unless lock-path
-      (log-error "No clpm.lock found - run 'clpm deps sync' first")
-      (return-from cmd-repl 1))
-    (let* ((project (when manifest-path
-                      (clpm.project:read-project-file manifest-path)))
-           (kind (effective-lisp-kind project))
-           (config-path (merge-pathnames ".clpm/asdf-config.lisp" project-root)))
-      (unless (uiop:file-exists-p config-path)
-        (log-error "Project not activated - run 'clpm deps sync' first")
-        (return-from cmd-repl 1))
-      (let ((argv (clpm.lisp:lisp-run-argv kind
-                                          :load-files (list (namestring config-path))
-                                          :eval-forms (when load-system
-                                                        (list (format nil "(asdf:load-system ~S)"
-                                                                      load-system)))
-                                          :noinform nil
-                                          :noninteractive nil
-                                          :disable-debugger nil)))
-        (log-info "Starting ~A..." (string-downcase (symbol-name kind)))
-      (multiple-value-bind (output error-output exit-code)
-          (clpm.platform:run-program argv
-                                     :input :interactive
-                                     :output :interactive
-                                     :error-output :interactive)
-        (declare (ignore output error-output))
-        exit-code)))))
-
-;;; repl-bridge command -- persistent Lisp image for LLM-driven dev
+;;; repl command -- persistent Lisp image for LLM-driven dev
 ;;;
 ;;; Layout per project:
-;;;   .clpm/repl-bridge.sock   Unix socket the daemon binds (mode 0600)
-;;;   .clpm/repl-bridge.pid    decimal PID of the running daemon
-;;;   .clpm/repl-bridge.log    daemon stdout+stderr in --detach mode
+;;;   .clpm/repl.sock   Unix socket the daemon binds (mode 0600)
+;;;   .clpm/repl.pid    decimal PID of the running daemon
+;;;   .clpm/repl.log    daemon stdout+stderr in --detach mode
 ;;;
 ;;; `daemon' loads the project (via .clpm/asdf-config.lisp) and enters the
 ;;; accept loop. `eval' auto-spawns a `daemon --detach' child if no daemon is
@@ -1760,16 +1722,16 @@ deps don't churn)."
   "Return (values endpoint pid-path log-path) for PROJECT-ROOT.
 
 ENDPOINT is the per-project advertisement file passed to start-server and
-send-request. On Unix that's `.clpm/repl-bridge.sock' (the bound Unix
-socket); on Windows that's `.clpm/repl-bridge.port' (a two-line file
+send-request. On Unix that's `.clpm/repl.sock' (the bound Unix
+socket); on Windows that's `.clpm/repl.port' (a two-line file
 giving the loopback port and a 32-hex shared token)."
   (let* ((dir (merge-pathnames ".clpm/" project-root))
          (endpoint-name (if (%bridge-windows-p)
-                            "repl-bridge.port"
-                            "repl-bridge.sock")))
+                            "repl.port"
+                            "repl.sock")))
     (values (namestring (merge-pathnames endpoint-name dir))
-            (namestring (merge-pathnames "repl-bridge.pid" dir))
-            (namestring (merge-pathnames "repl-bridge.log" dir)))))
+            (namestring (merge-pathnames "repl.pid" dir))
+            (namestring (merge-pathnames "repl.log" dir)))))
 
 (defun %bridge-read-pidfile (path)
   "Return the integer PID stored in PATH, or NIL if the file is missing /
@@ -1823,7 +1785,7 @@ workflows, not the runtime image."
       (handler-case
           (let* ((proj (clpm.project:read-project-file manifest))
                  (systems (and proj (clpm.project:project-systems proj)))
-                 (rb (and proj (clpm.project:project-repl-bridge proj)))
+                 (rb (and proj (clpm.project:project-repl proj)))
                  (extra (getf rb :preload)))
             (dolist (sys (remove-if-not #'stringp
                                         (append systems
@@ -1840,7 +1802,7 @@ workflows, not the runtime image."
 ;; we don't need fork/setsid/dup2 from inside the daemon.
 
 (defun %bridge-maybe-autostart (project-root)
-  "If the manifest sets `:repl-bridge (:autostart t ...)`, ensure a daemon is
+  "If the manifest sets `:repl (:autostart t ...)`, ensure a daemon is
 running for PROJECT-ROOT by launching `daemon --detach' when one is not.
 
 Idempotent: if the existing pidfile points at a live process, do nothing.
@@ -1852,23 +1814,23 @@ because the daemon couldn't come up."
         (%bridge-clean-stale sock pid)
         (let ((existing (%bridge-read-pidfile pid)))
           (when (and existing (%bridge-pid-alive-p existing))
-            (log-info "repl-bridge daemon already running (pid ~D)" existing)
+            (log-info "repl daemon already running (pid ~D)" existing)
             (return-from %bridge-maybe-autostart)))
         (let ((clpm-bin (uiop:argv0)))
           (unless (and clpm-bin (probe-file clpm-bin))
-            (log-error "repl-bridge autostart: clpm binary not found at ~S"
+            (log-error "repl autostart: clpm binary not found at ~S"
                        clpm-bin)
             (return-from %bridge-maybe-autostart))
-          (log-info "repl-bridge: starting daemon (autostart from manifest)")
+          (log-info "repl: starting daemon (autostart from manifest)")
           (handler-case
               (uiop:with-current-directory (project-root)
-                (uiop:launch-program (list clpm-bin "repl-bridge" "daemon"
+                (uiop:launch-program (list clpm-bin "repl" "daemon"
                                            "--detach")
                                      :output nil :error-output nil :input nil))
             (error (c)
-              (log-error "repl-bridge autostart failed: ~A" c)))))
+              (log-error "repl autostart failed: ~A" c)))))
     (error (c)
-      (log-error "repl-bridge autostart: ~A" c))))
+      (log-error "repl autostart: ~A" c))))
 
 (defun %bridge-resolve-project ()
   "Return (values project-root sock pid log) or NIL on error (after logging)."
@@ -1883,7 +1845,7 @@ because the daemon couldn't come up."
       (values project-root sock pid log))))
 
 (defun %bridge-daemon-start (args)
-  "Start `clpm repl-bridge daemon [--detach] [--no-load]'."
+  "Start `clpm repl daemon [--detach] [--no-load]'."
   (let ((detach nil)
         (no-load nil))
     (loop while args do
@@ -1910,7 +1872,7 @@ because the daemon couldn't come up."
              (log-error "Could not find clpm binary at ~S; --detach unavailable"
                         clpm-bin)
              (return-from %bridge-daemon-start 1))
-           (let ((argv (append (list clpm-bin "repl-bridge" "daemon")
+           (let ((argv (append (list clpm-bin "repl" "daemon")
                                (when no-load (list "--no-load")))))
              (ensure-directories-exist log)
              (handler-case
@@ -1944,11 +1906,11 @@ because the daemon couldn't come up."
               (handler-case
                   (let ((tcp-p (%bridge-windows-p)))
                     (if tcp-p
-                        (clpm.repl-bridge:start-server
+                        (clpm.repl:start-server
                          :transport-kind :tcp
                          :port-path sock
                          :log-path log)
-                        (clpm.repl-bridge:start-server
+                        (clpm.repl:start-server
                          :transport-kind :unix
                          :socket-path sock
                          :log-path log))
@@ -1974,8 +1936,8 @@ useful to a user. The pretty-print path elides them.")
   "Is NAME (the printed frame name) part of the daemon/sbcl scaffolding?"
   (and (stringp name)
        (or (member name +bridge-daemon-frame-names+ :test #'string=)
-           ;; CLPM.REPL-BRIDGE::%FOO-style frame names.
-           (and (search "%" name) (search "CLPM.REPL-BRIDGE" name)))))
+           ;; CLPM.REPL::%FOO-style frame names.
+           (and (search "%" name) (search "CLPM.REPL" name)))))
 
 (defun %bridge-user-frames (frames)
   "FRAMES is a JSON array of frame objects. Drop daemon scaffolding from
@@ -2093,7 +2055,7 @@ backtrace. Long internal `vars' dumps are dropped."
           (format stream "restarts (~D):~%" (length restarts))
           (dolist (r restarts)
             (%bridge-print-restart stream (cadr r)))
-          (format stream "  -> rerun with: clpm repl-bridge eval FORM --debug --restart NAME [--arg V]~%"))
+          (format stream "  -> rerun with: clpm repl eval FORM --debug --restart NAME [--arg V]~%"))
         (let ((user (%bridge-user-frames (list :array frames))))
           (when user
             (%bridge-print-frames stream user)))))
@@ -2146,7 +2108,7 @@ own renderer so this fallback is rarely hit."
                                   &key params (autostart t) on-event)
   "Send a request, auto-starting the daemon on connect failure."
   (declare (ignore pid project-root))
-  (let ((resp (clpm.repl-bridge:send-request sock method
+  (let ((resp (clpm.repl:send-request sock method
                                              :params params
                                              :connect-timeout 1
                                              :on-event on-event)))
@@ -2154,12 +2116,12 @@ own renderer so this fallback is rarely hit."
       ((eq resp :no-daemon)
        (cond
          ((not autostart)
-          (log-error "No daemon running. Start one with `clpm repl-bridge daemon --detach` or drop --no-autostart.")
+          (log-error "No daemon running. Start one with `clpm repl daemon --detach` or drop --no-autostart.")
           (return-from %bridge-send-or-autostart nil))
          (t
           (let ((rc (%bridge-daemon-start (list "--detach"))))
             (declare (ignore rc))
-            (clpm.repl-bridge:send-request sock method :params params
+            (clpm.repl:send-request sock method :params params
                                            :connect-timeout 5
                                            :on-event on-event)))))
       (t resp))))
@@ -2196,7 +2158,7 @@ JSON object `{type, restart, args}'. Returns NIL on a malformed spec."
                   (cons "args" (list :array (or args '()))))))))
 
 (defun %bridge-eval (args)
-  "Handle `clpm repl-bridge eval FORM [--package PKG] [--worker W]
+  "Handle `clpm repl eval FORM [--package PKG] [--worker W]
                                  [--handler TYPE=RESTART[:ARG,...]]...
                                  [--debug] [--restart NAME] [--frame N]
                                  [--frame-eval FORM] [--keep]
@@ -2302,7 +2264,7 @@ server-owned session for later `call debug-* ...' requests."
            (log-error "Unknown eval option: ~A" arg)
            (return-from %bridge-eval 1)))))
     (unless form
-      (log-error "Usage: clpm repl-bridge eval FORM [--package PKG] [--worker W] [--handler T=R[:A,...]]... [--debug] [--json]")
+      (log-error "Usage: clpm repl eval FORM [--package PKG] [--worker W] [--handler T=R[:A,...]]... [--debug] [--json]")
       (return-from %bridge-eval 1))
     (multiple-value-bind (project-root sock pid)
         (%bridge-resolve-project)
@@ -2310,11 +2272,11 @@ server-owned session for later `call debug-* ...' requests."
       (cond
         (debug
          (let ((*bridge-cli-json* (or *bridge-cli-json* json))
-               (conn (clpm.repl-bridge:open-connection sock :connect-timeout 5)))
+               (conn (clpm.repl:open-connection sock :connect-timeout 5)))
            (when (and (eq conn :no-daemon) autostart)
              (let ((rc (%bridge-daemon-start (list "--detach"))))
                (declare (ignore rc))
-               (setf conn (clpm.repl-bridge:open-connection
+               (setf conn (clpm.repl:open-connection
                            sock :connect-timeout 5))))
            (cond
              ((eq conn :no-daemon)
@@ -2336,7 +2298,7 @@ server-owned session for later `call debug-* ...' requests."
                                                      (nreverse handlers))))))
                 (unwind-protect
                      (%bridge-debug-on-connection conn opts form)
-                  (clpm.repl-bridge:close-connection conn)))))))
+                  (clpm.repl:close-connection conn)))))))
         (t
          (let* ((params (%bridge-make-params
                          (list (cons "form" form)
@@ -2392,7 +2354,7 @@ server-owned session for later `call debug-* ...' requests."
                (format t "stale pidfile (cleaned)~%"))
            0)
           (t
-           (let ((ping (clpm.repl-bridge:send-request sock "ping"
+           (let ((ping (clpm.repl:send-request sock "ping"
                                                      :connect-timeout 1)))
              (cond
                ((consp ping)
@@ -2425,7 +2387,7 @@ server-owned session for later `call debug-* ...' requests."
                    (emit-json "unresponsive" "pid" existing))
                   (t
                    (format t "running but unresponsive (pid ~D)~%" existing)
-                   (format t "  try: clpm repl-bridge daemon --stop~%")))
+                   (format t "  try: clpm repl daemon --stop~%")))
                 0)))))))))
 
 (defun %json-object* (kv-list)
@@ -2461,7 +2423,7 @@ are dropped, matching `%bridge-make-params'."
          ;; an editor) that hosts the daemon as one of many threads, so we
          ;; can't safely SIGTERM on pid-liveness alone.
          (handler-case
-             (clpm.repl-bridge:send-request sock "shutdown" :connect-timeout 1)
+             (clpm.repl:send-request sock "shutdown" :connect-timeout 1)
            (error () nil))
          ;; Poll for the socket file going away. `probe-file' isn't safe here
          ;; because on macOS it can fault on a Unix-socket path during the
@@ -2484,7 +2446,7 @@ are dropped, matching `%bridge-make-params'."
          0)))))
 
 (defun %bridge-daemon (args)
-  "Lifecycle command for the repl-bridge daemon.
+  "Lifecycle command for the repl daemon.
 
 `daemon' is the only public lifecycle constructor: bare `daemon' starts
 foreground, `--detach' starts background, `--status' observes state, and
@@ -2592,7 +2554,7 @@ printing the appropriate user-visible error."
   (cond
     ((null resp) 2)
     ((eq resp :no-daemon)
-     (log-error "No daemon running and could not auto-start (try `clpm repl-bridge daemon --detach')")
+     (log-error "No daemon running and could not auto-start (try `clpm repl daemon --detach')")
      2)
     ((eq resp :io-error)
      (log-error "I/O error talking to daemon")
@@ -2658,12 +2620,12 @@ quotes around every non-JSON atom."
        (values body nil nil)))))
 
 (defun %bridge-call (args)
-  "Generic typed method constructor for `clpm repl-bridge call METHOD ...'."
+  "Generic typed method constructor for `clpm repl call METHOD ...'."
   (let ((method (pop args))
         (autostart t)
         (params '()))
     (unless method
-      (log-error "Usage: clpm repl-bridge call METHOD [--params-json JSON] [--PARAM VALUE]...")
+      (log-error "Usage: clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...")
       (return-from %bridge-call 1))
     (loop while args do
       (let ((arg (pop args)))
@@ -2744,13 +2706,13 @@ quotes around every non-JSON atom."
                              (%bridge-field cobj "backtrace"))))
                (cond
                  ((and (getf opts :frame) (getf opts :frame-eval))
-                  (clpm.repl-bridge:send-continuation-on-connection
+                  (clpm.repl:send-continuation-on-connection
                    conn eval-id "debug-eval-in-frame"
                    :params (%bridge-make-params
                             (list (cons "frame" (getf opts :frame))
                                   (cons "form"  (getf opts :frame-eval))))))
                  ((getf opts :restart)
-                  (clpm.repl-bridge:send-continuation-on-connection
+                  (clpm.repl:send-continuation-on-connection
                    conn eval-id "debug-invoke-restart"
                    :params (%bridge-make-params
                             (list (cons "name" (getf opts :restart))
@@ -2782,15 +2744,15 @@ quotes around every non-JSON atom."
                            resolved :kept)
                      :stop)
                     ((getf opts :abort)
-                     (clpm.repl-bridge:send-continuation-on-connection
+                     (clpm.repl:send-continuation-on-connection
                       conn eval-id "debug-abort")
                      (setf resolved :aborted))
                     (t
-                     (clpm.repl-bridge:send-continuation-on-connection
+                     (clpm.repl:send-continuation-on-connection
                       conn eval-id "debug-abort")
                      (setf resolved :aborted))))))))
       (let ((resp
-              (clpm.repl-bridge:send-on-connection
+              (clpm.repl:send-on-connection
                conn "eval"
                :id eval-id
                :params params
@@ -2812,7 +2774,7 @@ quotes around every non-JSON atom."
                                      "?"))))
                       ;; After printing the frame result we always abort the
                       ;; session: stays single-shot.
-                      (clpm.repl-bridge:send-continuation-on-connection
+                      (clpm.repl:send-continuation-on-connection
                        conn eval-id "debug-abort")
                       (setf resolved t)))
                    action)))))
@@ -2855,23 +2817,23 @@ quotes around every non-JSON atom."
     (values j (nreverse out))))
 
 (defun %bridge-help (args)
-  "Print the small public repl-bridge CLI surface."
+  "Print the small public repl CLI surface."
   (when args
-    (log-error "Usage: clpm repl-bridge [daemon|eval|call] ...")
+    (log-error "Usage: clpm repl [daemon|eval|call] ...")
     (return-from %bridge-help 1))
   (format t "Usage:~%")
-  (format t "  clpm repl-bridge daemon [--detach] [--no-load] [--status] [--stop]~%")
-  (format t "  clpm repl-bridge eval FORM [--package P] [--worker W] [--debug] ...~%")
-  (format t "  clpm repl-bridge call METHOD [--params-json JSON] [--PARAM VALUE]...~%~%")
-  (format t "Use `clpm repl-bridge call methods` to list daemon RPCs.~%")
-  (format t "Use `clpm repl-bridge call help --method eval` for a method schema.~%")
-  (format t "Use `clpm help repl-bridge` for CLI details.~%")
+  (format t "  clpm repl daemon [--detach] [--no-load] [--status] [--stop]~%")
+  (format t "  clpm repl eval FORM [--package P] [--worker W] [--debug] ...~%")
+  (format t "  clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...~%~%")
+  (format t "Use `clpm repl call methods` to list daemon RPCs.~%")
+  (format t "Use `clpm repl call help --method eval` for a method schema.~%")
+  (format t "Use `clpm help repl` for CLI details.~%")
   0)
 
-(defun cmd-repl-bridge (&rest args)
-  "Dispatcher for `clpm repl-bridge <subcommand>'.
+(defun cmd-repl (&rest args)
+  "Dispatcher for `clpm repl <subcommand>'.
 
-See `clpm help repl-bridge' for the full surface."
+See `clpm help repl' for the full surface."
   (multiple-value-bind (json args)
       (%bridge-strip-json-flag args)
     (let* ((*bridge-cli-json* (or *bridge-cli-json* json))
@@ -3099,10 +3061,8 @@ Returns an integer exit code."
       ((or (null sub) (string= sub "--"))
        (apply #'cmd-run-entrypoint args))
       ((string= sub "repl")
-       (when (rest rest)
-         (log-error "Usage: clpm run repl [system]")
-         (return-from cmd-run 1))
-       (cmd-repl :load-system (first rest)))
+       (log-error "`clpm run repl` is not public; use `clpm repl eval FORM` or `clpm repl daemon --detach`.")
+       1)
       ((string= sub "exec")
        (apply #'cmd-exec rest))
       ((string= sub "test")
@@ -3120,7 +3080,6 @@ Returns an integer exit code."
       ((or (string= sub "help") (string= sub "--help"))
        (log-error "Usage:")
        (log-error "  clpm run [-- <args...>]")
-       (log-error "  clpm run repl [system]")
        (log-error "  clpm run exec -- <cmd...>")
        (log-error "  clpm run test")
        (log-error "  clpm run script <name> [-- <args...>]")
@@ -5306,7 +5265,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
 (defparameter +agent-skill-markdown-lines+
   '("---"
     "name: clpm"
-    "description: Use the Common Lisp Package Manager (CLPM) to work with project manifests, dependency resolution, installs, registries, scripts, packaging, and the repl-bridge persistent Lisp image."
+    "description: Use the Common Lisp Package Manager (CLPM) to work with project manifests, dependency resolution, installs, registries, scripts, packaging, and the repl persistent Lisp image."
     "---"
     ""
     "# CLPM Agent Skill"
@@ -5366,7 +5325,6 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "### Run Code"
     ""
     "```sh"
-    "clpm run repl"
     "clpm run"
     "clpm run exec -- sbcl --script scripts/check.lisp"
     "clpm run test"
@@ -5401,18 +5359,18 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     ""
     "If resolution or fetch fails, inspect registry configuration and trust before weakening integrity checks."
     ""
-    "## Repl Bridge"
+    "## REPL"
     ""
-    "`clpm repl-bridge` gives agents a persistent project-scoped Lisp image. Strongly prefer it for iterative Common Lisp development and debugging because definitions, packages, workers, restarts, frame locals, and debugger sessions can persist across calls."
+    "`clpm repl` gives agents a persistent project-scoped Lisp image. Strongly prefer it for iterative Common Lisp development and debugging because definitions, packages, workers, restarts, frame locals, and debugger sessions can persist across calls."
     ""
-    "Use the bridge before starting a fresh `sbcl`, `clpm run repl`, or ad hoc script when you need to understand a live condition, inspect a value, redefine one function, time a form, trace calls, or confirm image state. Fresh processes are still right for clean end-to-end tests, packaging, and dependency graph changes."
+    "Use `clpm repl` before starting a fresh `sbcl` or ad hoc script when you need to understand a live condition, inspect a value, redefine one function, time a form, trace calls, or confirm image state. Fresh processes are still right for clean end-to-end tests, packaging, and dependency graph changes."
     ""
     "The public bridge CLI is deliberately small:"
     ""
     "```sh"
-    "clpm repl-bridge daemon [--detach] [--no-load] [--status] [--stop]"
-    "clpm repl-bridge eval FORM [--package P] [--worker W] [--debug] ..."
-    "clpm repl-bridge call METHOD [--params-json JSON] [--PARAM VALUE]..."
+    "clpm repl daemon [--detach] [--no-load] [--status] [--stop]"
+    "clpm repl eval FORM [--package P] [--worker W] [--debug] ..."
+    "clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]..."
     "```"
     ""
     "`daemon` owns lifecycle, `eval` is the ergonomic one-form path, and `call` is the generic RPC constructor. `call` parses parameter values as JSON when possible and otherwise sends strings."
@@ -5420,13 +5378,13 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "Lifecycle and discovery:"
     ""
     "```sh"
-    "clpm repl-bridge daemon --detach"
-    "clpm repl-bridge daemon --status"
-    "clpm repl-bridge call ping"
-    "clpm repl-bridge call methods"
-    "clpm repl-bridge call help --method eval"
-    "clpm repl-bridge eval '(+ 1 2)'"
-    "clpm repl-bridge daemon --stop"
+    "clpm repl daemon --detach"
+    "clpm repl daemon --status"
+    "clpm repl call ping"
+    "clpm repl call methods"
+    "clpm repl call help --method eval"
+    "clpm repl eval '(+ 1 2)'"
+    "clpm repl daemon --stop"
     "```"
     ""
     "`eval` auto-starts the daemon if needed. Use `daemon --status` when you need to distinguish no daemon, stale pid/socket files, and an unresponsive daemon."
@@ -5434,10 +5392,10 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "Debug-first workflow:"
     ""
     "```sh"
-    "clpm repl-bridge eval '(error \"boom\")' --debug"
-    "clpm repl-bridge eval '(restart-case (error \"need value\") (use-value (v) v))' --debug --restart USE-VALUE --arg 42"
-    "clpm repl-bridge eval '(warn \"careful\")' --debug --break-on warning"
-    "clpm repl-bridge eval '(restart-case (/ 1 0) (use-value (v) v))' --handler division-by-zero=use-value:0"
+    "clpm repl eval '(error \"boom\")' --debug"
+    "clpm repl eval '(restart-case (error \"need value\") (use-value (v) v))' --debug --restart USE-VALUE --arg 42"
+    "clpm repl eval '(warn \"careful\")' --debug --break-on warning"
+    "clpm repl eval '(restart-case (/ 1 0) (use-value (v) v))' --handler division-by-zero=use-value:0"
     "```"
     ""
     "Use `eval --debug` rather than plain `eval` when chasing a condition. First run it without a restart to see the condition, user frames, frame numbers, and available restarts. Then re-run with `--restart`, `--arg`, `--frame`, or `--frame-eval` once you know the intended recovery."
@@ -5445,11 +5403,11 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "Server-owned debug sessions:"
     ""
     "```sh"
-    "clpm repl-bridge eval '(restart-case (error \"need value\") (use-value (v) v))' --debug --keep"
-    "clpm repl-bridge call list-debug-sessions"
-    "clpm repl-bridge call debug-eval-in-frame --session 1 --frame 4 --form 'x'"
-    "clpm repl-bridge call debug-invoke-restart --session 1 --name USE-VALUE --args '[\"42\"]'"
-    "clpm repl-bridge call debug-abort --session 1"
+    "clpm repl eval '(restart-case (error \"need value\") (use-value (v) v))' --debug --keep"
+    "clpm repl call list-debug-sessions"
+    "clpm repl call debug-eval-in-frame --session 1 --frame 4 --form 'x'"
+    "clpm repl call debug-invoke-restart --session 1 --name USE-VALUE --args '[\"42\"]'"
+    "clpm repl call debug-abort --session 1"
     "```"
     ""
     "Use `--keep` only when you need follow-up calls against a live debugger stop. If more than one session is active, pass `--session N` to every debug-* call."
@@ -5457,40 +5415,40 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "Everyday image management and introspection:"
     ""
     "```sh"
-    "clpm repl-bridge call current-package"
-    "clpm repl-bridge call set-package --name CL-USER"
-    "clpm repl-bridge call list-workers"
-    "clpm repl-bridge call interrupt --worker default"
-    "clpm repl-bridge call reset --worker default"
-    "clpm repl-bridge call kill-worker --name scratch"
-    "clpm repl-bridge call loaded-systems"
-    "clpm repl-bridge call image-info"
-    "clpm repl-bridge call gc --full true"
-    "clpm repl-bridge call list-redefinitions"
-    "clpm repl-bridge call compile-file --path src/foo.lisp"
-    "clpm repl-bridge call load-file --path src/foo.lisp"
-    "clpm repl-bridge call inspect --form '(make-hash-table)'"
-    "clpm repl-bridge call arglist --symbol my-function"
-    "clpm repl-bridge call find-definition --symbol my-function"
-    "clpm repl-bridge call xref --symbol my-function --direction calls"
-    "clpm repl-bridge call macroexpand --form '(my-macro x)' --full true"
+    "clpm repl call current-package"
+    "clpm repl call set-package --name CL-USER"
+    "clpm repl call list-workers"
+    "clpm repl call interrupt --worker default"
+    "clpm repl call reset --worker default"
+    "clpm repl call kill-worker --name scratch"
+    "clpm repl call loaded-systems"
+    "clpm repl call image-info"
+    "clpm repl call gc --full true"
+    "clpm repl call list-redefinitions"
+    "clpm repl call compile-file --path src/foo.lisp"
+    "clpm repl call load-file --path src/foo.lisp"
+    "clpm repl call inspect --form '(make-hash-table)'"
+    "clpm repl call arglist --symbol my-function"
+    "clpm repl call find-definition --symbol my-function"
+    "clpm repl call xref --symbol my-function --direction calls"
+    "clpm repl call macroexpand --form '(my-macro x)' --full true"
     "```"
     ""
     "Watch and cleanup:"
     ""
     "```sh"
-    "clpm repl-bridge call watch --dir src --glob '*.lisp' --auto-revert true"
-    "clpm repl-bridge call list-watches"
-    "clpm repl-bridge call unwatch --id 1"
-    "clpm repl-bridge call list-traced"
-    "clpm repl-bridge call untrace"
-    "clpm repl-bridge call list-debug-sessions"
-    "clpm repl-bridge call debug-abort --session 1"
-    "clpm repl-bridge call list-redefinitions"
-    "clpm repl-bridge daemon --stop"
+    "clpm repl call watch --dir src --glob '*.lisp' --auto-revert true"
+    "clpm repl call list-watches"
+    "clpm repl call unwatch --id 1"
+    "clpm repl call list-traced"
+    "clpm repl call untrace"
+    "clpm repl call list-debug-sessions"
+    "clpm repl call debug-abort --session 1"
+    "clpm repl call list-redefinitions"
+    "clpm repl daemon --stop"
     "```"
     ""
-    "Before stopping work, close kept debugger sessions, unwatch file watches, untrace functions, kill or reset throwaway workers, and run `clpm repl-bridge call list-redefinitions`. A non-empty result means the image contains definitions that may still need to be written to source. Use `clpm repl-bridge daemon --stop` for normal shutdown; let `daemon --status` or `daemon --stop` clean stale pid/socket files instead of deleting `.clpm/repl-bridge.*` by hand."
+    "Before stopping work, close kept debugger sessions, unwatch file watches, untrace functions, kill or reset throwaway workers, and run `clpm repl call list-redefinitions`. A non-empty result means the image contains definitions that may still need to be written to source. Use `clpm repl daemon --stop` for normal shutdown; let `daemon --status` or `daemon --stop` clean stale pid/socket files instead of deleting `.clpm/repl.*` by hand."
     ""
     "After changing `clpm.project`, `clpm.lock`, registries, or dependency sources, run `clpm deps sync`, then restart the daemon so its ASDF registry and loaded systems match the new dependency graph."
     ""
@@ -5500,9 +5458,9 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "- Do not bypass signature or hash checks silently."
     "- Keep dependency changes small and explain why each system was added or removed."
     "- Prefer focused CLPM commands over shelling into implementation details."
-    "- Prefer `clpm repl-bridge eval FORM --debug` for Common Lisp bug investigation; use plain `eval` only when you already know the form should succeed."
+    "- Prefer `clpm repl eval FORM --debug` for Common Lisp bug investigation; use plain `eval` only when you already know the form should succeed."
     "- After changing manifests, run `clpm deps sync` and the narrowest relevant test command."
-    "- Before stopping work after repl-bridge edits, check `clpm repl-bridge call list-redefinitions` for in-image definitions that still need source changes."
+    "- Before stopping work after repl edits, check `clpm repl call list-redefinitions` for in-image definitions that still need source changes."
     "- Do not leave kept debug sessions, watches, traces, or throwaway workers behind."
     ""
     "## Help"
@@ -5530,7 +5488,7 @@ sub-subcommand=\"set\")."
              (apply #'format t (concatenate 'string fmt "~%") args)))
     (unless (member command
                     '(:help :doctor :project :deps :registry :run :store
-                      :skill :repl-bridge)
+                      :skill :repl)
                     :test #'eq)
       (log-error "Unknown command: ~A" command)
       (return-from print-command-help 1))
@@ -5761,11 +5719,11 @@ sub-subcommand=\"set\")."
             (p "  key      Manage registry signing keys")
             (p "  publish  Publish a project to a registry")
             0))))
-      (:repl-bridge
+      (:repl
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
          (cond
            ((and sub (string= sub "daemon"))
-            (p "Usage: clpm repl-bridge daemon [--detach] [--no-load] [--status] [--stop]")
+            (p "Usage: clpm repl daemon [--detach] [--no-load] [--status] [--stop]")
             (p "")
             (p "Start, inspect, or stop the daemon Lisp image for the current")
             (p "project. Bare daemon starts in the foreground; --detach starts")
@@ -5778,10 +5736,10 @@ sub-subcommand=\"set\")."
             (p "  --stop     Ask the daemon to shut down cleanly.")
             (p "")
             (p "Example:")
-            (p "  clpm repl-bridge daemon --detach")
+            (p "  clpm repl daemon --detach")
             0)
            ((and sub (string= sub "eval"))
-            (p "Usage: clpm repl-bridge eval <form> [--package <name>] [--worker <name>] [--debug] [--no-autostart]")
+            (p "Usage: clpm repl eval <form> [--package <name>] [--worker <name>] [--debug] [--no-autostart]")
             (p "")
             (p "Evaluate one Lisp form in the daemon. With no daemon running and")
             (p "without --no-autostart, the bridge starts one in the background")
@@ -5801,43 +5759,43 @@ sub-subcommand=\"set\")."
             (p "  --no-autostart    Fail with rc=2 if no daemon is running.")
             (p "")
             (p "Example:")
-            (p "  clpm repl-bridge eval '(+ 1 2)'")
-            (p "  clpm repl-bridge eval '(error \"boom\")' --debug")
+            (p "  clpm repl eval '(+ 1 2)'")
+            (p "  clpm repl eval '(error \"boom\")' --debug")
             0)
            ((and sub (string= sub "call"))
-            (p "Usage: clpm repl-bridge call <method> [--params-json <json>] [--PARAM <value>]...")
+            (p "Usage: clpm repl call <method> [--params-json <json>] [--PARAM <value>]...")
             (p "")
             (p "Send one daemon RPC method. Parameter values are parsed as JSON")
             (p "when possible, otherwise passed as strings. Hyphens in flag names")
             (p "map to underscores in JSON parameter names.")
             (p "")
             (p "Examples:")
-            (p "  clpm repl-bridge call methods")
-            (p "  clpm repl-bridge call help --method eval")
-            (p "  clpm repl-bridge call gc --full true")
-            (p "  clpm repl-bridge call compile-file --path src/foo.lisp")
-            (p "  clpm repl-bridge call debug-abort --session 1")
+            (p "  clpm repl call methods")
+            (p "  clpm repl call help --method eval")
+            (p "  clpm repl call gc --full true")
+            (p "  clpm repl call compile-file --path src/foo.lisp")
+            (p "  clpm repl call debug-abort --session 1")
             (p "")
             (p "Use --params-json for arrays, objects, or explicit null.")
             0)
            (t
             (p "Usage:")
-            (p "  clpm repl-bridge daemon [--detach] [--no-load] [--status] [--stop]")
-            (p "  clpm repl-bridge eval <form> [--package <pkg>] [--worker <name>] [--debug] ...")
-            (p "  clpm repl-bridge call <method> [--params-json <json>] [--PARAM <value>]...")
+            (p "  clpm repl daemon [--detach] [--no-load] [--status] [--stop]")
+            (p "  clpm repl eval <form> [--package <pkg>] [--worker <name>] [--debug] ...")
+            (p "  clpm repl call <method> [--params-json <json>] [--PARAM <value>]...")
             (p "")
             (p "Drive a persistent project-scoped Lisp daemon. `call methods`")
             (p "lists the RPC registry, and `call help --method NAME` returns")
             (p "the exact parameter schema for a method.")
             (p "")
-            (p "Run `clpm help repl-bridge <subcommand>` for per-subcommand details.")
+            (p "Run `clpm help repl <subcommand>` for per-subcommand details.")
             0))))
       (:run
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
          (cond
            ((and sub (string= sub "repl"))
-            (p "Usage: clpm run repl [system]")
-            0)
+            (log-error "`clpm run repl` is not public; use `clpm repl eval FORM` or `clpm repl daemon --detach`.")
+            1)
            ((and sub (string= sub "exec"))
             (p "Usage: clpm run exec -- <cmd...>")
             0)
@@ -5853,7 +5811,6 @@ sub-subcommand=\"set\")."
            (t
             (p "Usage:")
             (p "  clpm run [-- <args...>]")
-            (p "  clpm run repl [system]")
             (p "  clpm run exec -- <cmd...>")
             (p "  clpm run test")
             (p "  clpm run script <name> [-- <args...>]")

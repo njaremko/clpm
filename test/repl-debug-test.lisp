@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-debug-test.lisp - interactive debug session.
+;;;; test/repl-debug-test.lisp - interactive debug session.
 ;;;;
 ;;;; Covers BRIDGE_V2 #111 (eval --debug enters debugger), #112
 ;;;; (debug-eval-in-frame), #113 (debug-invoke-restart with args),
@@ -56,7 +56,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-debug")))
     (unwind-protect
@@ -66,7 +66,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -78,22 +78,22 @@
 (defun send-on-thread (conn message)
   "Send MESSAGE on CONN's stream from a background thread (so the caller
 can keep reading event frames)."
-  (clpm.repl-bridge.compat:make-thread
+  (clpm.repl.compat:make-thread
    (lambda ()
      (handler-case
-         (clpm.repl-bridge::%write-line-json
-          (clpm.repl-bridge::connection-stream conn)
+         (clpm.repl::%write-line-json
+          (clpm.repl::connection-stream conn)
           message)
        (error () nil)))
    :name "test-debug-replier"))
 
 (defun send-raw (conn message)
-  (clpm.repl-bridge::%write-line-json
-   (clpm.repl-bridge::connection-stream conn)
+  (clpm.repl::%write-line-json
+   (clpm.repl::connection-stream conn)
    message))
 
 (defun read-raw-frame (conn)
-  (let ((line (read-line (clpm.repl-bridge::connection-stream conn) nil nil)))
+  (let ((line (read-line (clpm.repl::connection-stream conn) nil nil)))
     (and line (clpm.io.json:read-json-from-string line))))
 
 ;;; ----------------------------------------------------------------------------
@@ -102,12 +102,12 @@ can keep reading event frames)."
 (format t "Test: USE-VALUE 0 recovers from (/ 1 0)~%")
 (with-daemon
   (lambda (sock)
-    (let* ((conn (clpm.repl-bridge:open-connection sock))
+    (let* ((conn (clpm.repl:open-connection sock))
            (eval-id 11)
            (entered nil))
       (unwind-protect
            (let ((resp
-                   (clpm.repl-bridge:send-on-connection
+                   (clpm.repl:send-on-connection
                     conn "eval"
                     :id eval-id
                     :params (list :object
@@ -121,10 +121,10 @@ can keep reading event frames)."
                         (setf entered t)
                         (send-on-thread
                          conn
-                         (clpm.repl-bridge::%json-object
+                         (clpm.repl::%json-object
                           "id" eval-id
                           "method" "debug-invoke-restart"
-                          "params" (clpm.repl-bridge::%json-object
+                          "params" (clpm.repl::%json-object
                                     "name" "use-value"
                                     "args" (list :array (list "0"))))))
                       nil))))
@@ -132,7 +132,7 @@ can keep reading event frames)."
              (let ((result (lookup resp "result")))
                (assert-true result "no terminal result: ~S" resp)
                (assert-equal-string "0" (lookup result "value"))))
-        (clpm.repl-bridge:close-connection conn)))))
+        (clpm.repl:close-connection conn)))))
 (format t "  USE-VALUE recovery OK~%")
 
 ;;; ----------------------------------------------------------------------------
@@ -141,11 +141,11 @@ can keep reading event frames)."
 (format t "Test: debug-abort lets the condition unwind~%")
 (with-daemon
   (lambda (sock)
-    (let* ((conn (clpm.repl-bridge:open-connection sock))
+    (let* ((conn (clpm.repl:open-connection sock))
            (eval-id 14))
       (unwind-protect
            (let ((resp
-                   (clpm.repl-bridge:send-on-connection
+                   (clpm.repl:send-on-connection
                     conn "eval"
                     :id eval-id
                     :params (list :object
@@ -156,14 +156,14 @@ can keep reading event frames)."
                       (when (string= "debugger-entered" (lookup frame "event"))
                         (send-on-thread
                          conn
-                         (clpm.repl-bridge::%json-object
+                         (clpm.repl::%json-object
                           "id" eval-id
                           "method" "debug-abort")))
                       nil))))
              (let ((err (lookup resp "error")))
                (assert-true err "expected error frame, got ~S" resp)
                (assert-equal-string "eval-error" (lookup err "code"))))
-        (clpm.repl-bridge:close-connection conn)))))
+        (clpm.repl:close-connection conn)))))
 (format t "  debug-abort OK~%")
 
 ;;; ----------------------------------------------------------------------------
@@ -172,12 +172,12 @@ can keep reading event frames)."
 (format t "Test: debug-eval-in-frame sees live frame variables~%")
 (with-daemon
   (lambda (sock)
-    (let* ((conn (clpm.repl-bridge:open-connection sock))
+    (let* ((conn (clpm.repl:open-connection sock))
            (eval-id 12)
            (frame-result nil))
       (unwind-protect
            (let ((resp
-                   (clpm.repl-bridge:send-on-connection
+                   (clpm.repl:send-on-connection
                     conn "eval"
                     :id eval-id
                     :params (list :object
@@ -202,17 +202,17 @@ can keep reading event frames)."
                                         frame)
                            (send-on-thread
                             conn
-                            (clpm.repl-bridge::%json-object
+                            (clpm.repl::%json-object
                              "id" eval-id
                              "method" "debug-eval-in-frame"
-                             "params" (clpm.repl-bridge::%json-object
+                             "params" (clpm.repl::%json-object
                                        "frame" frame-index
                                        "form" "(* x 2)")))))
                         ((string= "frame-eval-result" (lookup frame "event"))
                          (setf frame-result frame)
                          (send-on-thread
                           conn
-                          (clpm.repl-bridge::%json-object
+                          (clpm.repl::%json-object
                            "id" eval-id
                            "method" "debug-abort"))))
                       nil))))
@@ -220,7 +220,7 @@ can keep reading event frames)."
              (assert-true frame-result
                           "never got a frame-eval-result event")
              (assert-equal-string "14" (lookup frame-result "value")))
-        (clpm.repl-bridge:close-connection conn)))))
+        (clpm.repl:close-connection conn)))))
 (format t "  debug-eval-in-frame OK~%")
 
 ;;; ----------------------------------------------------------------------------
@@ -229,16 +229,16 @@ can keep reading event frames)."
 (format t "Test: debug session survives discovery connection close~%")
 (with-daemon
   (lambda (sock)
-    (let* ((conn (clpm.repl-bridge:open-connection sock))
+    (let* ((conn (clpm.repl:open-connection sock))
            (eval-id 15))
       (unwind-protect
            (progn
              (send-raw
               conn
-              (clpm.repl-bridge::%json-object
+              (clpm.repl::%json-object
                "id" eval-id
                "method" "eval"
-               "params" (clpm.repl-bridge::%json-object
+               "params" (clpm.repl::%json-object
                          "form" "(progn
                                     (declaim (optimize (debug 3)
                                                        (safety 3)
@@ -257,7 +257,7 @@ can keep reading event frames)."
                (unless (integerp session)
                  (send-raw
                   conn
-                  (clpm.repl-bridge::%json-object
+                  (clpm.repl::%json-object
                    "id" eval-id
                    "method" "debug-abort"))
                  (fail "debugger event missing server session id: ~S"
@@ -265,12 +265,12 @@ can keep reading event frames)."
                (assert-true frame-index
                             "could not find user frame in ~S"
                             entered)
-               (clpm.repl-bridge:close-connection conn)
+               (clpm.repl:close-connection conn)
                (setf conn nil)
                (let* ((frame-resp
-                        (clpm.repl-bridge:send-request
+                        (clpm.repl:send-request
                          sock "debug-eval-in-frame"
-                         :params (clpm.repl-bridge::%json-object
+                         :params (clpm.repl::%json-object
                                   "session" session
                                   "frame" frame-index
                                   "form" "(* x 2)")))
@@ -281,9 +281,9 @@ can keep reading event frames)."
                  (assert-equal-string "14"
                                       (lookup frame-result "value")))
                (let* ((abort-resp
-                        (clpm.repl-bridge:send-request
+                        (clpm.repl:send-request
                          sock "debug-abort"
-                         :params (clpm.repl-bridge::%json-object
+                         :params (clpm.repl::%json-object
                                   "session" session)))
                       (abort-result (lookup abort-resp "result")))
                  (assert-true abort-result
@@ -292,22 +292,22 @@ can keep reading event frames)."
                  (assert-equal-string "aborted"
                                       (lookup abort-result "outcome")))))
         (when conn
-          (clpm.repl-bridge:close-connection conn))))))
+          (clpm.repl:close-connection conn))))))
 (format t "  server-owned debug session OK~%")
 
 (format t "Test: fresh restart resumes original continuation~%")
 (with-daemon
   (lambda (sock)
-    (let* ((conn (clpm.repl-bridge:open-connection sock))
+    (let* ((conn (clpm.repl:open-connection sock))
            (eval-id 16))
       (unwind-protect
            (progn
              (send-raw
               conn
-              (clpm.repl-bridge::%json-object
+              (clpm.repl::%json-object
                "id" eval-id
                "method" "eval"
-               "params" (clpm.repl-bridge::%json-object
+               "params" (clpm.repl::%json-object
                          "form" "(restart-case (/ 1 0)
                                    (use-value (v) v))"
                          "debug" t)))
@@ -317,9 +317,9 @@ can keep reading event frames)."
                             "debugger event missing session id: ~S"
                             entered)
                (let* ((restart-resp
-                        (clpm.repl-bridge:send-request
+                        (clpm.repl:send-request
                          sock "debug-invoke-restart"
-                         :params (clpm.repl-bridge::%json-object
+                         :params (clpm.repl::%json-object
                                   "session" session
                                   "name" "use-value"
                                   "args" (list :array (list "42")))))
@@ -341,22 +341,22 @@ can keep reading event frames)."
                               terminal)
                  (assert-equal-string "42"
                                       (lookup result "value")))))
-        (clpm.repl-bridge:close-connection conn)))))
+        (clpm.repl:close-connection conn)))))
 (format t "  fresh restart OK~%")
 
 (format t "Test: bad restart arg keeps debug session live~%")
 (with-daemon
   (lambda (sock)
-    (let* ((conn (clpm.repl-bridge:open-connection sock))
+    (let* ((conn (clpm.repl:open-connection sock))
            (eval-id 17))
       (unwind-protect
            (progn
              (send-raw
               conn
-              (clpm.repl-bridge::%json-object
+              (clpm.repl::%json-object
                "id" eval-id
                "method" "eval"
-               "params" (clpm.repl-bridge::%json-object
+               "params" (clpm.repl::%json-object
                          "form" "(restart-case (/ 1 0)
                                    (use-value (v) v))"
                          "debug" t)))
@@ -366,9 +366,9 @@ can keep reading event frames)."
                             "debugger event missing session id: ~S"
                             entered)
                (let* ((bad-resp
-                        (clpm.repl-bridge:send-request
+                        (clpm.repl:send-request
                          sock "debug-invoke-restart"
-                         :params (clpm.repl-bridge::%json-object
+                         :params (clpm.repl::%json-object
                                   "session" session
                                   "name" "use-value"
                                   "args" (list :array (list "(")))))
@@ -377,7 +377,7 @@ can keep reading event frames)."
                               "expected bad restart arg error, got ~S"
                               bad-resp))
                (let* ((sessions-resp
-                        (clpm.repl-bridge:send-request
+                        (clpm.repl:send-request
                          sock "list-debug-sessions"))
                       (sessions (array-items
                                  (lookup (lookup sessions-resp "result")
@@ -389,9 +389,9 @@ can keep reading event frames)."
                   "session vanished after bad restart arg: ~S"
                   sessions-resp))
                (let* ((restart-resp
-                        (clpm.repl-bridge:send-request
+                        (clpm.repl:send-request
                          sock "debug-invoke-restart"
-                         :params (clpm.repl-bridge::%json-object
+                         :params (clpm.repl::%json-object
                                   "session" session
                                   "name" "use-value"
                                   "args" (list :array (list "42")))))
@@ -413,31 +413,31 @@ can keep reading event frames)."
                               terminal)
                  (assert-equal-string "42"
                                       (lookup result "value")))))
-        (clpm.repl-bridge:close-connection conn)))))
+        (clpm.repl:close-connection conn)))))
 (format t "  bad restart arg recovery OK~%")
 
 (format t "Test: fresh debug action diagnoses ambiguous sessions~%")
 (with-daemon
   (lambda (sock)
-    (let ((conn-a (clpm.repl-bridge:open-connection sock))
-          (conn-b (clpm.repl-bridge:open-connection sock)))
+    (let ((conn-a (clpm.repl:open-connection sock))
+          (conn-b (clpm.repl:open-connection sock)))
       (unwind-protect
            (progn
              (send-raw
               conn-a
-              (clpm.repl-bridge::%json-object
+              (clpm.repl::%json-object
                "id" 18
                "method" "eval"
-               "params" (clpm.repl-bridge::%json-object
+               "params" (clpm.repl::%json-object
                          "form" "(error \"debug A\")"
                          "worker" "a"
                          "debug" t)))
              (send-raw
               conn-b
-              (clpm.repl-bridge::%json-object
+              (clpm.repl::%json-object
                "id" 19
                "method" "eval"
-               "params" (clpm.repl-bridge::%json-object
+               "params" (clpm.repl::%json-object
                          "form" "(error \"debug B\")"
                          "worker" "b"
                          "debug" t)))
@@ -452,7 +452,7 @@ can keep reading event frames)."
                             "second debugger event missing session: ~S"
                             entered-b)
                (let* ((ambiguous
-                        (clpm.repl-bridge:send-request sock "debug-abort"))
+                        (clpm.repl:send-request sock "debug-abort"))
                       (err (lookup ambiguous "error"))
                       (message (lookup err "message")))
                  (assert-true (and (stringp message)
@@ -460,16 +460,16 @@ can keep reading event frames)."
                                            message))
                               "expected ambiguous-session error, got ~S"
                               ambiguous))
-               (clpm.repl-bridge:send-request
+               (clpm.repl:send-request
                 sock "debug-abort"
-                :params (clpm.repl-bridge::%json-object
+                :params (clpm.repl::%json-object
                          "session" session-a))
-               (clpm.repl-bridge:send-request
+               (clpm.repl:send-request
                 sock "debug-abort"
-                :params (clpm.repl-bridge::%json-object
+                :params (clpm.repl::%json-object
                          "session" session-b))))
-        (clpm.repl-bridge:close-connection conn-a)
-        (clpm.repl-bridge:close-connection conn-b)))))
+        (clpm.repl:close-connection conn-a)
+        (clpm.repl:close-connection conn-b)))))
 (format t "  ambiguous debug action OK~%")
 
 (format t "Test: shutdown resolves kept debug sessions~%")
@@ -478,7 +478,7 @@ can keep reading event frames)."
        (thread (sb-thread:make-thread
                 (lambda ()
                   (handler-case
-                      (clpm.repl-bridge:start-server :socket-path sock)
+                      (clpm.repl:start-server :socket-path sock)
                     (error (c)
                       (format *error-output* "daemon: ~A~%" c))))
                 :name "test-bridge-debug-shutdown")))
@@ -488,15 +488,15 @@ can keep reading event frames)."
                while (not (probe-file sock))
                do (sleep 0.05))
          (assert-true (probe-file sock) "daemon never started")
-         (let ((conn (clpm.repl-bridge:open-connection sock)))
+         (let ((conn (clpm.repl:open-connection sock)))
            (unwind-protect
                 (progn
                   (send-raw
                    conn
-                   (clpm.repl-bridge::%json-object
+                   (clpm.repl::%json-object
                     "id" 18
                     "method" "eval"
-                    "params" (clpm.repl-bridge::%json-object
+                    "params" (clpm.repl::%json-object
                               "form" "(error \"shutdown should abort me\")"
                               "debug" t)))
                   (let* ((entered (read-raw-frame conn))
@@ -504,17 +504,17 @@ can keep reading event frames)."
                     (assert-true (integerp session)
                                  "debugger event missing session id: ~S"
                                  entered)
-                    (clpm.repl-bridge:send-request sock "shutdown")
+                    (clpm.repl:send-request sock "shutdown")
                     (loop for i from 0 below 60
                           while (sb-thread:thread-alive-p thread)
                           do (sleep 0.05))
                     (assert-true (not (sb-thread:thread-alive-p thread))
                                  "server did not stop with active debug session")))
-             (clpm.repl-bridge:close-connection conn))))
+             (clpm.repl:close-connection conn))))
     (when (sb-thread:thread-alive-p thread)
       (ignore-errors (sb-thread:terminate-thread thread)))
     (ignore-errors (delete-file sock))))
 (format t "  shutdown with kept debug session OK~%")
 
-(format t "~%REPL-bridge debug tests PASSED!~%")
+(format t "~%REPL debug tests PASSED!~%")
 (sb-ext:exit :code 0)

@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-source-test.lisp - source navigation + compile/load
+;;;; test/repl-source-test.lisp - source navigation + compile/load
 ;;;; diagnostics + macroexpand.
 ;;;;
 ;;;; Covers BRIDGE_V2 #130 (compile-file), #131 (load-file), #132
@@ -40,7 +40,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-source")))
     (unwind-protect
@@ -50,7 +50,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -65,7 +65,7 @@
 (format t "Test: find-definition for FORMAT~%")
 (with-daemon
   (lambda (sock)
-    (let* ((resp (clpm.repl-bridge:send-request
+    (let* ((resp (clpm.repl:send-request
                   sock "find-definition"
                   :params (list :object
                                 (list (cons "symbol" "format")
@@ -88,7 +88,7 @@
     ;; Define two functions on the wire so they get compiled with
     ;; xref enabled, then ask who-calls the inner one.
     (let* ((define-resp
-             (clpm.repl-bridge:send-request
+             (clpm.repl:send-request
               sock "eval"
               :params (list :object
                             (list (cons "form"
@@ -97,7 +97,7 @@
                                                 :ok)"))))))
       (assert-true (lookup define-resp "result")
                    "couldn't define callee/caller: ~S" define-resp))
-    (let* ((resp (clpm.repl-bridge:send-request
+    (let* ((resp (clpm.repl:send-request
                   sock "xref"
                   :params (list :object
                                 (list (cons "symbol" "xref-callee")
@@ -126,7 +126,7 @@
 (format t "Test: macroexpand-1 of (when t :ok)~%")
 (with-daemon
   (lambda (sock)
-    (let* ((resp (clpm.repl-bridge:send-request
+    (let* ((resp (clpm.repl:send-request
                   sock "macroexpand"
                   :params (list :object (list (cons "form" "(when t :ok)")))))
            (result (lookup resp "result")))
@@ -149,7 +149,7 @@
   (unwind-protect
        (with-daemon
          (lambda (sock)
-           (let* ((resp (clpm.repl-bridge:send-request
+           (let* ((resp (clpm.repl:send-request
                         sock "compile-file"
                         :params (list :object (list (cons "path" tmp-src)))
                         :on-event (lambda (frame)
@@ -178,7 +178,7 @@
   (unwind-protect
        (with-daemon
          (lambda (sock)
-           (let* ((resp (clpm.repl-bridge:send-request
+           (let* ((resp (clpm.repl:send-request
                         sock "load-file"
                         :params (list :object (list (cons "path" tmp-src)))))
                   (result (lookup resp "result")))
@@ -189,5 +189,5 @@
     (ignore-errors (delete-file tmp-src))))
 (format t "  load-file OK~%")
 
-(format t "~%REPL-bridge source tests PASSED!~%")
+(format t "~%REPL source tests PASSED!~%")
 (sb-ext:exit :code 0)

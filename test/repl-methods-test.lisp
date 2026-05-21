@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-methods-test.lisp - `methods' / `help' discovery.
+;;;; test/repl-methods-test.lisp - `methods' / `help' discovery.
 ;;;;
 ;;;; BRIDGE_V2 #106: the daemon advertises its RPC surface from the same
 ;;;; registry the dispatcher reads, so docs cannot drift from code.
@@ -39,7 +39,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-methods")))
     (unwind-protect
@@ -49,7 +49,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -64,7 +64,7 @@
 (format t "Test: `methods' RPC enumerates the registry~%")
 (with-daemon
   (lambda (sock)
-    (let* ((resp (clpm.repl-bridge:send-request sock "methods"))
+    (let* ((resp (clpm.repl:send-request sock "methods"))
            (result (lookup resp "result"))
            (methods (array-items (lookup result "methods"))))
       (assert-true methods "no methods array in response: ~S" resp)
@@ -84,7 +84,7 @@
 (format t "Test: `help' returns spec for a known method~%")
 (with-daemon
   (lambda (sock)
-    (let* ((resp (clpm.repl-bridge:send-request
+    (let* ((resp (clpm.repl:send-request
                   sock "help"
                   :params (list :object (list (cons "method" "eval")))))
            (result (lookup resp "result"))
@@ -107,7 +107,7 @@
 (format t "Test: `help' for unknown method returns protocol-error~%")
 (with-daemon
   (lambda (sock)
-    (let* ((resp (clpm.repl-bridge:send-request
+    (let* ((resp (clpm.repl:send-request
                   sock "help"
                   :params (list :object (list (cons "method" "nope-not-here")))))
            (err (lookup resp "error")))
@@ -122,7 +122,7 @@
 (format t "Test: request params are decoded from method specs~%")
 (with-daemon
   (lambda (sock)
-    (let* ((extra (clpm.repl-bridge:send-request
+    (let* ((extra (clpm.repl:send-request
                    sock "eval"
                    :params (list :object
                                  (list (cons "form" "(+ 1 2)")
@@ -135,7 +135,7 @@
                            (lookup extra-error "message"))
                    "wrong unknown-param message: ~S"
                    extra-error))
-    (let* ((typed (clpm.repl-bridge:send-request
+    (let* ((typed (clpm.repl:send-request
                    sock "eval"
                    :params (list :object
                                  (list (cons "form" 42)))))
@@ -147,7 +147,7 @@
                            (lookup typed-error "message"))
                    "wrong type message: ~S"
                    typed-error))
-    (let* ((not-object (clpm.repl-bridge:send-request
+    (let* ((not-object (clpm.repl:send-request
                         sock "help"
                         :params (list :array nil)))
            (not-object-error (lookup not-object "error")))
@@ -160,5 +160,5 @@
                    not-object-error))))
 (format t "  schema decode OK~%")
 
-(format t "~%REPL-bridge methods tests PASSED!~%")
+(format t "~%REPL methods tests PASSED!~%")
 (sb-ext:exit :code 0)

@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-pipeline-test.lisp - v2 protocol: persistent connection
+;;;; test/repl-pipeline-test.lisp - v2 protocol: persistent connection
 ;;;;
 ;;;; v2 #101: a single connection can carry multiple requests back-to-back
 ;;;; without reopening. Verifies the daemon's read loop survives malformed
@@ -40,7 +40,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge")))
     (unwind-protect
@@ -50,7 +50,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -65,16 +65,16 @@
 (format t "Test: three pings on a single persistent connection~%")
 (with-daemon
   (lambda (sock)
-    (let ((conn (clpm.repl-bridge:open-connection sock)))
+    (let ((conn (clpm.repl:open-connection sock)))
       (assert-true (not (eq conn :no-daemon)) "open-connection :no-daemon")
       (unwind-protect
            (dotimes (i 3)
-             (let ((resp (clpm.repl-bridge:send-on-connection
+             (let ((resp (clpm.repl:send-on-connection
                           conn "ping" :id (1+ i))))
                (assert-true (lookup resp "result")
                             "ping #~D did not return result: ~S" i resp)
                (assert-eql (1+ i) (lookup resp "id"))))
-        (clpm.repl-bridge:close-connection conn)))))
+        (clpm.repl:close-connection conn)))))
 (format t "  pipelining OK~%")
 
 ;;; ----------------------------------------------------------------------------
@@ -84,15 +84,15 @@
 (format t "Test: state persists across pipelined evals~%")
 (with-daemon
   (lambda (sock)
-    (let ((conn (clpm.repl-bridge:open-connection sock)))
+    (let ((conn (clpm.repl:open-connection sock)))
       (unwind-protect
            (progn
-             (clpm.repl-bridge:send-on-connection
+             (clpm.repl:send-on-connection
               conn "eval"
               :params (list :object
                             (list (cons "form" "(defparameter *pipe-x* 41)")))
               :id 10)
-             (let ((resp (clpm.repl-bridge:send-on-connection
+             (let ((resp (clpm.repl:send-on-connection
                           conn "eval"
                           :params (list :object (list (cons "form" "(1+ *pipe-x*)")))
                           :id 11)))
@@ -100,7 +100,7 @@
                  (assert-true (and (stringp (lookup result "value"))
                                    (string= "42" (lookup result "value")))
                               "expected 42, got ~S" result))))
-        (clpm.repl-bridge:close-connection conn)))))
+        (clpm.repl:close-connection conn)))))
 (format t "  state persistence OK~%")
 
 ;;; ----------------------------------------------------------------------------
@@ -110,9 +110,9 @@
 (format t "Test: malformed JSON does not close the connection~%")
 (with-daemon
   (lambda (sock)
-    (let ((conn (clpm.repl-bridge:open-connection sock)))
+    (let ((conn (clpm.repl:open-connection sock)))
       (unwind-protect
-           (let ((stream (clpm.repl-bridge::connection-stream conn)))
+           (let ((stream (clpm.repl::connection-stream conn)))
              ;; Send a non-JSON line directly.
              (write-string "not valid json{{" stream)
              (write-char #\Newline stream)
@@ -123,13 +123,13 @@
                (assert-true (lookup resp "error")
                             "expected an error frame, got ~S" resp))
              ;; Now send a valid request: should still get serviced.
-             (let ((resp (clpm.repl-bridge:send-on-connection
+             (let ((resp (clpm.repl:send-on-connection
                           conn "ping" :id 99)))
                (assert-true (lookup resp "result")
                             "daemon broke after malformed line: ~S" resp)
                (assert-eql 99 (lookup resp "id"))))
-        (clpm.repl-bridge:close-connection conn)))))
+        (clpm.repl:close-connection conn)))))
 (format t "  recovery from malformed line OK~%")
 
-(format t "~%REPL-bridge pipeline tests PASSED!~%")
+(format t "~%REPL pipeline tests PASSED!~%")
 (sb-ext:exit :code 0)

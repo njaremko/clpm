@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-safety-test.lisp - hygiene / safety / observability.
+;;;; test/repl-safety-test.lisp - hygiene / safety / observability.
 ;;;;
 ;;;; Covers BRIDGE_V2 #210 (heartbeat), #211 (break-on nil override),
 ;;;; #212 (worker crash recovery), #213 (per-method counters),
@@ -40,7 +40,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-safety")))
     (unwind-protect
@@ -50,7 +50,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 60
             while (sb-thread:thread-alive-p thread)
@@ -60,7 +60,7 @@
       (ignore-errors (delete-file sock)))))
 
 (defun do-rpc (sock method &optional params &key on-event)
-  (clpm.repl-bridge:send-request sock method
+  (clpm.repl:send-request sock method
                                   :params (and params (list :object params))
                                   :on-event on-event))
 
@@ -144,5 +144,5 @@
                      "value should still be 4: ~S" resp)))))
 (format t "  crash recovery OK~%")
 
-(format t "~%REPL-bridge safety tests PASSED!~%")
+(format t "~%REPL safety tests PASSED!~%")
 (sb-ext:exit :code 0)

@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-docs-test.lisp - discoverability + ergonomics.
+;;;; test/repl-docs-test.lisp - discoverability + ergonomics.
 ;;;;
 ;;;; Covers BRIDGE_V2 #200 (methods), #201 (help METHOD), #205 (explain).
 
@@ -38,7 +38,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-docs")))
     (unwind-protect
@@ -48,7 +48,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -58,7 +58,7 @@
       (ignore-errors (delete-file sock)))))
 
 (defun do-rpc (sock method &optional params &key on-event)
-  (clpm.repl-bridge:send-request sock method
+  (clpm.repl:send-request sock method
                                   :params (and params (list :object params))
                                   :on-event on-event))
 
@@ -118,5 +118,5 @@
                      "plan should echo method: ~S" plan)))))
 (format t "  explain OK~%")
 
-(format t "~%REPL-bridge docs tests PASSED!~%")
+(format t "~%REPL docs tests PASSED!~%")
 (sb-ext:exit :code 0)

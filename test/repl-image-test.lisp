@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-image-test.lisp - image management RPCs.
+;;;; test/repl-image-test.lisp - image management RPCs.
 ;;;;
 ;;;; Covers BRIDGE_V2 #190 (image-info), #191 (loaded-systems),
 ;;;; #192 (list-packages), #194 (gc).
@@ -39,7 +39,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-image")))
     (unwind-protect
@@ -49,7 +49,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -59,7 +59,7 @@
       (ignore-errors (delete-file sock)))))
 
 (defun do-rpc (sock method &optional params)
-  (clpm.repl-bridge:send-request sock method
+  (clpm.repl:send-request sock method
                                   :params (and params (list :object params))))
 
 (format t "Test: image-info has pid, lisp, features~%")
@@ -110,5 +110,5 @@
                    "after_bytes missing"))))
 (format t "  gc OK~%")
 
-(format t "~%REPL-bridge image tests PASSED!~%")
+(format t "~%REPL image tests PASSED!~%")
 (sb-ext:exit :code 0)

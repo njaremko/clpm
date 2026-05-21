@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-server-test.lisp - in-process daemon round-trip
+;;;; test/repl-server-test.lisp - in-process daemon round-trip
 
 (require :asdf)
 (require :sb-bsd-sockets)
@@ -46,7 +46,7 @@
            (sb-thread:make-thread
             (lambda ()
               (handler-case
-                  (clpm.repl-bridge:start-server :socket-path tmp)
+                  (clpm.repl:start-server :socket-path tmp)
                 (error (c)
                   (format *error-output* "daemon: ~A~%" c))))
             :name "test-bridge-daemon")))
@@ -60,7 +60,7 @@
              (fail "daemon failed to bind ~A within 2.5s" tmp))
            (funcall fn tmp))
       (handler-case
-          (clpm.repl-bridge:send-request tmp "shutdown")
+          (clpm.repl:send-request tmp "shutdown")
         (error () nil))
       ;; Give the daemon a moment to wind down.
       (loop for i from 0 below 20
@@ -85,7 +85,7 @@
 (format t "Test: ping round-trip~%")
 (with-daemon
     (lambda (sock-path)
-      (let* ((resp (clpm.repl-bridge:send-request sock-path "ping" :id 1))
+      (let* ((resp (clpm.repl:send-request sock-path "ping" :id 1))
              (result (lookup resp "result")))
         (assert-true (consp resp) "expected JSON object response, got ~S" resp)
         (assert-eql 1 (lookup resp "id"))
@@ -118,7 +118,7 @@
 (format t "Test: unknown method returns protocol-error~%")
 (with-daemon
     (lambda (sock-path)
-      (let* ((resp (clpm.repl-bridge:send-request sock-path "no-such-method" :id 7))
+      (let* ((resp (clpm.repl:send-request sock-path "no-such-method" :id 7))
              (err (lookup resp "error")))
         (assert-true err "expected error, got ~S" resp)
         (assert-eql 7 (lookup resp "id"))
@@ -126,12 +126,12 @@
 (format t "  OK~%")
 
 (format t "Test: connect to absent socket returns :no-daemon~%")
-(let ((result (clpm.repl-bridge:send-request
+(let ((result (clpm.repl:send-request
                "/tmp/clpm-bridge-DOES-NOT-EXIST.sock"
                "ping"
                :connect-timeout 1)))
   (assert-eql :no-daemon result))
 (format t "  OK~%")
 
-(format t "~%REPL-bridge server tests PASSED!~%")
+(format t "~%REPL server tests PASSED!~%")
 (sb-ext:exit :code 0)

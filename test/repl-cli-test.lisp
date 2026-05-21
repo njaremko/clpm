@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-cli-test.lisp - end-to-end CLI: daemon, eval, call
+;;;; test/repl-cli-test.lisp - end-to-end CLI: daemon, eval, call
 
 (require :asdf)
 (require :sb-posix)
@@ -81,7 +81,7 @@
                     ;; Surface daemon-startup failures instead of letting
                     ;; them disappear behind a captured *error-output*.
                     (handler-case
-                        (run-cli-captured '("repl-bridge" "daemon"))
+                        (run-cli-captured '("repl" "daemon"))
                       (error (c)
                         (format *error-output* "daemon thread died: ~A~%" c)
                         (force-output *error-output*))))
@@ -92,16 +92,16 @@
         ;; polling loop most of the cpu and time us out.
         (sleep 0.05)
         ;; Wait for the socket to appear.
-        (let ((sock (namestring (merge-pathnames ".clpm/repl-bridge.sock" proj))))
+        (let ((sock (namestring (merge-pathnames ".clpm/repl.sock" proj))))
           (loop for i from 0 below 100
                 while (not (probe-file sock))
                 do (sleep 0.1))
           (assert-true (probe-file sock) "daemon socket did not appear: ~A" sock)
           (format t "  daemon up~%")
 
-          (format t "Test: clpm repl-bridge eval (default human output)~%")
+          (format t "Test: clpm repl eval (default human output)~%")
           (multiple-value-bind (rc stdout stderr)
-              (run-cli-captured '("repl-bridge" "eval" "(+ 1 2)" "--no-autostart"))
+              (run-cli-captured '("repl" "eval" "(+ 1 2)" "--no-autostart"))
             (declare (ignore stderr))
             (assert-eql 0 rc)
             ;; Default rendering is "=> 3"; no raw JSON.
@@ -110,7 +110,7 @@
 
           (format t "Test: eval --json prints raw JSON~%")
           (multiple-value-bind (rc stdout)
-              (run-cli-captured '("repl-bridge" "eval" "(+ 1 2)"
+              (run-cli-captured '("repl" "eval" "(+ 1 2)"
                                   "--no-autostart" "--json"))
             (assert-eql 0 rc)
             (assert-contains stdout "\"value\":\"3\"")
@@ -118,10 +118,10 @@
           (format t "  eval --json OK~%")
 
           (format t "Test: state persists across eval calls~%")
-          (run-cli-captured '("repl-bridge" "eval"
+          (run-cli-captured '("repl" "eval"
                               "(defparameter *cli-x* 41)" "--no-autostart"))
           (multiple-value-bind (rc stdout)
-              (run-cli-captured '("repl-bridge" "eval" "*cli-x*"
+              (run-cli-captured '("repl" "eval" "*cli-x*"
                                   "--no-autostart"))
             (declare (ignore rc))
             (assert-contains stdout "=> 41"))
@@ -129,7 +129,7 @@
 
           (format t "Test: call ping returns daemon info~%")
           (multiple-value-bind (rc stdout)
-              (run-cli-captured '("repl-bridge" "call" "ping"))
+              (run-cli-captured '("repl" "call" "ping"))
             (assert-eql 0 rc)
             (assert-contains stdout "\"pid\"")
             (assert-contains stdout "\"uptime_ms\""))
@@ -137,7 +137,7 @@
 
           (format t "Test: daemon --status reports running~%")
           (multiple-value-bind (rc stdout)
-              (run-cli-captured '("repl-bridge" "daemon" "--status"))
+              (run-cli-captured '("repl" "daemon" "--status"))
             (assert-eql 0 rc)
             (assert-contains stdout "running")
             (assert-contains stdout "pid"))
@@ -145,7 +145,7 @@
 
           (format t "Test: eval --no-autostart fails after stop~%")
           (multiple-value-bind (rc stdout stderr)
-              (run-cli-captured '("repl-bridge" "daemon" "--stop"))
+              (run-cli-captured '("repl" "daemon" "--stop"))
             (declare (ignore stderr stdout))
             (assert-eql 0 rc))
           ;; Wait for daemon thread to finish.
@@ -155,7 +155,7 @@
           (when (sb-thread:thread-alive-p srv)
             (ignore-errors (sb-thread:terminate-thread srv)))
           (multiple-value-bind (rc stdout stderr)
-              (run-cli-captured '("repl-bridge" "eval" "(+ 1 2)" "--no-autostart"))
+              (run-cli-captured '("repl" "eval" "(+ 1 2)" "--no-autostart"))
             (declare (ignore stdout))
             (assert-eql 2 rc)
             (assert-contains stderr "No daemon"))
@@ -163,10 +163,10 @@
 
           (format t "Test: daemon --status reports not running after stop~%")
           (multiple-value-bind (rc stdout)
-              (run-cli-captured '("repl-bridge" "daemon" "--status"))
+              (run-cli-captured '("repl" "daemon" "--status"))
             (assert-eql 0 rc)
             (assert-contains stdout "not running"))
           (format t "  status-after-stop OK~%"))))))
 
-(format t "~%REPL-bridge CLI tests PASSED!~%")
+(format t "~%REPL CLI tests PASSED!~%")
 (sb-ext:exit :code 0)

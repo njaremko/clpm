@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-preload-test.lisp -- daemon preloads project :systems
+;;;; test/repl-preload-test.lisp -- daemon preloads project :systems
 
 (require :asdf)
 
@@ -83,5 +83,5 @@
                    "MARKER not bound to :preloaded; got ~S" val))
     (format t "  preload OK~%")))
 
-(format t "~%REPL-bridge preload tests PASSED!~%")
+(format t "~%REPL preload tests PASSED!~%")
 (sb-ext:exit :code 0)

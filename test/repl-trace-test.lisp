@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-trace-test.lisp - trace / time / profile.
+;;;; test/repl-trace-test.lisp - trace / time / profile.
 ;;;;
 ;;;; Covers BRIDGE_V2 #160 (trace), #161 (untrace), #162 (list-traced),
 ;;;; #163 (time-eval), #164 (profile-eval).
@@ -39,7 +39,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-trace")))
     (unwind-protect
@@ -49,7 +49,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -59,7 +59,7 @@
       (ignore-errors (delete-file sock)))))
 
 (defun do-rpc (sock method params)
-  (clpm.repl-bridge:send-request sock method
+  (clpm.repl:send-request sock method
                                   :params (list :object params)))
 
 ;;; ----------------------------------------------------------------------------
@@ -119,5 +119,5 @@
       (assert-true entries "no profile entries"))))
 (format t "  profile-eval OK~%")
 
-(format t "~%REPL-bridge trace tests PASSED!~%")
+(format t "~%REPL trace tests PASSED!~%")
 (sb-ext:exit :code 0)

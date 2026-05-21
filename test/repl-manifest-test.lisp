@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-manifest-test.lisp - :repl-bridge manifest field
+;;;; test/repl-manifest-test.lisp - :repl manifest field
 
 (require :asdf)
 
@@ -27,69 +27,69 @@
     (fail "expected ~S, got ~S" expected actual)))
 
 ;;; ----------------------------------------------------------------------------
-;;; Parser accepts :repl-bridge plist.
+;;; Parser accepts :repl plist.
 
-(format t "Test: parser accepts :repl-bridge field~%")
+(format t "Test: parser accepts :repl field~%")
 (clpm.store:with-temp-dir (tmp)
   (let ((manifest (merge-pathnames "clpm.project" tmp)))
     (with-open-file (s manifest :direction :output :if-exists :supersede
                                 :external-format :utf-8)
       (write-string
 "(:project :name \"x\" :version \"0.1.0\" :systems (\"x\") :registries ()
- :repl-bridge (:autostart t :preload (\"alexandria\")))" s))
+ :repl (:autostart t :preload (\"alexandria\")))" s))
     (let ((p (clpm.project:read-project-file manifest)))
       (assert-true p "read-project-file returned NIL")
-      (let ((rb (clpm.project:project-repl-bridge p)))
-        (assert-true (consp rb) "project-repl-bridge returned ~S, expected a plist" rb)
+      (let ((rb (clpm.project:project-repl p)))
+        (assert-true (consp rb) "project-repl returned ~S, expected a plist" rb)
         (assert-true (eq t (getf rb :autostart))
                      "expected :autostart t, got ~S" (getf rb :autostart))
         (assert-equal '("alexandria") (getf rb :preload)))))
   (format t "  parse OK~%"))
 
 ;;; ----------------------------------------------------------------------------
-;;; Serializer round-trips :repl-bridge.
+;;; Serializer round-trips :repl.
 
-(format t "Test: serializer round-trips :repl-bridge~%")
+(format t "Test: serializer round-trips :repl~%")
 (clpm.store:with-temp-dir (tmp)
   (let* ((manifest (merge-pathnames "clpm.project" tmp))
          (p (clpm.project:make-project
              :name "y"
              :version "0.1.0"
              :systems '("y")
-             :repl-bridge '(:autostart t :preload ("alexandria")))))
+             :repl '(:autostart t :preload ("alexandria")))))
     (clpm.project:write-project-file p manifest)
     (let ((p2 (clpm.project:read-project-file manifest)))
-      (let ((rb (clpm.project:project-repl-bridge p2)))
+      (let ((rb (clpm.project:project-repl p2)))
         (assert-true (eq t (getf rb :autostart)) "lost :autostart on round-trip")
         (assert-equal '("alexandria") (getf rb :preload)))))
   (format t "  round-trip OK~%"))
 
 ;;; ----------------------------------------------------------------------------
-;;; Manifest with NO :repl-bridge field stays NIL (no spurious key in
+;;; Manifest with NO :repl field stays NIL (no spurious key in
 ;;; serialization either).
 
-(format t "Test: omitting :repl-bridge keeps the field NIL~%")
+(format t "Test: omitting :repl keeps the field NIL~%")
 (clpm.store:with-temp-dir (tmp)
   (let ((manifest (merge-pathnames "clpm.project" tmp)))
     (with-open-file (s manifest :direction :output :if-exists :supersede
                                 :external-format :utf-8)
       (write-string "(:project :name \"z\" :version \"0.1.0\" :systems () :registries ())" s))
     (let ((p (clpm.project:read-project-file manifest)))
-      (assert-true (null (clpm.project:project-repl-bridge p))
-                   "expected NIL repl-bridge slot, got ~S"
-                   (clpm.project:project-repl-bridge p))
-      ;; Re-serialize and confirm no :repl-bridge key leaks in.
+      (assert-true (null (clpm.project:project-repl p))
+                   "expected NIL repl slot, got ~S"
+                   (clpm.project:project-repl p))
+      ;; Re-serialize and confirm no :repl key leaks in.
       (let* ((serialized (with-output-to-string (s)
                            (let ((form (clpm.project:serialize-project p)))
                              (write form :stream s :readably t)))))
-        (assert-true (not (search ":REPL-BRIDGE" serialized :test #'char-equal))
-                     "serialized form leaked :repl-bridge: ~A" serialized))))
+        (assert-true (not (search ":REPL" serialized :test #'char-equal))
+                     "serialized form leaked :repl: ~A" serialized))))
   (format t "  omission OK~%"))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Preload pulls :preload systems in addition to :systems.
 
-(format t "Test: %bridge-load-project preloads :repl-bridge :preload entries~%")
+(format t "Test: %bridge-load-project preloads :repl :preload entries~%")
 (clpm.store:with-temp-dir (tmp)
   (let* ((proj (merge-pathnames "myproj/" tmp))
          (clpm-dir (merge-pathnames ".clpm/" proj))
@@ -121,7 +121,7 @@
       (write-string
 "(:project :name \"myproj\" :version \"0.1.0\"
  :systems (\"rb-fixture-a\") :registries ()
- :repl-bridge (:preload (\"rb-fixture-b\")))" s))
+ :repl (:preload (\"rb-fixture-b\")))" s))
     (with-open-file (s asdf-config :direction :output :if-exists :supersede
                                    :external-format :utf-8)
       (format s "(asdf:initialize-source-registry~%  '(:source-registry (:directory ~S) :inherit-configuration))~%"
@@ -142,5 +142,5 @@
                  "rb-fixture-b (in :preload) was not loaded"))
   (format t "  preload-and-systems OK~%"))
 
-(format t "~%REPL-bridge manifest tests PASSED!~%")
+(format t "~%REPL manifest tests PASSED!~%")
 (sb-ext:exit :code 0)

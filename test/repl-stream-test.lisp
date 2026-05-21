@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-stream-test.lisp - streamed stdout/stderr events
+;;;; test/repl-stream-test.lisp - streamed stdout/stderr events
 ;;;;
 ;;;; Acceptance for BRIDGE_V2 #103: a form that prints multiple lines with
 ;;;; a sleep between each yields N stdout events before the terminal frame.
@@ -39,7 +39,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-stream")))
     (unwind-protect
@@ -49,7 +49,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -74,7 +74,7 @@
                                           (sleep 0.02))
                                         :done)")
                                (cons "stream" t))))
-           (resp (clpm.repl-bridge:send-request
+           (resp (clpm.repl:send-request
                   sock "eval"
                   :params params
                   :on-event
@@ -103,9 +103,9 @@
 (format t "Test: --stream events obey the output cap~%")
 (with-daemon
   (lambda (sock)
-    (let* ((limit clpm.repl-bridge::+max-output-bytes+)
+    (let* ((limit clpm.repl::+max-output-bytes+)
            (chunks '())
-           (resp (clpm.repl-bridge:send-request
+           (resp (clpm.repl:send-request
                   sock "eval"
                   :params (list :object
                                 (list
@@ -144,7 +144,7 @@
 (with-daemon
   (lambda (sock)
     (let* ((events (make-array 0 :fill-pointer 0 :adjustable t))
-           (resp (clpm.repl-bridge:send-request
+           (resp (clpm.repl:send-request
                   sock "eval"
                   :params (list :object
                                 (list (cons "form"
@@ -158,5 +158,5 @@
                    "expected zero events, got ~D" (length events)))))
 (format t "  v1 contract preserved (no events) OK~%")
 
-(format t "~%REPL-bridge streaming tests PASSED!~%")
+(format t "~%REPL streaming tests PASSED!~%")
 (sb-ext:exit :code 0)

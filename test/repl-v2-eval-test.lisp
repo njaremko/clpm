@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-v2-eval-test.lisp - v2 eval payload semantics.
+;;;; test/repl-v2-eval-test.lisp - v2 eval payload semantics.
 ;;;;
 ;;;; Covers BRIDGE_V2 #150-#155:
 ;;;;   - Multiple values returned as a JSON array (with v1-compat scalar)
@@ -49,7 +49,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-v2")))
     (unwind-protect
@@ -59,7 +59,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -75,7 +75,7 @@
                 (append (list (cons "form" form))
                         (loop for (k v) on extra by #'cddr
                               collect (cons k v))))))
-    (clpm.repl-bridge:send-request sock "eval"
+    (clpm.repl:send-request sock "eval"
                                     :params params)))
 
 ;;; ----------------------------------------------------------------------------
@@ -202,5 +202,5 @@
                    "expected `...' truncation marker, got ~S" v))))
 (format t "  print_length OK~%")
 
-(format t "~%REPL-bridge v2 eval tests PASSED!~%")
+(format t "~%REPL v2 eval tests PASSED!~%")
 (sb-ext:exit :code 0)

@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-caps-test.lisp - output and request size caps
+;;;; test/repl-caps-test.lisp - output and request size caps
 
 (require :asdf)
 (require :sb-bsd-sockets)
@@ -38,7 +38,7 @@
            (sb-thread:make-thread
             (lambda ()
               (handler-case
-                  (clpm.repl-bridge:start-server :socket-path tmp)
+                  (clpm.repl:start-server :socket-path tmp)
                 (error (c)
                   (format *error-output* "daemon: ~A~%" c))))
             :name "test-bridge")))
@@ -48,7 +48,7 @@
                  while (not (probe-file tmp))
                  do (sleep 0.05))
            (funcall fn tmp))
-      (handler-case (clpm.repl-bridge:send-request tmp "shutdown") (error () nil))
+      (handler-case (clpm.repl:send-request tmp "shutdown") (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p server-thread)
             do (sleep 0.05))
@@ -60,7 +60,7 @@
 (with-daemon
     (lambda (sock)
       ;; Print 2 MB of `x`. Should be truncated to 1 MB.
-      (let* ((resp (clpm.repl-bridge:send-request
+      (let* ((resp (clpm.repl:send-request
                     sock "eval"
                     :params (list :object
                                   (list (cons "form"
@@ -100,10 +100,10 @@
                          (lookup err "message"))))
         (ignore-errors (sb-bsd-sockets:socket-close s)))
       ;; Daemon still responsive.
-      (let ((r (clpm.repl-bridge:send-request sock "ping")))
+      (let ((r (clpm.repl:send-request sock "ping")))
         (assert-true (lookup r "result")
                      "daemon should still respond after rejecting oversized req"))))
 (format t "  OK~%")
 
-(format t "~%REPL-bridge caps tests PASSED!~%")
+(format t "~%REPL caps tests PASSED!~%")
 (sb-ext:exit :code 0)

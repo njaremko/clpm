@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-eval-test.lisp - eval worker, output capture, conditions
+;;;; test/repl-eval-test.lisp - eval worker, output capture, conditions
 
 (require :asdf)
 (require :sb-bsd-sockets)
@@ -47,7 +47,7 @@
            (sb-thread:make-thread
             (lambda ()
               (handler-case
-                  (clpm.repl-bridge:start-server :socket-path tmp)
+                  (clpm.repl:start-server :socket-path tmp)
                 (error (c)
                   (format *error-output* "daemon: ~A~%" c))))
             :name "test-bridge")))
@@ -59,7 +59,7 @@
            (unless (probe-file tmp)
              (fail "daemon failed to bind"))
            (funcall fn tmp))
-      (handler-case (clpm.repl-bridge:send-request tmp "shutdown") (error () nil))
+      (handler-case (clpm.repl:send-request tmp "shutdown") (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p server-thread)
             do (sleep 0.05))
@@ -68,7 +68,7 @@
       (ignore-errors (delete-file tmp)))))
 
 (defun do-eval (sock form &optional package)
-  (clpm.repl-bridge:send-request
+  (clpm.repl:send-request
    sock "eval"
    :params (list :object
                  (append (list (cons "form" form))
@@ -211,7 +211,7 @@
 (with-daemon
     (lambda (sock)
       (do-eval sock "(defun bridge-test-foo () 1)")
-      (let* ((resp (clpm.repl-bridge:send-request sock "list-redefinitions"))
+      (let* ((resp (clpm.repl:send-request sock "list-redefinitions"))
              (result (lookup resp "result"))
              (entries (array-items (lookup result "entries"))))
         (assert-true (some (lambda (e)
@@ -224,10 +224,10 @@
 (format t "Test: set-package method~%")
 (with-daemon
     (lambda (sock)
-      (let* ((r1 (clpm.repl-bridge:send-request
+      (let* ((r1 (clpm.repl:send-request
                   sock "set-package"
                   :params (list :object (list (cons "name" "common-lisp")))))
-             (r2 (clpm.repl-bridge:send-request sock "current-package")))
+             (r2 (clpm.repl:send-request sock "current-package")))
         (assert-string= "COMMON-LISP" (lookup (lookup r1 "result") "package"))
         (assert-string= "COMMON-LISP" (lookup (lookup r2 "result") "package")))))
 (format t "  OK~%")
@@ -235,7 +235,7 @@
 (format t "Test: describe method~%")
 (with-daemon
     (lambda (sock)
-      (let* ((resp (clpm.repl-bridge:send-request
+      (let* ((resp (clpm.repl:send-request
                     sock "describe"
                     :params (list :object (list (cons "symbol" "car")
                                                 (cons "package" "common-lisp")))))
@@ -250,19 +250,19 @@
     (lambda (sock)
       (do-eval sock "(defun bridge-test-bar () 2)")
       (let ((before (array-items
-                     (lookup (lookup (clpm.repl-bridge:send-request
+                     (lookup (lookup (clpm.repl:send-request
                                       sock "list-redefinitions")
                                      "result")
                              "entries"))))
         (assert-true (plusp (length before)) "expected entries before reset"))
-      (clpm.repl-bridge:send-request sock "reset")
+      (clpm.repl:send-request sock "reset")
       (let ((after (array-items
-                    (lookup (lookup (clpm.repl-bridge:send-request
+                    (lookup (lookup (clpm.repl:send-request
                                      sock "list-redefinitions")
                                     "result")
                             "entries"))))
         (assert-eql 0 (length after)))))
 (format t "  OK~%")
 
-(format t "~%REPL-bridge eval tests PASSED!~%")
+(format t "~%REPL eval tests PASSED!~%")
 (sb-ext:exit :code 0)

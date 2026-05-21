@@ -1,4 +1,4 @@
-;;;; repl_bridge.lisp - Persistent Lisp image driven over a Unix-socket JSON-RPC
+;;;; repl.lisp - Persistent Lisp image driven over a Unix-socket JSON-RPC
 ;;;;
 ;;;; The daemon listens on a local socket and answers one request at a time.
 ;;;; Each request is one line of JSON (per BRIDGE.md). Eval happens on a
@@ -15,7 +15,7 @@
   #+sbcl (require :sb-posix)
   #+sbcl (require :sb-introspect))
 
-(in-package #:clpm.repl-bridge)
+(in-package #:clpm.repl)
 
 ;;; --------------------------------------------------------------------------
 ;;; Protocol helpers
@@ -151,8 +151,8 @@ writes are silently dropped and `truncated?' flips to T."
   (limit +max-output-bytes+ :type fixnum)
   (used 0 :type fixnum)
   (truncated? nil :type boolean)
-  (mutex (clpm.repl-bridge.compat:make-mutex
-          :name "clpm.repl-bridge.bounded-sink")))
+  (mutex (clpm.repl.compat:make-mutex
+          :name "clpm.repl.bounded-sink")))
 
 (defun %bounded-sink-accept-string (sink string start end)
   "Return the prefix of STRING[start,end) still admitted by SINK.
@@ -163,7 +163,7 @@ the user code writes, not after evaluation unwinds."
     (cond
       ((<= len 0) "")
       (t
-       (clpm.repl-bridge.compat:with-mutex ((bounded-sink-mutex sink))
+       (clpm.repl.compat:with-mutex ((bounded-sink-mutex sink))
          (let ((remaining (- (bounded-sink-limit sink)
                              (bounded-sink-used sink))))
            (cond
@@ -183,8 +183,8 @@ the user code writes, not after evaluation unwinds."
   ((sink :initarg :sink :reader bounded-output-stream-sink)
    (full :initform (make-string-output-stream)
          :reader bounded-output-stream-full)
-   (mutex :initform (clpm.repl-bridge.compat:make-mutex
-                     :name "clpm.repl-bridge.bounded-output")
+   (mutex :initform (clpm.repl.compat:make-mutex
+                     :name "clpm.repl.bounded-output")
           :reader bounded-output-stream-mutex)))
 
 #+sbcl
@@ -195,7 +195,7 @@ the user code writes, not after evaluation unwinds."
                    0
                    1)))
     (when (plusp (length accepted))
-      (clpm.repl-bridge.compat:with-mutex
+      (clpm.repl.compat:with-mutex
           ((bounded-output-stream-mutex s))
         (write-string accepted (bounded-output-stream-full s)))))
   ch)
@@ -209,7 +209,7 @@ the user code writes, not after evaluation unwinds."
                    start
                    (or end (length string)))))
     (when (plusp (length accepted))
-      (clpm.repl-bridge.compat:with-mutex
+      (clpm.repl.compat:with-mutex
           ((bounded-output-stream-mutex s))
         (write-string accepted (bounded-output-stream-full s)))))
   string)
@@ -231,7 +231,7 @@ the user code writes, not after evaluation unwinds."
 
 #+sbcl
 (defun bounded-output-stream-final-text (s)
-  (clpm.repl-bridge.compat:with-mutex
+  (clpm.repl.compat:with-mutex
       ((bounded-output-stream-mutex s))
     (get-output-stream-string (bounded-output-stream-full s))))
 
@@ -286,8 +286,8 @@ the user code writes, not after evaluation unwinds."
    (buffer :initform (make-array 0 :element-type 'character
                                    :fill-pointer 0 :adjustable t)
            :reader streaming-output-stream-buffer)
-   (mutex :initform (clpm.repl-bridge.compat:make-mutex
-                     :name "clpm.repl-bridge.stream-buf")
+   (mutex :initform (clpm.repl.compat:make-mutex
+                     :name "clpm.repl.stream-buf")
           :reader streaming-output-stream-mutex)
    (full :initform (make-string-output-stream)
          :reader streaming-output-stream-full)
@@ -317,7 +317,7 @@ Called holding the stream's mutex."
                    0
                    1)))
     (when (plusp (length accepted))
-      (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+      (clpm.repl.compat:with-mutex ((streaming-output-stream-mutex s))
         (let ((accepted-char (schar accepted 0)))
           (vector-push-extend accepted-char (streaming-output-stream-buffer s))
           (write-char accepted-char (streaming-output-stream-full s))
@@ -337,7 +337,7 @@ Called holding the stream's mutex."
                    start
                    (or end (length string)))))
     (when (plusp (length accepted))
-      (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+      (clpm.repl.compat:with-mutex ((streaming-output-stream-mutex s))
         (loop for i from 0 below (length accepted)
               do (vector-push-extend (schar accepted i)
                                      (streaming-output-stream-buffer s)))
@@ -357,19 +357,19 @@ Called holding the stream's mutex."
 
 #+sbcl
 (defmethod sb-gray:stream-finish-output ((s streaming-output-stream))
-  (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+  (clpm.repl.compat:with-mutex ((streaming-output-stream-mutex s))
     (%streaming-flush s)))
 
 #+sbcl
 (defmethod sb-gray:stream-force-output ((s streaming-output-stream))
-  (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+  (clpm.repl.compat:with-mutex ((streaming-output-stream-mutex s))
     (%streaming-flush s)))
 
 #+sbcl
 (defun streaming-output-stream-final-text (s)
   "Drain S's residual buffer and return the full captured text. Idempotent
 once called; subsequent reads return the empty string."
-  (clpm.repl-bridge.compat:with-mutex ((streaming-output-stream-mutex s))
+  (clpm.repl.compat:with-mutex ((streaming-output-stream-mutex s))
     (%streaming-flush s))
   (get-output-stream-string (streaming-output-stream-full s)))
 
@@ -399,7 +399,7 @@ single (read-line) returns the answer."
                  (length (query-input-stream-buffer s)))
              (not (query-input-stream-eof? s)))
     (%emit-event (query-input-stream-ctx s) "query")
-    (let ((reply (clpm.repl-bridge.compat:receive-message
+    (let ((reply (clpm.repl.compat:receive-message
                   (query-input-stream-mailbox s))))
       (cond
         ((eq reply :eof) (setf (query-input-stream-eof? s) t))
@@ -436,7 +436,7 @@ single (read-line) returns the answer."
 ;;; gives us free authentication (only the project owner's processes can
 ;;; connect). Windows lacked AF_UNIX until recent builds, so we fall back to
 ;;; a loopback TCP socket on a random ephemeral port and authenticate via a
-;;; 32-hex-char shared token written to `.clpm/repl-bridge.port'.
+;;; 32-hex-char shared token written to `.clpm/repl.port'.
 ;;; --------------------------------------------------------------------------
 
 (defstruct transport
@@ -445,7 +445,7 @@ single (read-line) returns the answer."
 KIND is :unix or :tcp.
 PATH is the filesystem path the transport advertises:
   - :unix -> the Unix-domain socket file (mode 0600)
-  - :tcp  -> the `.clpm/repl-bridge.port' file containing `<port>~%<token>~%'
+  - :tcp  -> the `.clpm/repl.port' file containing `<port>~%<token>~%'
 TOKEN is a 32-hex-char shared secret, used only with :tcp.
 LISTENER and PORT are filled in once the listener is opened."
   (kind :unix :type (member :unix :tcp))
@@ -592,7 +592,7 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
    (socket :initform nil :accessor server-socket)
    (workers :initform (make-hash-table :test 'equal)
             :reader server-workers)
-   (workers-mutex :initform (clpm.repl-bridge.compat:make-mutex :name "clpm.repl-bridge.workers")
+   (workers-mutex :initform (clpm.repl.compat:make-mutex :name "clpm.repl.workers")
                   :reader server-workers-mutex)
    (concurrent-counter :initform 0 :accessor server-concurrent-counter)
    (started-at :initform (get-universal-time) :reader server-started-at)
@@ -601,39 +601,39 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
    ;; surface a per-method histogram, and by request logging.
    (method-counts :initform (make-hash-table :test 'equal)
                   :reader server-method-counts)
-   (method-counts-mutex :initform (clpm.repl-bridge.compat:make-mutex
-                                   :name "clpm.repl-bridge.counts")
+   (method-counts-mutex :initform (clpm.repl.compat:make-mutex
+                                   :name "clpm.repl.counts")
                         :reader server-method-counts-mutex)
    (recent-error-count :initform 0 :accessor server-recent-error-count)
    (inspectors :initform (make-hash-table :test 'equal)
                :reader server-inspectors)
-   (inspectors-mutex :initform (clpm.repl-bridge.compat:make-mutex
-                                :name "clpm.repl-bridge.inspectors")
+   (inspectors-mutex :initform (clpm.repl.compat:make-mutex
+                                :name "clpm.repl.inspectors")
                      :reader server-inspectors-mutex)
    (inspector-counter :initform 0 :accessor server-inspector-counter)
    (watches :initform (make-hash-table :test 'eql)
             :reader server-watches)
-   (watches-mutex :initform (clpm.repl-bridge.compat:make-mutex
-                             :name "clpm.repl-bridge.watches")
+   (watches-mutex :initform (clpm.repl.compat:make-mutex
+                             :name "clpm.repl.watches")
                   :reader server-watches-mutex)
    (watch-counter :initform 0 :accessor server-watch-counter)
    (debug-sessions :initform (make-hash-table :test 'eql)
                    :reader server-debug-sessions)
-   (debug-sessions-mutex :initform (clpm.repl-bridge.compat:make-mutex
-                                    :name "clpm.repl-bridge.debug-sessions")
+   (debug-sessions-mutex :initform (clpm.repl.compat:make-mutex
+                                    :name "clpm.repl.debug-sessions")
                          :reader server-debug-sessions-mutex)
    (debug-session-counter :initform 0 :accessor server-debug-session-counter)
    (shutdown-requested? :initform nil :accessor server-shutdown-requested?)
    (event-log :initform nil :accessor server-event-log)))
 
 (defparameter +max-log-bytes+ (* 10 1024 1024)
-  "Rotate `.clpm/repl-bridge.log' once it grows past this many bytes.")
+  "Rotate `.clpm/repl.log' once it grows past this many bytes.")
 
 (defstruct event-log
   (path "" :type string)
   (stream nil)
   (bytes-written 0 :type unsigned-byte)
-  (mutex (clpm.repl-bridge.compat:make-mutex :name "clpm.repl-bridge.log")))
+  (mutex (clpm.repl.compat:make-mutex :name "clpm.repl.log")))
 
 (defun %rfc3339-now ()
   "Return the current time as an RFC-3339 / ISO-8601 string in UTC, e.g.
@@ -698,7 +698,7 @@ is NIL."
            (line (with-output-to-string (b)
                    (clpm.io.json:write-json entry b)
                    (write-char #\Newline b))))
-      (clpm.repl-bridge.compat:with-mutex ((event-log-mutex log))
+      (clpm.repl.compat:with-mutex ((event-log-mutex log))
         (when (event-log-stream log)
           (handler-case
               (progn
@@ -810,7 +810,7 @@ recent call (closest to the error)."
 
 (defun %register-debug-session (server session)
   "Give SESSION a server-owned id and make it addressable by later RPCs."
-  (clpm.repl-bridge.compat:with-mutex ((server-debug-sessions-mutex server))
+  (clpm.repl.compat:with-mutex ((server-debug-sessions-mutex server))
     (let ((id (incf (server-debug-session-counter server))))
       (setf (debug-session-id session) id
             (gethash id (server-debug-sessions server)) session)
@@ -820,20 +820,20 @@ recent call (closest to the error)."
   "Remove SESSION from the server-owned debug-session table."
   (let ((id (and session (debug-session-id session))))
     (when id
-      (clpm.repl-bridge.compat:with-mutex
+      (clpm.repl.compat:with-mutex
           ((server-debug-sessions-mutex server))
         (remhash id (server-debug-sessions server))))))
 
 (defun %find-debug-session (server id)
   "Return the active debug session named by integer ID, or NIL."
   (when (integerp id)
-    (clpm.repl-bridge.compat:with-mutex
+    (clpm.repl.compat:with-mutex
         ((server-debug-sessions-mutex server))
       (gethash id (server-debug-sessions server)))))
 
 (defun %all-debug-sessions (server)
   "Snapshot every active server-owned debug session."
-  (clpm.repl-bridge.compat:with-mutex
+  (clpm.repl.compat:with-mutex
       ((server-debug-sessions-mutex server))
     (loop for session being the hash-values of (server-debug-sessions server)
           collect session)))
@@ -847,7 +847,7 @@ recent call (closest to the error)."
                   "session" (debug-session-id session)
                   "worker" (debug-session-worker-name session)
                   "reason" reason)
-      (clpm.repl-bridge.compat:send-message mailbox (list :abort nil)))))
+      (clpm.repl.compat:send-message mailbox (list :abort nil)))))
 
 (defun %debug-session-json (session)
   (%json-object
@@ -1103,7 +1103,7 @@ must not block the eval response."
                         #+sbcl (%structured-backtrace)
                         ;; Generic fallback: princ each compat-layer frame.
                         (handler-case
-                            (let* ((all (clpm.repl-bridge.compat:list-backtrace))
+                            (let* ((all (clpm.repl.compat:list-backtrace))
                                    (head (subseq all 0 (min (length all)
                                                             +max-backtrace-frames+))))
                               (loop for f in head
@@ -1419,11 +1419,11 @@ implementation-supported debug environment instead of a guessed LET wrapper."
 
 (defun %send-debug-action-result (mailbox payload)
   (when mailbox
-    (clpm.repl-bridge.compat:send-message mailbox (list :result payload))))
+    (clpm.repl.compat:send-message mailbox (list :result payload))))
 
 (defun %send-debug-action-error (mailbox code message)
   (when mailbox
-    (clpm.repl-bridge.compat:send-message mailbox
+    (clpm.repl.compat:send-message mailbox
                                           (list :error code message))))
 
 (defun %debug-action-result (session outcome)
@@ -1476,7 +1476,7 @@ restart (unwinds) or returns NIL (we let the error propagate)."
                           "worker" worker-name
                           "condition" json-condition))
            (loop
-             (let ((action (clpm.repl-bridge.compat:receive-message
+             (let ((action (clpm.repl.compat:receive-message
                             (eval-job-debug-mailbox job))))
                (case (first action)
                  (:invoke-restart
@@ -1848,7 +1848,7 @@ while keeping the timer fired count small."
                                     :observed (if (eq kind :real-ms)
                                                   elapsed consumed))))))
                    (error () nil)))
-               :name "clpm.repl-bridge.cap"
+               :name "clpm.repl.cap"
                :thread t)))
         (sb-ext:schedule-timer timer 1/4 :repeat-interval 1/4)
         timer))))
@@ -1873,7 +1873,7 @@ while keeping the timer fired count small."
                                      "gc_run_time"
                                      sb-ext:*gc-real-time*)
                       (error () nil))))
-                :name "clpm.repl-bridge.heartbeat"
+                :name "clpm.repl.heartbeat"
                 :thread t)))
     (sb-ext:schedule-timer timer
                            +heartbeat-interval-seconds+
@@ -1887,7 +1887,7 @@ result-mailbox. Returns when a `:stop' sentinel arrives. Binds
 side-effects on the right worker."
   (let ((mailbox (worker-mailbox worker)))
     (loop
-      (let ((job (clpm.repl-bridge.compat:receive-message mailbox)))
+      (let ((job (clpm.repl.compat:receive-message mailbox)))
         (cond
           ((eq job :stop) (return))
           (t
@@ -1915,20 +1915,20 @@ side-effects on the right worker."
              (setf (worker-state worker) :idle
                    (worker-current-job worker) nil
                    (worker-last-active-at worker) (get-universal-time))
-             (clpm.repl-bridge.compat:send-message (eval-job-result-mailbox job) result))))))))
+             (clpm.repl.compat:send-message (eval-job-result-mailbox job) result))))))))
 
 (defun %make-worker (server name &key concurrent?)
   "Spawn a fresh worker thread and register it under NAME. Caller must hold
 SERVER-WORKERS-MUTEX."
-  (let* ((mailbox (clpm.repl-bridge.compat:make-mailbox))
+  (let* ((mailbox (clpm.repl.compat:make-mailbox))
          (worker (make-worker :name name
                               :mailbox mailbox
                               :package (find-package "COMMON-LISP-USER")
                               :concurrent? concurrent?)))
     (setf (worker-thread worker)
-          (clpm.repl-bridge.compat:make-thread
+          (clpm.repl.compat:make-thread
            (lambda () (%worker-loop worker))
-           :name (format nil "clpm.repl-bridge.worker[~A]" name)))
+           :name (format nil "clpm.repl.worker[~A]" name)))
     (setf (gethash name (server-workers server)) worker)
     worker))
 
@@ -1942,11 +1942,11 @@ When NAME existed but its thread is dead (unexpected crash, not a
 clean `:stop'), the replacement worker is marked RESTARTED? so the
 next eval response can surface `worker_restarted: true' to the
 client. An event-log entry records the death."
-  (clpm.repl-bridge.compat:with-mutex ((server-workers-mutex server))
+  (clpm.repl.compat:with-mutex ((server-workers-mutex server))
     (let ((existing (gethash name (server-workers server))))
       (cond
         ((and existing
-              (clpm.repl-bridge.compat:thread-alive-p (worker-thread existing)))
+              (clpm.repl.compat:thread-alive-p (worker-thread existing)))
          existing)
         (existing
          (remhash name (server-workers server))
@@ -1961,32 +1961,32 @@ client. An event-log entry records the death."
 (defun %fresh-concurrent-worker (server)
   "Spawn a one-shot worker for `eval --concurrent'. The name is
 auto-generated and the worker is destroyed once the eval completes."
-  (clpm.repl-bridge.compat:with-mutex ((server-workers-mutex server))
+  (clpm.repl.compat:with-mutex ((server-workers-mutex server))
     (let* ((n (incf (server-concurrent-counter server)))
            (name (format nil "$concurrent-~D" n)))
       (%make-worker server name :concurrent? t))))
 
 (defun %find-worker (server name)
   "Return the worker named NAME, or NIL if unknown / dead."
-  (clpm.repl-bridge.compat:with-mutex ((server-workers-mutex server))
+  (clpm.repl.compat:with-mutex ((server-workers-mutex server))
     (gethash name (server-workers server))))
 
 (defun %remove-worker (server name)
   "Remove NAME from the workers table. Caller is responsible for stopping
 the thread before calling."
-  (clpm.repl-bridge.compat:with-mutex ((server-workers-mutex server))
+  (clpm.repl.compat:with-mutex ((server-workers-mutex server))
     (remhash name (server-workers server))))
 
 (defun %all-workers (server)
   "Snapshot of all workers as a list. Thread-safe."
-  (clpm.repl-bridge.compat:with-mutex ((server-workers-mutex server))
+  (clpm.repl.compat:with-mutex ((server-workers-mutex server))
     (loop for w being the hash-values of (server-workers server) collect w)))
 
 (defun %kill-worker (server worker)
   "Terminate WORKER's thread (if alive) and remove it from the registry."
-  (when (clpm.repl-bridge.compat:thread-alive-p (worker-thread worker))
+  (when (clpm.repl.compat:thread-alive-p (worker-thread worker))
     (setf (worker-state worker) :dead)
-    (clpm.repl-bridge.compat:terminate-thread (worker-thread worker)))
+    (clpm.repl.compat:terminate-thread (worker-thread worker)))
   (%remove-worker server (worker-name worker)))
 
 (defun %interrupt-worker (server &optional (name +default-worker-name+))
@@ -2006,11 +2006,11 @@ care about, instead of collapsing them all into a silent T/NIL:
     (cond
       ((and (null w) default?) :idle)
       ((null w) :no-such-worker)
-      ((not (clpm.repl-bridge.compat:thread-alive-p (worker-thread w)))
+      ((not (clpm.repl.compat:thread-alive-p (worker-thread w)))
        :no-such-worker)
       ((null (worker-current-job w)) :idle)
       (t
-       (clpm.repl-bridge.compat:interrupt-thread
+       (clpm.repl.compat:interrupt-thread
         (worker-thread w)
         (lambda () (signal 'user-interrupt)))
        :interrupted))))
@@ -2213,7 +2213,7 @@ error."
 (defun %method-counts-json (server)
   "Snapshot of `{method: {total, errors}}' for ping's observability
 payload."
-  (clpm.repl-bridge.compat:with-mutex ((server-method-counts-mutex server))
+  (clpm.repl.compat:with-mutex ((server-method-counts-mutex server))
     (let* ((tbl (server-method-counts server))
            (pairs (loop for m being the hash-keys of tbl using (hash-value v)
                         collect (cons m (list :object
@@ -2239,7 +2239,7 @@ so clients can spot a misbehaving RPC without scraping the event log."
     (%success-response
      id
      (%json-object
-      "pid" (clpm.repl-bridge.compat:getpid)
+      "pid" (clpm.repl.compat:getpid)
       "uptime_ms" (* 1000 (- (get-universal-time)
                              (server-started-at server)))
       "lisp" (format nil "~A ~A"
@@ -2434,10 +2434,10 @@ Response `outcome' field:
              (cond
                (w
                 (let ((preserved-pkg (worker-package w)))
-                  (when (clpm.repl-bridge.compat:thread-alive-p (worker-thread w))
+                  (when (clpm.repl.compat:thread-alive-p (worker-thread w))
                     (%log-event (server-event-log server)
                                 "worker-terminated" "worker" wname)
-                    (clpm.repl-bridge.compat:terminate-thread (worker-thread w)))
+                    (clpm.repl.compat:terminate-thread (worker-thread w)))
                   (%remove-worker server wname)
                   (let ((fresh (%ensure-worker server :name wname)))
                     (setf (worker-package fresh) preserved-pkg)))
@@ -2477,7 +2477,7 @@ universal time, used for `age_seconds'."
                 (cons "concurrent" (worker-concurrent? worker))
                 (cons "alive"
                       (and (worker-thread worker)
-                           (clpm.repl-bridge.compat:thread-alive-p
+                           (clpm.repl.compat:thread-alive-p
                             (worker-thread worker))
                            t))))))
 
@@ -2724,7 +2724,7 @@ out so the watcher's `watch' request finally completes."
     (loop for (f . mt) in (%watch-scan watch)
           do (setf (gethash f (watch-mtimes watch)) mt))
     (loop
-      (let ((msg (clpm.repl-bridge.compat:receive-message-no-hang mbox)))
+      (let ((msg (clpm.repl.compat:receive-message-no-hang mbox)))
         (when (cdr msg)
           (case (car msg)
             (:stop
@@ -2735,7 +2735,7 @@ out so the watcher's `watch' request finally completes."
                   (%success-response (request-context-id ctx)
                                      (%json-object "id" (watch-id watch)
                                                    "unwatched" t)))))
-             (clpm.repl-bridge.compat:with-mutex
+             (clpm.repl.compat:with-mutex
                  ((server-watches-mutex server))
                (remhash (watch-id watch) (server-watches server)))
              (return)))))
@@ -2746,7 +2746,7 @@ out so the watcher's `watch' request finally completes."
 
 (defun %make-watch (server dir glob auto-revert? ctx)
   "Spawn a fresh watch, register it, and start its polling thread."
-  (clpm.repl-bridge.compat:with-mutex ((server-watches-mutex server))
+  (clpm.repl.compat:with-mutex ((server-watches-mutex server))
     (let* ((id (incf (server-watch-counter server)))
            (w (make-watch :id id
                           :dir dir
@@ -2754,24 +2754,24 @@ out so the watcher's `watch' request finally completes."
                           :auto-revert? auto-revert?
                           :ctx ctx
                           :control-mailbox
-                          (clpm.repl-bridge.compat:make-mailbox))))
+                          (clpm.repl.compat:make-mailbox))))
       (setf (watch-thread w)
-            (clpm.repl-bridge.compat:make-thread
+            (clpm.repl.compat:make-thread
              (lambda () (%watch-loop server w))
-             :name (format nil "clpm.repl-bridge.watch[~D]" id)))
+             :name (format nil "clpm.repl.watch[~D]" id)))
       (setf (gethash id (server-watches server)) w)
       w)))
 
 (defun %find-watch (server id)
-  (clpm.repl-bridge.compat:with-mutex ((server-watches-mutex server))
+  (clpm.repl.compat:with-mutex ((server-watches-mutex server))
     (gethash id (server-watches server))))
 
 (defun %all-watches (server)
-  (clpm.repl-bridge.compat:with-mutex ((server-watches-mutex server))
+  (clpm.repl.compat:with-mutex ((server-watches-mutex server))
     (loop for v being the hash-values of (server-watches server) collect v)))
 
 (defun %stop-watch (watch)
-  (clpm.repl-bridge.compat:send-message (watch-control-mailbox watch) :stop))
+  (clpm.repl.compat:send-message (watch-control-mailbox watch) :stop))
 
 (%register-method
  (make-method-spec
@@ -2841,7 +2841,7 @@ version (because the file was just LOADed)."
                   "glob" (watch-glob w)
                   "auto_revert" (watch-auto-revert? w)
                   "alive" (and (watch-thread w)
-                               (clpm.repl-bridge.compat:thread-alive-p
+                               (clpm.repl.compat:thread-alive-p
                                 (watch-thread w))
                                t)))
                (%all-watches server))))))))
@@ -3766,7 +3766,7 @@ recorded by ASDF, plus its declared and resolved dependencies."
   view-state)
 
 (defun %allocate-inspector (server value mutable?)
-  (clpm.repl-bridge.compat:with-mutex
+  (clpm.repl.compat:with-mutex
       ((server-inspectors-mutex server))
     (incf (server-inspector-counter server))
     (let* ((id (format nil "ins-~A" (server-inspector-counter server)))
@@ -3778,12 +3778,12 @@ recorded by ASDF, plus its declared and resolved dependencies."
       sess)))
 
 (defun %lookup-inspector (server id)
-  (clpm.repl-bridge.compat:with-mutex
+  (clpm.repl.compat:with-mutex
       ((server-inspectors-mutex server))
     (gethash id (server-inspectors server))))
 
 (defun %drop-inspector (server id)
-  (clpm.repl-bridge.compat:with-mutex
+  (clpm.repl.compat:with-mutex
       ((server-inspectors-mutex server))
     (remhash id (server-inspectors server))))
 
@@ -4063,7 +4063,7 @@ new focus, or :no-part on out-of-range."
     (%success-response
      id
      (%json-object
-      "pid" (clpm.repl-bridge.compat:getpid)
+      "pid" (clpm.repl.compat:getpid)
       "lisp" (format nil "~A ~A"
                      (lisp-implementation-type)
                      (lisp-implementation-version))
@@ -4756,11 +4756,11 @@ as a prin1 string, or NIL for `(values)')."
        (%error-response id "protocol-error" "missing `form` param"))
       (t
        (let* ((mailbox (worker-mailbox worker))
-              (reply-box (clpm.repl-bridge.compat:make-mailbox))
+              (reply-box (clpm.repl.compat:make-mailbox))
               (query-box (and (getf options :query-interactive)
-                              (clpm.repl-bridge.compat:make-mailbox)))
+                              (clpm.repl.compat:make-mailbox)))
               (debug-box (and (getf options :debug)
-                              (clpm.repl-bridge.compat:make-mailbox)))
+                              (clpm.repl.compat:make-mailbox)))
               (job (make-eval-job
                     :form form
                     :package-override package-override
@@ -4781,16 +4781,16 @@ as a prin1 string, or NIL for `(values)')."
            (when (and ctx (request-context-cstate ctx))
              (%register-in-flight (request-context-cstate ctx) id job))
            (incf (server-eval-count server))
-           (clpm.repl-bridge.compat:send-message mailbox job)
+           (clpm.repl.compat:send-message mailbox job)
            (let ((result
                    ;; #212: poll the reply mailbox so we can notice a
                    ;; worker thread that died mid-eval (and never gets
                    ;; to send us a result).
                    (loop
-                     (let ((msg (clpm.repl-bridge.compat:receive-message-no-hang
+                     (let ((msg (clpm.repl.compat:receive-message-no-hang
                                  reply-box)))
                        (when (cdr msg) (return (car msg))))
-                     (unless (clpm.repl-bridge.compat:thread-alive-p
+                     (unless (clpm.repl.compat:thread-alive-p
                               (worker-thread worker))
                        (%log-event (server-event-log server) "worker-died"
                                    "worker" (worker-name worker)
@@ -4821,7 +4821,7 @@ as a prin1 string, or NIL for `(values)')."
                ;; One-shot: teardown after the eval completes (success or
                ;; failure). Best-effort; if the worker is wedged the
                ;; supervisor can still see it via `list-workers'.
-               (clpm.repl-bridge.compat:send-message mailbox :stop)
+               (clpm.repl.compat:send-message mailbox :stop)
                (%remove-worker server (worker-name worker)))
              (cond
                ((null (eval-result-code result))
@@ -4923,7 +4923,7 @@ thread sees the same instance; only one daemon may run per process."
            (%open-listener transport)
            (setf (server-socket server) (transport-listener transport))
            (%log-event (server-event-log server) "start"
-                       "pid" (clpm.repl-bridge.compat:getpid)
+                       "pid" (clpm.repl.compat:getpid)
                        "transport" (string-downcase (string kind))
                        "path" advertise
                        "port" (transport-port transport))
@@ -4940,7 +4940,7 @@ thread sees the same instance; only one daemon may run per process."
                  (let ((conn (sb-bsd-sockets:socket-accept
                               (transport-listener transport))))
                    (%log-event (server-event-log server) "accept")
-                   (clpm.repl-bridge.compat:make-thread
+                   (clpm.repl.compat:make-thread
                     (let ((c conn))
                       (lambda ()
                         (unwind-protect
@@ -4951,9 +4951,9 @@ thread sees the same instance; only one daemon may run per process."
                                              "handler-error"
                                              "error" (princ-to-string e))
                                  (format *error-output*
-                                         "repl-bridge handler error: ~A~%" e)))
+                                         "repl handler error: ~A~%" e)))
                           (ignore-errors (sb-bsd-sockets:socket-close c)))))
-                    :name "clpm.repl-bridge.conn"))
+                    :name "clpm.repl.conn"))
                (error ()
                  (when (server-shutdown-requested? server)
                    (loop-finish))))))
@@ -4961,9 +4961,9 @@ thread sees the same instance; only one daemon may run per process."
 	      ;; before the workers it might be loading code into.
 	      (dolist (w (%all-watches server))
 	        (handler-case (%stop-watch w) (error () nil))
-	        (when (clpm.repl-bridge.compat:thread-alive-p (watch-thread w))
+	        (when (clpm.repl.compat:thread-alive-p (watch-thread w))
 	          (handler-case
-	              (clpm.repl-bridge.compat:join-thread (watch-thread w))
+	              (clpm.repl.compat:join-thread (watch-thread w))
 	            (error () nil))))
 	      ;; A worker in the debugger is blocked on its debug mailbox, not on
 	      ;; the worker mailbox. Resolve those stops first so ordinary worker
@@ -4975,10 +4975,10 @@ thread sees the same instance; only one daemon may run per process."
 	      ;; Stop every worker we spawned. Best-effort: the daemon is going
 	      ;; away, so failure to join is acceptable.
 	      (dolist (w (%all-workers server))
-	        (when (clpm.repl-bridge.compat:thread-alive-p (worker-thread w))
-	          (clpm.repl-bridge.compat:send-message (worker-mailbox w) :stop)
+	        (when (clpm.repl.compat:thread-alive-p (worker-thread w))
+	          (clpm.repl.compat:send-message (worker-mailbox w) :stop)
           (handler-case
-              (clpm.repl-bridge.compat:join-thread (worker-thread w))
+              (clpm.repl.compat:join-thread (worker-thread w))
             (error () nil))))
       (%log-event (server-event-log server) "stop")
       (%close-event-log (server-event-log server))
@@ -5010,22 +5010,22 @@ blocked on the corresponding mailbox."
 (defun %make-connection-state (stream)
   (make-connection-state
    :stream stream
-   :stream-mutex (clpm.repl-bridge.compat:make-mutex
-                  :name "clpm.repl-bridge.conn-stream")
+   :stream-mutex (clpm.repl.compat:make-mutex
+                  :name "clpm.repl.conn-stream")
    :in-flight (make-hash-table :test #'equal)
-   :in-flight-mutex (clpm.repl-bridge.compat:make-mutex
-                     :name "clpm.repl-bridge.in-flight")))
+   :in-flight-mutex (clpm.repl.compat:make-mutex
+                     :name "clpm.repl.in-flight")))
 
 (defun %register-in-flight (cstate id job)
-  (clpm.repl-bridge.compat:with-mutex ((connection-state-in-flight-mutex cstate))
+  (clpm.repl.compat:with-mutex ((connection-state-in-flight-mutex cstate))
     (setf (gethash id (connection-state-in-flight cstate)) job)))
 
 (defun %unregister-in-flight (cstate id)
-  (clpm.repl-bridge.compat:with-mutex ((connection-state-in-flight-mutex cstate))
+  (clpm.repl.compat:with-mutex ((connection-state-in-flight-mutex cstate))
     (remhash id (connection-state-in-flight cstate))))
 
 (defun %lookup-in-flight (cstate id)
-  (clpm.repl-bridge.compat:with-mutex ((connection-state-in-flight-mutex cstate))
+  (clpm.repl.compat:with-mutex ((connection-state-in-flight-mutex cstate))
     (gethash id (connection-state-in-flight cstate))))
 
 (defstruct request-context
@@ -5049,7 +5049,7 @@ Frames are arbitrary JSON objects (`(:object ...)' forms). Errors are
 swallowed: a broken socket should never propagate into eval."
   (when (request-context-terminated? ctx)
     (return-from %emit-frame))
-  (clpm.repl-bridge.compat:with-mutex ((request-context-stream-mutex ctx))
+  (clpm.repl.compat:with-mutex ((request-context-stream-mutex ctx))
     (handler-case
         (%write-line-json (request-context-stream ctx) frame)
       (error () nil))))
@@ -5088,7 +5088,7 @@ so any straggling events from a background thread are dropped."
                       (%log-event (server-event-log server)
                                   "request-parse-error"
                                   "error" (princ-to-string c))
-                      (clpm.repl-bridge.compat:with-mutex
+                      (clpm.repl.compat:with-mutex
                           ((connection-state-stream-mutex cstate))
                         (handler-case
                             (%write-line-json
@@ -5112,21 +5112,21 @@ the connection thread stays free to read those continuations."
            (%json-getf params "debug"))))
 
 (defun %write-error-inline (cstate id code message)
-  (clpm.repl-bridge.compat:with-mutex ((connection-state-stream-mutex cstate))
+  (clpm.repl.compat:with-mutex ((connection-state-stream-mutex cstate))
     (handler-case
         (%write-line-json (connection-state-stream cstate)
                           (%error-response id code message))
       (error () nil))))
 
 (defun %write-success-inline (cstate id payload)
-  (clpm.repl-bridge.compat:with-mutex ((connection-state-stream-mutex cstate))
+  (clpm.repl.compat:with-mutex ((connection-state-stream-mutex cstate))
     (handler-case
         (%write-line-json (connection-state-stream cstate)
                           (%success-response id payload))
       (error () nil))))
 
 (defun %write-response-inline (cstate response)
-  (clpm.repl-bridge.compat:with-mutex ((connection-state-stream-mutex cstate))
+  (clpm.repl.compat:with-mutex ((connection-state-stream-mutex cstate))
     (handler-case
         (%write-line-json (connection-state-stream cstate) response)
       (error () nil))))
@@ -5211,9 +5211,9 @@ session via `session' and do expect a terminal response."
        (%write-error-inline cstate id "protocol-error" error-message))
       (t
        (let* ((reply-box (and fresh?
-                              (clpm.repl-bridge.compat:make-mailbox)))
+                              (clpm.repl.compat:make-mailbox)))
               (action (%debug-action-for-method method params reply-box)))
-         (clpm.repl-bridge.compat:send-message
+         (clpm.repl.compat:send-message
           (eval-job-debug-mailbox job) action)
          (%log-event (server-event-log server) "debug-action"
                      "id" id "action" method
@@ -5221,7 +5221,7 @@ session via `session' and do expect a terminal response."
          (when reply-box
            (%write-debug-action-reply
             cstate id
-            (clpm.repl-bridge.compat:receive-message reply-box))))))))
+            (clpm.repl.compat:receive-message reply-box))))))))
 
 (defun array-items-of-param (a)
   "Extract elements from a JSON array param, or NIL if not an array."
@@ -5246,7 +5246,7 @@ blocked on its query-mailbox."
                        ((stringp raw-value) raw-value)
                        ((null raw-value) "")
                        (t (princ-to-string raw-value)))))
-         (clpm.repl-bridge.compat:send-message
+         (clpm.repl.compat:send-message
           (eval-job-query-mailbox job)
           value)
          ;; query-response has no terminal frame of its own.
@@ -5255,7 +5255,7 @@ blocked on its query-mailbox."
 
 (defun %bump-method-count (server method err?)
   "Increment SERVER's per-method counter (total, errored) for METHOD."
-  (clpm.repl-bridge.compat:with-mutex ((server-method-counts-mutex server))
+  (clpm.repl.compat:with-mutex ((server-method-counts-mutex server))
     (let* ((tbl (server-method-counts server))
            (cell (or (gethash method tbl)
                      (setf (gethash method tbl) (cons 0 0)))))
@@ -5370,7 +5370,7 @@ with v2 toggles requiring continuations)."
                 (%eval-uses-continuation? params))
            (%log-event (server-event-log server) "request"
                        "id" id "method" method)
-           (clpm.repl-bridge.compat:make-thread
+           (clpm.repl.compat:make-thread
             (lambda ()
               (handler-case
                   (%dispatch-and-finalize server cstate id method params)
@@ -5381,7 +5381,7 @@ with v2 toggles requiring continuations)."
                   (%write-error-inline cstate id "protocol-error"
                                        (princ-to-string c))
                   (%unregister-in-flight cstate id))))
-            :name "clpm.repl-bridge.dispatch"))
+            :name "clpm.repl.dispatch"))
           (t
            (%log-event (server-event-log server) "request"
                        "id" id "method" method)
@@ -5466,8 +5466,8 @@ Responses are read without a size cap; daemon output (`+max-output-bytes+`,
    (socket :initarg :socket :reader connection-socket)
    (stream :initarg :stream :reader connection-stream)
    (token :initarg :token :reader connection-token)
-   (mutex :initform (clpm.repl-bridge.compat:make-mutex
-                     :name "clpm.repl-bridge.client-conn")
+   (mutex :initform (clpm.repl.compat:make-mutex
+                     :name "clpm.repl.client-conn")
           :reader connection-mutex)
    (closed? :initform nil :accessor connection-closed?)))
 

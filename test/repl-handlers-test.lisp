@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-handlers-test.lisp - declarative handlers + break.
+;;;; test/repl-handlers-test.lisp - declarative handlers + break.
 ;;;;
 ;;;; Covers BRIDGE_V2 #115 (break enters debugger), #117 (--handlers).
 
@@ -38,7 +38,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-handlers")))
     (unwind-protect
@@ -48,7 +48,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -69,7 +69,7 @@
                                              (cons "restart" "use-value")
                                              (cons "args" (list :array
                                                                 (list "999"))))))))
-           (resp (clpm.repl-bridge:send-request
+           (resp (clpm.repl:send-request
                   sock "eval"
                   :params (list :object
                                 (list (cons "form"
@@ -87,12 +87,12 @@
 (format t "Test: (break) under --debug enters debugger, CONTINUE resumes~%")
 (with-daemon
   (lambda (sock)
-    (let* ((conn (clpm.repl-bridge:open-connection sock))
+    (let* ((conn (clpm.repl:open-connection sock))
            (eval-id 15)
            (entered nil))
       (unwind-protect
            (let ((resp
-                   (clpm.repl-bridge:send-on-connection
+                   (clpm.repl:send-on-connection
                     conn "eval"
                     :id eval-id
                     :params (list :object
@@ -106,11 +106,11 @@
                     (lambda (frame)
                       (when (string= "debugger-entered" (lookup frame "event"))
                         (setf entered t)
-                        (clpm.repl-bridge.compat:make-thread
+                        (clpm.repl.compat:make-thread
                          (lambda ()
-                           (clpm.repl-bridge::%write-line-json
-                            (clpm.repl-bridge::connection-stream conn)
-                            (clpm.repl-bridge::%json-object
+                           (clpm.repl::%write-line-json
+                            (clpm.repl::connection-stream conn)
+                            (clpm.repl::%json-object
                              "id" eval-id
                              "method" "debug-continue")))
                          :name "test-handler-resumer"))
@@ -119,8 +119,8 @@
              (let ((result (lookup resp "result")))
                (assert-true result "no terminal result: ~S" resp)
                (assert-equal-string "2" (lookup result "value"))))
-        (clpm.repl-bridge:close-connection conn)))))
+        (clpm.repl:close-connection conn)))))
 (format t "  break + continue OK~%")
 
-(format t "~%REPL-bridge handlers tests PASSED!~%")
+(format t "~%REPL handlers tests PASSED!~%")
 (sb-ext:exit :code 0)

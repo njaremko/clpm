@@ -17,7 +17,7 @@ Implementation allowed?
 
 This algebra models the public `clpm` command language as a small set of
 resource-oriented operations over projects, dependency graphs, registries,
-execution environments, the content store, and the persistent repl bridge.
+execution environments, the content store, and the persistent repl.
 
 It deliberately ignores implementation names such as `cmd-install`,
 temporary cache layout, process-launch mechanics, and the internal
@@ -36,7 +36,7 @@ Representative examples:
 3. `clpm registry key import --pub registry.pub --id main` installs a trust
    anchor.
 4. `clpm run test` executes configured test systems in the activated project.
-5. `clpm repl-bridge eval FORM --debug` evaluates in the persistent project
+5. `clpm repl eval FORM --debug` evaluates in the persistent project
    image and exposes debugger state.
 
 Edge cases and failure modes:
@@ -45,8 +45,8 @@ Edge cases and failure modes:
 2. Offline source realization fails when a locked artifact is not already in
    the store.
 3. Registry trust updates must not silently weaken signature or hash checks.
-4. Kept repl-bridge debugger sessions, watches, traces, and throwaway workers
-   are observable bridge state and must be explicitly cleaned up.
+4. Kept repl debugger sessions, watches, traces, and throwaway workers
+   are observable repl state and must be explicitly cleaned up.
 
 ## Carrier Types
 
@@ -66,7 +66,7 @@ data RegistrySnapshot
 data Store
 data Activation
 data Runtime
-data Bridge
+data ReplImage
 ```
 
 Associated semantic types:
@@ -81,7 +81,7 @@ data World =
         , store      :: Store
         , active     :: Set ProjectRoot
         , runtime    :: Runtime
-        , bridges    :: Map ProjectRoot Bridge
+        , repls      :: Map ProjectRoot ReplImage
         }
 
 data Outcome =
@@ -101,7 +101,7 @@ Implementation-shaped types intentionally excluded:
 - Function names in `src/commands.lisp`.
 - Whether a pipeline step is implemented by one function call or several.
 - Cache keys and pid/socket file names, except where they are user-observable
-  bridge cleanup state.
+  repl cleanup state.
 
 ## Observations
 
@@ -116,7 +116,7 @@ tree        :: ProjectTarget -> World -> HumanText
 why         :: ProjectTarget -> SystemId -> World -> HumanText
 audit       :: ProjectTarget -> World -> HumanText | Json
 sbom        :: ProjectTarget -> Format -> World -> HumanText | Files
-bridgeCall  :: ProjectTarget -> Method -> Params -> World -> Outcome
+replCall    :: ProjectTarget -> Method -> Params -> World -> Outcome
 ```
 
 Derived observations:
@@ -155,8 +155,10 @@ Cons:
   though they are projections of one realization pipeline.
 - Places `keys` and `publish` beside project commands even though they are
   registry operations.
-- Places `repl`, `exec`, `test`, and `scripts` beside unrelated resource
-  operations even though they all run inside a project environment.
+- Places `exec`, `test`, and `scripts` beside unrelated resource operations
+  even though they all run inside a project environment.
+- Treats an ordinary terminal REPL as a public peer of the persistent repl,
+  splitting one REPL/debug meaning across two protocols.
 - Has no law explaining why some nouns are top-level and some are nested.
 
 Candidate B: one `project` command containing everything.
@@ -172,7 +174,7 @@ Pros:
 Cons:
 
 - Complects registry configuration, global key management, store garbage
-  collection, and repl-bridge daemon state with a project manifest.
+  collection, and repl daemon state with a project manifest.
 - Hides important non-project resources.
 
 Chosen denotation: resource algebra.
@@ -186,7 +188,7 @@ Invocation =
   | RegistryOp RegistryOperation
   | RunOp RunOperation
   | StoreOp StoreOperation
-  | BridgeOp BridgeOperation
+  | ReplOp ReplOperation
   | Doctor
   | Help Selector
   | Skill
@@ -197,13 +199,16 @@ Why this is the simplest precise model:
 - Each top-level command names one semantic carrier.
 - Pipeline prefixes become parameters of `deps sync`, not separate top-level
   verbs.
-- Execution modes become `run` operations because they all denote "execute
-  something in the project environment".
+- Execution modes become `run` operations when they denote bounded
+  one-shot project execution.
+- REPL/debugging belongs only to `repl`, because persistent package
+  state, debugger continuations, workers, watches, traces, and inspection are
+  protocol state rather than a one-shot process launch.
 - Registry keys and publishing move under `registry` because they mutate or
   observe registry trust and registry contents.
 - Store cleanup moves under `store` because it operates on shared store
   reachability, not dependency intent.
-- `repl-bridge` remains a top-level carrier because its long-lived image,
+- `repl` remains a top-level carrier because its long-lived image,
   workers, debugger sessions, watches, traces, and cleanup state are not the
   same resource as a one-shot project execution.
 
@@ -213,7 +218,7 @@ Values excluded from the model or represented by a restricted semantic domain:
 - Invalid project targets.
 - Invalid registry trust strings.
 - Invalid sync stages.
-- Invalid bridge RPC methods or parameter schemas.
+- Invalid repl RPC methods or parameter schemas.
 
 Partiality, errors, strictness, ordering, nondeterminism:
 
@@ -270,7 +275,6 @@ clpm [options] registry key generate|list|import|verify ...
 clpm [options] registry publish ...
 
 clpm [options] run [-- <args...>]
-clpm [options] run repl [system]
 clpm [options] run exec -- <cmd...>
 clpm [options] run test
 clpm [options] run script <name> [-- <args...>]
@@ -279,9 +283,9 @@ clpm [options] run scripts
 clpm [options] store clean [--dist] [--store]
 clpm [options] store gc [--dry-run]
 
-clpm [options] repl-bridge daemon [--detach] [--no-load] [--status] [--stop]
-clpm [options] repl-bridge eval FORM [--package P] [--worker W] [--debug] ...
-clpm [options] repl-bridge call METHOD [--params-json JSON] [--PARAM VALUE]...
+clpm [options] repl daemon [--detach] [--no-load] [--status] [--stop]
+clpm [options] repl eval FORM [--package P] [--worker W] [--debug] ...
+clpm [options] repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
 
 Bare `clpm [options]` denotes `clpm [options] deps sync`.
@@ -315,12 +319,93 @@ Bare `clpm [options]` denotes `clpm [options] deps sync`.
 | `run` | Primitive execution | `run` | Runs the configured project entrypoint. |
 | `exec` | Derived execution | `run exec` | Executes an arbitrary command in the project environment. |
 | `test` | Derived execution | `run test` | Executes configured test systems. |
-| `repl` | Derived execution | `run repl` | Starts an interactive project Lisp. |
+| `run repl` | Rejected duplicate protocol | `repl` | Ordinary REPL/debugging is the same semantic carrier as the persistent repl and is not public separately. |
 | `scripts` | Derived execution/listing | `run script`, `run scripts` | Scripts are named project executions. |
 | `package` | Artifact constructor | `project package` | Builds the artifact configured by project metadata. |
 | `clean` | Store/project cleanup | `store clean` | Removes generated project/store reachability. |
 | `gc` | Store cleanup | `store gc` | Garbage-collects unreachable store entries. |
-| `repl-bridge` | Primitive carrier | `repl-bridge` | Persistent image has independent lifecycle state. |
+| `repl` | Primitive carrier | `repl` | Persistent image has independent lifecycle state. |
+
+## Hostile Reduction Ledger
+
+### Iteration 1: Inventory as Denotation
+
+- Commands deleted: none; this pass inventories meaning before cutting.
+- Commands merged: none yet.
+- Commands derived instead of exposed:
+  - `resolve`, `fetch`, `build`, and `install` are projections of the
+    realization pipeline.
+  - `keys` and `publish` are registry trust/release operations.
+  - `exec`, `test`, and `scripts` are project execution operations.
+- Commands that survived and why:
+  - `project`, `deps`, `registry`, `run`, `store`, and `repl`
+    each name a distinct semantic carrier.
+  - `doctor`, `help`, and `skill` survive as observations over environment,
+    schema, and agent instructions.
+- Laws/protocol invariants added:
+  - `help` is a schema projection.
+  - `deps sync --to STAGE` denotes a prefix of one realization pipeline.
+  - `registry key` and `registry publish` operate under registry scope.
+- Remaining discomfort:
+  - The first pass still tolerated a public ordinary REPL as execution even
+    though it shared meaning with the persistent repl.
+
+### Iteration 2: Delete Derived Top-Level Verbs
+
+- Commands deleted:
+  - Top-level `new`, `init`, `workspace`, `add`, `remove`, `resolve`,
+    `fetch`, `build`, `install`, `update`, `search`, `info`, `tree`, `why`,
+    `audit`, `sbom`, `keys`, `publish`, `exec`, `test`, `scripts`,
+    `package`, `clean`, and `gc`.
+- Commands merged:
+  - Project constructors under `project`.
+  - Dependency intent, realization, and dependency observations under `deps`.
+  - Registry configuration, trust, keys, and publishing under `registry`.
+  - Project execution modes under `run`.
+  - Project/store cleanup under `store`.
+- Commands derived instead of exposed:
+  - Pipeline stages derive from `deps sync --to lock|source|build|active`.
+  - Registry key and publish operations derive from registry scope.
+  - Script listing and execution derive from `run scripts` and `run script`.
+- Commands that survived and why:
+  - The six resource carriers survive because deleting one loses a distinct
+    carrier or mixes independent protocol state.
+- Laws/protocol invariants added:
+  - Parser/help morphism: accepted commands are exactly documented public
+    commands.
+  - Removed top-level verbs are rejected, not aliased.
+- Remaining discomfort:
+  - `run repl` still exposed a second REPL/debug protocol and kept the repl
+    from being the single controlled protocol hook.
+
+### Iteration 3: Collapse REPL/Debug Protocol
+
+- Commands deleted:
+  - `run repl` and the ordinary REPL implementation entry point.
+- Commands merged:
+  - Ordinary REPL/debugging is merged into `repl`; users evaluate
+    forms with `eval`, manage lifecycle with `daemon`, and use controlled
+    protocol hooks through `call`.
+- Commands derived instead of exposed:
+  - "Start a project REPL" is no longer a public constructor. For interactive
+    state, use `repl daemon --detach`; for one form, use
+    `repl eval`; for debugger and image operations, use
+    `repl call METHOD`.
+- Commands that survived and why:
+  - `run` survives only for bounded project execution: entrypoint, `exec`,
+    `test`, `script`, and `scripts`.
+  - `repl` survives as the controlled MOP-style protocol layer:
+    `daemon` is lifecycle glue, `eval` is the ergonomic interface, and
+    `call` is the generic intercessory/introspective hook.
+- Laws/protocol invariants added:
+  - REPL/debug uniqueness: no public command outside `repl` may create
+    or observe interactive Lisp image/debugger state.
+  - REPL cleanup leaves no kept debugger sessions, watches, traces, or
+    throwaway workers.
+- Remaining discomfort:
+  - None sufficient to justify another public command. Another hostile pass
+    cannot remove `daemon`, `eval`, or `call` without losing lifecycle
+    control, ergonomic one-form evaluation, or controlled protocol access.
 
 ## Constructors
 
@@ -330,7 +415,7 @@ Terminal constructors:
 doctor       :: Invocation
 skill        :: Invocation
 help         :: Selector -> Invocation
-bridgeDaemon :: DaemonAction -> Invocation
+replDaemon   :: DaemonAction -> Invocation
 ```
 
 Inductive constructors:
@@ -341,7 +426,7 @@ deps         :: DependencyOperation -> Invocation
 registry     :: RegistryOperation -> Invocation
 run          :: RunOperation -> Invocation
 store        :: StoreOperation -> Invocation
-replBridge   :: BridgeOperation -> Invocation
+repl         :: ReplOperation -> Invocation
 ```
 
 Derived constructors:
@@ -362,10 +447,11 @@ Constructor responsibility audit:
 | `registry` | Configure, update, trust, key, or publish registry state | Yes | No |
 | `run` | Execute inside project activation | Yes | No |
 | `store` | Clean generated and unreachable store state | Yes | No |
-| `replBridge` | Operate on persistent project image state | Yes | No |
+| `repl` | Operate on persistent project image state | Yes | No |
 | old `resolve/fetch/build/install` | Pipeline prefixes | Yes | Yes, `deps sync --to ...` |
 | old `keys/publish` | Registry operations | Yes | Yes, `registry key/publish` |
-| old `exec/test/repl/scripts` | Execution modes | Yes | Yes, `run ...` |
+| old `exec/test/scripts` | Execution modes | Yes | Yes, `run ...` |
+| ordinary `repl` / `run repl` | Duplicate REPL/debug protocol | Yes | No, deleted in favor of `repl`. |
 
 ## Denotation Laws
 
@@ -414,14 +500,14 @@ forall command.
   denote (run (exec command)) ctx world =
     execute command (activationEnv ctx world) world
 
-Law: "run/repl"
-forall system.
-  denote (run (repl system)) ctx world =
-    executeInteractiveLisp system (activationEnv ctx world) world
-
 Law: "run/test"
   denote (run test) ctx world =
     executeConfiguredTests (activationEnv ctx world) world
+
+Law: "repl/debug uniqueness"
+forall invocation.
+  createsOrObservesInteractiveImageState invocation
+  => invocation = repl replOperation
 
 Law: "store/clean"
 forall opts.
@@ -488,21 +574,21 @@ forall ctx world.
   denote (store (gc DryRun)) ctx world =
     Succeeded world (HumanText deletedSet)
 
-Law: "bridge cleanup leaves no kept operational state"
-forall bridge.
-  cleanup bridge =
-    bridge { debugSessions = empty
-           , watches = empty
-           , traces = empty
-           , throwawayWorkers = empty
+Law: "repl cleanup leaves no kept operational state"
+forall image.
+  cleanup image =
+    image { debugSessions = empty
+          , watches = empty
+          , traces = empty
+          , throwawayWorkers = empty
            }
 ```
 
 Conditions moved into types:
 
 - `SyncStage = Lock | Source | Build | Active`.
-- `RunOperation = EntryPoint Args | Repl MaybeSystem | Exec Command |
-  Test | Script Name Args | Scripts`.
+- `RunOperation = EntryPoint Args | Exec Command | Test | Script Name Args
+  | Scripts`.
 - `RegistryOperation` contains `KeyOperation` and `PublishOperation`; they
   are not top-level commands.
 
@@ -524,7 +610,8 @@ Rejected instances:
 | Flat top-level command monoid | `resolve` and `install` | Both operate on same realization pipeline at different prefixes | No single resource identity | Collapse to `deps sync --to ...`. |
 | `keys` as top-level resource | `keys import` | Mutates trust key material | Not independent of registry trust | Move to `registry key`. |
 | `scripts` as project metadata operation | `scripts run fmt` | Executes command in activation | Not a manifest constructor | Move execution to `run script`. |
-| `repl-bridge` under `run` | `repl-bridge daemon --status` | Observes/cleans daemon lifecycle state | Not one-shot execution | Keep top-level carrier. |
+| ordinary REPL under `run` | `run repl` | Creates interactive image/debugger state | Same carrier as persistent repl state | Delete; use `repl`. |
+| `repl` under `run` | `repl daemon --status` | Observes/cleans daemon lifecycle state | Not one-shot execution | Keep top-level carrier. |
 
 ## Quality Gate
 
@@ -537,7 +624,7 @@ Rejected instances:
 | Closure | 4 | Invalid stages, trust forms, targets, and method names fail as outcomes. |
 | Power | 4 | Existing workflows remain expressible under the target algebra. |
 | Parsimony | 4 | Accidental top-level wrappers are removed rather than aliased. |
-| Orthogonality | 4 | Project, deps, registry, run, store, and bridge have separate carriers. |
+| Orthogonality | 4 | Project, deps, registry, run, store, and repl have separate carriers. |
 | Law quality | 3 | Pipeline and grouping laws are precise; some lower-level effects remain implementation-defined. |
 | Interface morphisms | 3 | Help schema preservation is explicit; no external typeclass instances are claimed. |
 | Generality | 4 | Resource grouping is independent of current Lisp function names. |
@@ -572,14 +659,14 @@ Primitive constructors:
 - `cmd-registry`
 - `cmd-run` as the execution resource dispatcher
 - `cmd-store`
-- `cmd-repl-bridge`
+- `cmd-repl`
 
 Derived constructors:
 
 - `deps sync --to lock/source/build/active`
 - `registry key ...`
 - `registry publish ...`
-- `run repl/exec/test/script/scripts`
+- `run exec/test/script/scripts`
 
 Observation implementation:
 
@@ -615,6 +702,8 @@ Failed-counterexample regressions:
 
 - `clpm add`, `clpm install`, `clpm keys`, `clpm publish`, `clpm test`, and
   `clpm gc` are unknown top-level commands after the refinement.
+- `clpm run repl` and `clpm help run repl` reject the obsolete ordinary REPL
+  surface and point at `clpm repl`.
 
 Reference versus optimized equivalence:
 
@@ -635,7 +724,7 @@ Law-backed normalizations:
 
 Indexes/caches that remain unobservable:
 
-- Registry indexes, source fetch cache layout, ASDF output paths, and bridge
+- Registry indexes, source fetch cache layout, ASDF output paths, and repl
   transport details.
 
 Performance risks:

@@ -87,9 +87,9 @@ To generate a deterministic SBOM from your lockfile:
 clpm deps sbom --format cyclonedx-json --out sbom.json
 ```
 
-## AI-assisted development: the repl-bridge operator manual
+## AI-assisted development: the REPL operator manual
 
-CLPM ships a **repl-bridge**: a persistent project-scoped SBCL daemon that
+CLPM ships `clpm repl`: a persistent project-scoped SBCL daemon that
 answers JSON-RPC over a Unix socket. It exists so an LLM (or any non-Lisp
 tool) can drive a long-lived image — redefining one `defun` instead of
 reloading systems, capturing stdout/stderr per call, surfacing in-image drift
@@ -97,16 +97,16 @@ from disk.
 
 ```bash
 clpm deps sync                                       # one-time setup
-clpm repl-bridge daemon --detach                      # background daemon
-clpm repl-bridge eval '(asdf:load-system "my-app")'
-clpm repl-bridge eval '(my-app:hello)'
-clpm repl-bridge call methods                         # list every RPC
-clpm repl-bridge daemon --stop
+clpm repl daemon --detach                           # background daemon
+clpm repl eval '(asdf:load-system "my-app")'
+clpm repl eval '(my-app:hello)'
+clpm repl call methods                              # list every RPC
+clpm repl daemon --stop
 ```
 
 State persists across `eval` calls. Hung evals are unwound with
-`clpm repl-bridge call interrupt` (daemon stays up); a wedged worker is
-recovered with `clpm repl-bridge call reset`.
+`clpm repl call interrupt` (daemon stays up); a wedged worker is
+recovered with `clpm repl call reset`.
 
 ### Capabilities
 
@@ -137,9 +137,8 @@ recovered with `clpm repl-bridge call reset`.
   dispatcher reads. `call methods` lists them; `call help --method METHOD`
   returns the long doc + parameter schema.
 
-A Claude Code skill at [`.claude/skills/clpm-repl-bridge.md`](.claude/skills/clpm-repl-bridge.md)
-documents the operating model as recipes. Run `clpm help repl-bridge` for the
-three-command CLI surface.
+Run `clpm skill` for agent recipes, and `clpm help repl` for the
+three-command REPL surface.
 
 ## Project File Format
 
@@ -243,10 +242,10 @@ despite some legacy comments). The rules a user needs to know:
 | `clpm deps sbom --format <cyclonedx-json\|cyclonedx-xml\|spdx-json>` | SBOM export |
 | `clpm registry <add\|list\|update\|trust\|init\|key\|publish> ...` | Manage registries, keys, trust, and publishing |
 | `clpm run [-- <args...>]` | Run the project entrypoint |
-| `clpm run repl [system]` | Start a REPL with the project loaded |
 | `clpm run exec -- <cmd...>` | Run a command in the project env |
 | `clpm run test` | Run project tests |
 | `clpm run script <name>` | Run a project script |
+| `clpm repl <daemon\|eval\|call> ...` | Persistent project REPL/debug protocol |
 | `clpm store clean [--dist]` | Remove project-local outputs |
 | `clpm store gc` | Garbage collect store |
 
@@ -254,7 +253,7 @@ despite some legacy comments). The rules a user needs to know:
 
 - `-v, --verbose` - Verbose output
 - `-j, --jobs N` - Parallel build jobs
-- `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for `repl/run/test`
+- `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for `run/test/repl`
 - `-p, --package <member>` - Workspace member to target from workspace root
 - `--offline` - Fail if artifacts not cached
 - `--insecure` - Skip signature verification

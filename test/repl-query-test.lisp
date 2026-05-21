@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-query-test.lisp - bidirectional `query' I/O.
+;;;; test/repl-query-test.lisp - bidirectional `query' I/O.
 ;;;;
 ;;;; BRIDGE_V2 #104 acceptance: when `eval --query-interactive' reads from
 ;;;; *standard-input* / *query-io*, the daemon emits `event:query', blocks
@@ -41,7 +41,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-query")))
     (unwind-protect
@@ -51,7 +51,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -67,12 +67,12 @@
 (format t "Test: read-line inside --query-interactive eval round-trips~%")
 (with-daemon
   (lambda (sock)
-    (let* ((conn (clpm.repl-bridge:open-connection sock))
+    (let* ((conn (clpm.repl:open-connection sock))
            (eval-id 7))
       (assert-true (not (eq conn :no-daemon)) "open-connection :no-daemon")
       (unwind-protect
            (let ((response
-                   (clpm.repl-bridge:send-on-connection
+                   (clpm.repl:send-on-connection
                     conn "eval"
                     :id eval-id
                     :params (list :object
@@ -84,14 +84,14 @@
                       ;; First frame should be event:query.
                       (when (string= "query" (lookup frame "event"))
                         ;; Reply on the same id with the answer.
-                        (clpm.repl-bridge.compat:make-thread
+                        (clpm.repl.compat:make-thread
                          (lambda ()
-                           (clpm.repl-bridge::%write-line-json
-                            (clpm.repl-bridge::connection-stream conn)
-                            (clpm.repl-bridge::%json-object
+                           (clpm.repl::%write-line-json
+                            (clpm.repl::connection-stream conn)
+                            (clpm.repl::%json-object
                              "id" eval-id
                              "method" "query-response"
-                             "params" (clpm.repl-bridge::%json-object
+                             "params" (clpm.repl::%json-object
                                        "value" "hello there"))))
                          :name "test-query-replier"))
                       nil))))
@@ -99,7 +99,7 @@
                (assert-true result "no terminal result: ~S" response)
                (assert-equal-string "\"hello there\""
                                     (lookup result "value"))))
-        (clpm.repl-bridge:close-connection conn)))))
+        (clpm.repl:close-connection conn)))))
 (format t "  query-response round-trip OK~%")
 
 ;;; ----------------------------------------------------------------------------
@@ -109,15 +109,15 @@
 (format t "Test: query-response for unknown id is rejected~%")
 (with-daemon
   (lambda (sock)
-    (let ((conn (clpm.repl-bridge:open-connection sock)))
+    (let ((conn (clpm.repl:open-connection sock)))
       (unwind-protect
-           (let ((stream (clpm.repl-bridge::connection-stream conn)))
-             (clpm.repl-bridge::%write-line-json
+           (let ((stream (clpm.repl::connection-stream conn)))
+             (clpm.repl::%write-line-json
               stream
-              (clpm.repl-bridge::%json-object
+              (clpm.repl::%json-object
                "id" 999
                "method" "query-response"
-               "params" (clpm.repl-bridge::%json-object "value" "hi")))
+               "params" (clpm.repl::%json-object "value" "hi")))
              (let* ((line (read-line stream nil nil))
                     (frame (and line
                                 (clpm.io.json:read-json-from-string line)))
@@ -125,8 +125,8 @@
                (assert-true err "expected error frame, got ~S" frame)
                (assert-equal-string "protocol-error"
                                     (lookup err "code"))))
-        (clpm.repl-bridge:close-connection conn)))))
+        (clpm.repl:close-connection conn)))))
 (format t "  unmatched query-response rejected OK~%")
 
-(format t "~%REPL-bridge query tests PASSED!~%")
+(format t "~%REPL query tests PASSED!~%")
 (sb-ext:exit :code 0)

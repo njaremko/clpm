@@ -1,6 +1,6 @@
-;;;; repl_bridge_compat.lisp - Cross-implementation threading / mailbox / pid
+;;;; repl_compat.lisp - Cross-implementation threading / mailbox / pid
 ;;;;
-;;;; The repl-bridge core needs threads, mutexes, a one-producer-one-consumer
+;;;; The repl core needs threads, mutexes, a one-producer-one-consumer
 ;;;; mailbox, the current pid, and (optionally) a backtrace. Each Lisp ships
 ;;;; its own primitives:
 ;;;;
@@ -9,7 +9,7 @@
 ;;;;   ECL:  mp:  (process / lock / queue); ext:getpid
 ;;;;
 ;;;; This module is the single seam: bridge code calls
-;;;; `clpm.repl-bridge.compat:...' and never touches `sb-...' directly.
+;;;; `clpm.repl.compat:...' and never touches `sb-...' directly.
 ;;;;
 ;;;; The SBCL implementation is the reference; CCL and ECL implementations
 ;;;; mirror it function-for-function and depend on those impls' standard
@@ -20,7 +20,7 @@
   #+sbcl (require :sb-concurrency)
   #+sbcl (require :sb-posix))
 
-(in-package #:clpm.repl-bridge.compat)
+(in-package #:clpm.repl.compat)
 
 (defun host-impl ()
   "Return a keyword naming the host Lisp implementation. Used by tests so
@@ -39,10 +39,10 @@ exercise end-to-end."
   "Spawn a thread / process running FUNCTION with no arguments. Returns the
 implementation-specific thread handle to be passed to the other helpers."
   #+sbcl (sb-thread:make-thread function :name name)
-  #+ccl (ccl:process-run-function (or name "clpm.repl-bridge") function)
-  #+ecl (mp:process-run-function (or name "clpm.repl-bridge") function)
+  #+ccl (ccl:process-run-function (or name "clpm.repl") function)
+  #+ecl (mp:process-run-function (or name "clpm.repl") function)
   #-(or sbcl ccl ecl)
-  (error "clpm.repl-bridge.compat:make-thread is not implemented on ~A"
+  (error "clpm.repl.compat:make-thread is not implemented on ~A"
          (lisp-implementation-type)))
 
 (defun interrupt-thread (thread function)
@@ -123,7 +123,7 @@ a control signal without blocking."
 (progn
   (defstruct (mailbox (:constructor %make-mailbox))
     (queue '() :type list)
-    (lock (ccl:make-lock "clpm.repl-bridge.mbox"))
+    (lock (ccl:make-lock "clpm.repl.mbox"))
     (sem (ccl:make-semaphore)))
 
   (defun make-mailbox () (%make-mailbox))
@@ -160,7 +160,7 @@ a control signal without blocking."
 (progn
   (defstruct (mailbox (:constructor %make-mailbox))
     (queue '() :type list)
-    (lock (mp:make-lock :name "clpm.repl-bridge.mbox"))
+    (lock (mp:make-lock :name "clpm.repl.mbox"))
     (cv (mp:make-condition-variable)))
 
   (defun make-mailbox () (%make-mailbox))

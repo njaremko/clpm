@@ -77,7 +77,7 @@
       (assert-true (uiop:file-exists-p config-path)
                    "Missing activation config: ~A" (namestring config-path))
       ;; Validate SBCL can load the dependency system non-interactively
-      ;; (this approximates what `clpm run repl dep` would do).
+      ;; (this approximates loading a project system in the activated image).
       (multiple-value-bind (output error-output exit-code)
           (clpm.platform:run-program
            (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"

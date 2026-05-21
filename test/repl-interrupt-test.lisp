@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-interrupt-test.lisp - interrupt mid-eval
+;;;; test/repl-interrupt-test.lisp - interrupt mid-eval
 
 (require :asdf)
 (require :sb-bsd-sockets)
@@ -39,7 +39,7 @@
            (sb-thread:make-thread
             (lambda ()
               (handler-case
-                  (clpm.repl-bridge:start-server :socket-path tmp)
+                  (clpm.repl:start-server :socket-path tmp)
                 (error (c)
                   (format *error-output* "daemon: ~A~%" c))))
             :name "test-bridge")))
@@ -51,7 +51,7 @@
            (unless (probe-file tmp)
              (fail "daemon failed to bind"))
            (funcall fn tmp))
-      (handler-case (clpm.repl-bridge:send-request tmp "shutdown") (error () nil))
+      (handler-case (clpm.repl:send-request tmp "shutdown") (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p server-thread)
             do (sleep 0.05))
@@ -67,7 +67,7 @@
              (eval-thread
                (sb-thread:make-thread
                 (lambda ()
-                  (let ((r (clpm.repl-bridge:send-request
+                  (let ((r (clpm.repl:send-request
                             sock "eval"
                             :params (list :object
                                           (list (cons "form" "(loop)"))))))
@@ -75,7 +75,7 @@
                 :name "eval-driver")))
         ;; Wait a moment, send interrupt, then expect the eval to return.
         (sleep 0.2)
-        (let* ((int-resp (clpm.repl-bridge:send-request sock "interrupt")))
+        (let* ((int-resp (clpm.repl:send-request sock "interrupt")))
           (assert-true (lookup int-resp "result")
                        "interrupt response should be success, got ~S" int-resp))
         (let ((eval-resp
@@ -94,7 +94,7 @@
         (when (sb-thread:thread-alive-p eval-thread)
           (ignore-errors (sb-thread:terminate-thread eval-thread))))
       ;; Daemon is still responsive after interrupt.
-      (let* ((r (clpm.repl-bridge:send-request sock "ping")))
+      (let* ((r (clpm.repl:send-request sock "ping")))
         (assert-true (lookup r "result")
                      "daemon should still answer ping after interrupt, got ~S"
                      r))))
@@ -106,23 +106,23 @@
       ;; The default worker hasn't been spawned -- the daemon treats
       ;; that as :idle (the user shouldn't have to know about lazy
       ;; spawning). And a typo'd worker name is its own outcome.
-      (let* ((r (clpm.repl-bridge:send-request sock "interrupt")))
+      (let* ((r (clpm.repl:send-request sock "interrupt")))
         (assert-string= "idle"
                         (lookup (lookup r "result") "outcome")))
       ;; Spawn the default worker with one eval; the next interrupt
       ;; still reports `idle' because the eval finished before we
       ;; sent the interrupt.
-      (clpm.repl-bridge:send-request
+      (clpm.repl:send-request
        sock "eval" :params (list :object (list (cons "form" "(+ 1 1)"))))
-      (let* ((r (clpm.repl-bridge:send-request sock "interrupt")))
+      (let* ((r (clpm.repl:send-request sock "interrupt")))
         (assert-string= "idle"
                         (lookup (lookup r "result") "outcome")))
-      (let* ((r (clpm.repl-bridge:send-request
+      (let* ((r (clpm.repl:send-request
                  sock "interrupt"
                  :params (list :object (list (cons "worker" "nope"))))))
         (assert-string= "no-such-worker"
                         (lookup (lookup r "result") "outcome")))))
 (format t "  OK~%")
 
-(format t "~%REPL-bridge interrupt tests PASSED!~%")
+(format t "~%REPL interrupt tests PASSED!~%")
 (sb-ext:exit :code 0)

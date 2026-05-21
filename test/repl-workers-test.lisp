@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-workers-test.lisp - named / concurrent workers.
+;;;; test/repl-workers-test.lisp - named / concurrent workers.
 ;;;;
 ;;;; Covers BRIDGE_V2 #170 (named workers), #171 (list-workers),
 ;;;; #172 (kill-worker), #173 (eval --concurrent).
@@ -43,7 +43,7 @@
          (thread (sb-thread:make-thread
                   (lambda ()
                     (handler-case
-                        (clpm.repl-bridge:start-server :socket-path sock)
+                        (clpm.repl:start-server :socket-path sock)
                       (error (c) (format *error-output* "daemon: ~A~%" c))))
                   :name "test-bridge-workers")))
     (unwind-protect
@@ -53,7 +53,7 @@
                  do (sleep 0.05))
            (assert-true (probe-file sock) "daemon never started")
            (funcall fn sock))
-      (handler-case (clpm.repl-bridge:send-request sock "shutdown")
+      (handler-case (clpm.repl:send-request sock "shutdown")
         (error () nil))
       (loop for i from 0 below 30
             while (sb-thread:thread-alive-p thread)
@@ -63,7 +63,7 @@
       (ignore-errors (delete-file sock)))))
 
 (defun do-rpc (sock method &optional params)
-  (clpm.repl-bridge:send-request sock method
+  (clpm.repl:send-request sock method
                                   :params (and params (list :object params))))
 
 ;;; ----------------------------------------------------------------------------
@@ -239,5 +239,5 @@
                            (lookup (lookup r "result") "outcome")))))
 (format t "  reset outcomes OK~%")
 
-(format t "~%REPL-bridge workers tests PASSED!~%")
+(format t "~%REPL workers tests PASSED!~%")
 (sb-ext:exit :code 0)

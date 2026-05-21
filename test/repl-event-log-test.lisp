@@ -1,4 +1,4 @@
-;;;; test/repl-bridge-event-log-test.lisp - .clpm/repl-bridge.log JSON lines
+;;;; test/repl-event-log-test.lisp - .clpm/repl.log JSON lines
 
 (require :asdf)
 (require :sb-posix)
@@ -64,7 +64,7 @@
     (format t "Test: daemon writes structured events~%")
     (let ((srv (sb-thread:make-thread
                 (lambda ()
-                  (clpm.repl-bridge:start-server :socket-path sock
+                  (clpm.repl:start-server :socket-path sock
                                                  :log-path log))
                 :name "test-serve")))
       ;; Wait for the daemon to start.
@@ -74,14 +74,14 @@
       (assert-true (probe-file sock) "daemon never came up")
 
       ;; Make a few requests.
-      (clpm.repl-bridge:send-request sock "ping")
-      (clpm.repl-bridge:send-request sock "eval"
+      (clpm.repl:send-request sock "ping")
+      (clpm.repl:send-request sock "eval"
                                      :params (list :object (list (cons "form" "(+ 1 2)"))))
       ;; Trigger a request that errors out at the protocol layer.
-      (clpm.repl-bridge:send-request sock "no-such-method")
+      (clpm.repl:send-request sock "no-such-method")
 
       ;; Shutdown.
-      (clpm.repl-bridge:send-request sock "shutdown")
+      (clpm.repl:send-request sock "shutdown")
       (loop for i from 0 below 50
             while (sb-thread:thread-alive-p srv)
             do (sleep 0.1))
@@ -157,14 +157,14 @@
       ;; Write a header so the rotated file is recognizable.
       (write-string (make-string (+ (* 10 1024 1024) 1024) :initial-element #\X) s))
     (let* ((open-log (funcall (find-symbol "%OPEN-EVENT-LOG"
-                                            (find-package "CLPM.REPL-BRIDGE"))
+                                            (find-package "CLPM.REPL"))
                               log)))
       (assert-true open-log "open-event-log returned NIL on a valid path")
       ;; Trigger a write; the post-write check should rotate.
-      (funcall (find-symbol "%LOG-EVENT" (find-package "CLPM.REPL-BRIDGE"))
+      (funcall (find-symbol "%LOG-EVENT" (find-package "CLPM.REPL"))
                open-log "trigger")
       ;; Close so the OS commits state.
-      (funcall (find-symbol "%CLOSE-EVENT-LOG" (find-package "CLPM.REPL-BRIDGE"))
+      (funcall (find-symbol "%CLOSE-EVENT-LOG" (find-package "CLPM.REPL"))
                open-log))
     (assert-true (probe-file rotated) "rotated file ~A is missing" rotated)
     (assert-true (probe-file log) "post-rotation log ~A is missing" log)
@@ -176,5 +176,5 @@
             (with-open-file (s rotated :direction :input) (file-length s))
             (with-open-file (s log :direction :input) (file-length s)))))
 
-(format t "~%REPL-bridge event-log tests PASSED!~%")
+(format t "~%REPL event-log tests PASSED!~%")
 (sb-ext:exit :code 0)

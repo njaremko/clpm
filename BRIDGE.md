@@ -35,11 +35,11 @@ The goal of this feature is to let an LLM drive a persistent Lisp image with the
 
 ```
                                        ┌──────────────────────────────┐
-                                       │   clpm repl-bridge daemon    │
+                                       │   clpm repl daemon    │
                                        │   (long-running SBCL)        │
 client                                 │                              │
 ─────────────────────────────────────  │  ┌────────────────────────┐  │
- $ clpm repl-bridge eval '(+ 1 2)' ──► │  │ accept-loop (main)     │  │
+ $ clpm repl eval '(+ 1 2)' ──► │  │ accept-loop (main)     │  │
                                        │  │   reads one LDJSON     │  │
                                   ◄──  │  │   line, dispatches     │  │
                                        │  │                        │  │
@@ -59,15 +59,15 @@ client                                 │                              │
                                        └──────────────────────────────┘
                                                   ▲
                                                   │ Unix domain socket
-                                                  │ .clpm/repl-bridge.sock
+                                                  │ .clpm/repl.sock
                                                   │ mode 0600
 ```
 
 ### Why this shape
 
 - **One daemon per project, project-scoped socket.** Two clpm projects in different directories are mutually invisible. Daemons live alongside `.clpm/` (already excluded from the source tree by clpm convention).
-- **Each `clpm repl-bridge eval` is a one-shot client.** The daemon persists state; the CLI does not. From the LLM's point of view, every form is a discrete tool call that returns a result — no stdin/stdout management, no `Monitor`-tool polling, no sentinel parsing. This is the single most important design decision: it matches how LLM tool-use actually works (stateless RPC, stateful server).
-- **The CLI auto-starts the daemon if absent.** First `eval` after `clpm install` boots the daemon, loads the lockfile's systems, then runs the form. Subsequent evals attach to the running daemon in microseconds.
+- **Each `clpm repl eval` is a one-shot client.** The daemon persists state; the CLI does not. From the LLM's point of view, every form is a discrete tool call that returns a result — no stdin/stdout management, no `Monitor`-tool polling, no sentinel parsing. This is the single most important design decision: it matches how LLM tool-use actually works (stateless RPC, stateful server).
+- **The CLI auto-starts the daemon if absent.** First `eval` after `clpm deps sync` boots the daemon, loads the lockfile's systems, then runs the form. Subsequent evals attach to the running daemon in microseconds.
 - **Filesystem permissions = auth.** Mode 0600 socket. No tokens, no TLS. The threat model is "untrusted local user," which Unix permissions already handle.
 - **Worker thread + interrupt.** Eval runs on a dedicated thread. `sb-thread:interrupt-thread` signals a `user-interrupt` condition that unwinds cleanly. Client-side ctrl-C closes the socket; the daemon notices the broken pipe and interrupts the worker automatically.
 
@@ -136,46 +136,45 @@ Error codes (string, stable):
 ## Subcommand surface
 
 ```
-clpm repl-bridge serve   [--socket PATH] [--no-load] [-p MEMBER] [--preload SYS]...
-clpm repl-bridge eval    FORM [--package PKG] [-p MEMBER] [--no-autostart]
-clpm repl-bridge interrupt
-clpm repl-bridge status
-clpm repl-bridge stop
-clpm repl-bridge describe SYMBOL [--package PKG]
-clpm repl-bridge diff
-clpm repl-bridge ping
+clpm repl daemon [--detach] [--no-load] [--status] [--stop]
+clpm repl eval FORM [--package PKG] [--worker NAME] [--debug] ...
+clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
 
-`serve` is the daemon. Normally run via `Bash(run_in_background=true)` by the LLM, or from a shell by a human. Reads requests from the socket, never from its own stdin. Logs to `.clpm/repl-bridge.log`.
+`daemon` owns lifecycle. Bare `daemon` runs the server in the foreground;
+`daemon --detach` starts it in the background, `daemon --status` inspects it,
+and `daemon --stop` shuts it down. The daemon reads requests from the socket,
+never from its own stdin, and logs to `.clpm/repl.log`.
 
 `eval` is a one-shot client. Connects to the socket, sends one `eval` request, prints the response as JSON to stdout (or as a rendered summary with `--pretty`), exits with status 0 on success, non-zero on error. Auto-starts the daemon if `--no-autostart` isn't passed.
 
-The other client commands (`interrupt`, `describe`, `diff`, `ping`) all share the same one-shot pattern.
-
-`status` reports daemon state by reading `.clpm/repl-bridge.pid`. `stop` sends `shutdown`, waits up to 5 s, then `SIGTERM`s the PID. Both are pure CLI conveniences; no daemon round-trip required if the pidfile is absent.
+`call` is the generic one-shot RPC constructor for introspection and
+intercession: `clpm repl call interrupt`, `call ping`,
+`call describe`, `call list-redefinitions`, and every other registered
+method share the same path.
 
 ## Lifecycle
 
-1. **First `clpm repl-bridge eval` in a project.** No socket; client forks a daemon (`clpm repl-bridge serve --daemonize`), waits for the socket to appear (poll with 100 ms ticks, 5 s ceiling), sends the request.
-2. **Daemon startup.** Creates `.clpm/`, writes `repl-bridge.pid`, binds the socket at mode 0600. Loads the project's lockfile-resolved systems via the same path `cmd-repl` uses today. Loads the bridge protocol module. Enters the accept loop.
+1. **First `clpm repl eval` in a project.** No socket; client forks a daemon (`clpm repl daemon --detach`), waits for the socket to appear (poll with 100 ms ticks, 5 s ceiling), sends the request.
+2. **Daemon startup.** Creates `.clpm/`, writes `repl.pid`, binds the socket at mode 0600. Loads the project's lockfile-resolved systems via the bridge project loader. Loads the bridge protocol module. Enters the accept loop.
 3. **Subsequent evals.** Socket exists; client connects and sends. Microseconds of overhead.
 4. **Worker death.** If the eval worker thread dies (uncaught condition outside the eval handler, OOM, etc.), the daemon respawns it, logs the death, and replies `worker-died`. Client is told to retry.
 5. **Daemon death.** Socket goes stale. Next `eval` finds the connect failing, removes the stale socket, auto-respawns. Pidfile is repaired on startup.
-6. **Project teardown.** `clpm clean` could optionally call `stop`. Default: leave the daemon running until explicitly stopped or the user reboots.
+6. **Project teardown.** `clpm store clean` may remove project outputs, but the daemon is explicit bridge state. Default: leave it running until `clpm repl daemon --stop` or reboot.
 
 ## File layout
 
 ```
 src/io/json.lisp                 # +read-json (#001)
-src/repl_bridge/protocol.lisp    # Wire encoding/decoding, error helpers
-src/repl_bridge/server.lisp      # Daemon: socket accept, worker thread
-src/repl_bridge/client.lisp      # One-shot client used by `eval`, etc.
-src/repl_bridge/redef.lisp       # Redefinition tracking
-src/commands.lisp                # cmd-repl-bridge dispatching on subcommands
-test/repl-bridge-*-test.lisp     # Tests, one file per concern
+src/repl/protocol.lisp           # Wire encoding/decoding, error helpers
+src/repl/server.lisp             # Daemon: socket accept, worker thread
+src/repl/client.lisp             # One-shot client used by `eval`, etc.
+src/repl/redef.lisp              # Redefinition tracking
+src/commands.lisp                # cmd-repl dispatching on subcommands
+test/repl-*-test.lisp     # Tests, one file per concern
 ```
 
-A new `clpm.repl-bridge` package owns the server/client code. `clpm.commands` only sees the public surface (`start-server`, `with-client`, `send-request`).
+A new `clpm.repl` package owns the server/client code. `clpm.commands` only sees the public surface (`start-server`, `with-client`, `send-request`).
 
 ---
 
@@ -201,9 +200,9 @@ The wire protocol is line-delimited JSON. The daemon needs a reader; the writer 
 - Reader rejects: trailing garbage, unterminated string, invalid escape, lone `}`, `[1,]`, `{,}`, `01` (leading-zero number per JSON spec), bare identifiers (`undefined`).
 - Reader handles a 1 MB input without quadratic blowup (test asserts elapsed under 200 ms).
 
-### #002 — `[x]` `P0` `repl-bridge` `daemon` Socket server skeleton
+### #002 — `[x]` `P0` `repl` `daemon` Socket server skeleton
 
-A new module `src/repl_bridge/server.lisp` exposes `start-server` accepting a socket path. The function:
+A new module `src/repl/server.lisp` exposes `start-server` accepting a socket path. The function:
 
 - Binds an SBCL `sb-bsd-sockets:local-socket` at `:type :stream`, calls `bind`, then `chmod 0600` on the resulting path via `sb-posix:chmod`.
 - `listen`s with a small backlog (8 is plenty).
@@ -216,9 +215,9 @@ A new module `src/repl_bridge/server.lisp` exposes `start-server` accepting a so
 - `(start-server "/tmp/cl-bridge-test.sock")` listens and answers a `ping` request with a well-formed response.
 - Socket is mode 0600 after bind.
 - Server cleans up the socket file on graceful shutdown (`unwind-protect`).
-- New test `test/repl-bridge-server-test.lisp` exercises round-trip ping using `sb-bsd-sockets` as the client; no clpm CLI involved.
+- New test `test/repl-server-test.lisp` exercises round-trip ping using `sb-bsd-sockets` as the client; no clpm CLI involved.
 
-### #003 — `[x]` `P0` `repl-bridge` `eval` Worker thread with eval and output capture
+### #003 — `[x]` `P0` `repl` `eval` Worker thread with eval and output capture
 
 The server delegates eval to a dedicated `sb-thread:thread`. The worker:
 
@@ -238,11 +237,11 @@ The server delegates eval to a dedicated `sb-thread:thread`. The worker:
 - `eval '(format t "hi")'` returns `value: "NIL"`, `output: "hi"`.
 - `eval '(error "boom")'` returns `error: {code: "eval-error", message: "boom"}`, daemon stays alive.
 - `eval '(read)'` does not hang; reads EOF and either errors cleanly or returns NIL depending on the form.
-- New test `test/repl-bridge-eval-test.lisp` covers all four cases plus output-after-error (output flushed before condition handling).
+- New test `test/repl-eval-test.lisp` covers all four cases plus output-after-error (output flushed before condition handling).
 
-### #004 — `[x]` `P0` `repl-bridge` `client` One-shot client
+### #004 — `[x]` `P0` `repl` `client` One-shot client
 
-A small client (`src/repl_bridge/client.lisp`) that connects to a socket path, sends one request, reads one response, returns the parsed object. Handles:
+A small client (`src/repl/client.lisp`) that connects to a socket path, sends one request, reads one response, returns the parsed object. Handles:
 
 - Connect failure → returns `(:no-daemon ...)` so callers can decide to auto-start.
 - Broken pipe mid-read → returns `(:io-error ...)` for the same reason.
@@ -252,70 +251,67 @@ A small client (`src/repl_bridge/client.lisp`) that connects to a socket path, s
 
 - `with-client (c socket-path) (send-request c '("eval" (("form" . "(+ 1 2)"))))` returns the parsed result object.
 - Connect to a non-existent socket returns `(:no-daemon ...)` without raising.
-- Test `test/repl-bridge-client-test.lisp` covers connect, send, receive, timeout-closes-socket.
+- Test `test/repl-client-test.lisp` covers connect, send, receive, timeout-closes-socket.
 
-### #005 — `[x]` `P0` `repl-bridge` `cli` `cmd-repl-bridge` dispatch
+### #005 — `[x]` `P0` `repl` `cli` `cmd-repl` dispatch
 
-A new `cmd-repl-bridge` in `src/commands.lisp`, dispatching on the first arg:
+A new `cmd-repl` in `src/commands.lisp`, dispatching on the first arg:
 
 ```
-clpm repl-bridge serve [--socket PATH] [--no-load] [-p MEMBER] [--preload SYS]...
-clpm repl-bridge eval FORM [--package PKG] [-p MEMBER] [--no-autostart]
-clpm repl-bridge interrupt
-clpm repl-bridge status
-clpm repl-bridge stop
-clpm repl-bridge ping
+clpm repl daemon [--detach] [--no-load] [--status] [--stop]
+clpm repl eval FORM [--package PKG] [--worker NAME] [--debug] ...
+clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
 
-Help text (`print-command-help :repl-bridge`) with per-subcommand drilling per #017 of the main tracker.
+Help text (`print-command-help :repl`) with per-subcommand drilling per #017 of the main tracker.
 
 **Acceptance criteria**
 
-- `clpm repl-bridge` with no args prints the usage line and exits 1.
-- `clpm repl-bridge help <subcommand>` prints the focused page.
+- `clpm repl` with no args prints the usage line and exits 1.
+- `clpm help repl <subcommand>` prints the focused page.
 - Unknown subcommand prints "Unknown subcommand: X" and exits 1.
-- New test `test/repl-bridge-help-test.lisp` matches the existing per-subcommand help test pattern.
+- New test `test/repl-help-test.lisp` matches the existing per-subcommand help test pattern.
 
-### #006 — `[x]` `P0` `repl-bridge` `cli` `serve` end-to-end
+### #006 — `[x]` `P0` `repl` `cli` `daemon` end-to-end
 
-`clpm repl-bridge serve` wires #002 + #003 + project loading (reuse the existing project-discovery and lockfile-resolution path from `cmd-repl`). Forks via `sb-daemon:daemonize` (or a homegrown fork-and-detach if `sb-daemon` is unavailable on macOS — check). Writes `.clpm/repl-bridge.pid`, binds `.clpm/repl-bridge.sock`, redirects stdout/stderr to `.clpm/repl-bridge.log`.
+`clpm repl daemon` wires #002 + #003 + project loading. Bare daemon runs in the foreground; `--detach` launches the background process. Writes `.clpm/repl.pid`, binds `.clpm/repl.sock`, redirects stdout/stderr to `.clpm/repl.log`.
 
 **Acceptance criteria**
 
-- `clpm repl-bridge serve` in a project with a lockfile starts a daemon that has the lockfile-resolved systems loaded (verifiable: a subsequent `eval '(asdf:registered-system "alexandria")'` returns non-nil).
-- Two consecutive `serve` invocations in the same project: the second exits non-zero with "daemon already running (pid N, socket .clpm/repl-bridge.sock)".
+- `clpm repl daemon` in a project with a lockfile starts a daemon that has the lockfile-resolved systems loaded (verifiable: a subsequent `eval '(asdf:registered-system "alexandria")'` returns non-nil).
+- Two concurrent daemon starts in the same project: one wins and the other exits non-zero with "daemon already running (pid N, socket .clpm/repl.sock)".
 - Pidfile and socket cleaned up on normal shutdown.
 
-### #007 — `[x]` `P0` `repl-bridge` `cli` `eval` end-to-end with auto-start
+### #007 — `[x]` `P0` `repl` `cli` `eval` end-to-end with auto-start
 
-`clpm repl-bridge eval FORM` connects to `.clpm/repl-bridge.sock`. If absent or connect fails, spawn `serve --daemonize`, wait up to 5 s for the socket to appear, retry. Then send the request, print the JSON result line, exit with status 0 on success, non-zero on `error`-shaped responses.
+`clpm repl eval FORM` connects to `.clpm/repl.sock`. If absent or connect fails, spawn `daemon --detach`, wait up to 5 s for the socket to appear, retry. Then send the request, print the JSON result line, exit with status 0 on success, non-zero on `error`-shaped responses.
 
 Pretty mode: `--pretty` reformats the response as a human-readable summary (`value=...; output:\n...; error: ...`). Default mode is raw JSON, ideal for LLM consumption and `jq` piping.
 
 **Acceptance criteria**
 
-- `clpm repl-bridge eval '(+ 1 2)'` in a fresh project prints a JSON response with `value: "3"`. Daemon was auto-started.
+- `clpm repl eval '(+ 1 2)'` in a fresh project prints a JSON response with `value: "3"`. Daemon was auto-started.
 - Second `eval` in the same project reuses the daemon (no new pidfile, same pid).
 - `--no-autostart` errors with "no daemon running" if the socket is absent.
 - Exit code is 0 for success, 1 for `error`-shaped response, 2 for transport failure (no daemon when autostart is disabled).
-- Test `test/repl-bridge-eval-cli-test.lisp` exercises all four cases.
+- Test `test/repl-eval-cli-test.lisp` exercises all four cases.
 
-### #008 — `[x]` `P1` `repl-bridge` `interrupt` Interrupt mid-eval
+### #008 — `[x]` `P1` `repl` `interrupt` Interrupt mid-eval
 
 Two paths:
 
-- **Client-side broken pipe.** Client closes its socket (e.g. user ctrl-C'd `clpm repl-bridge eval`). Daemon's accept-loop notices EOF on `read-line` or write failure on `write-line`. If a worker is mid-eval, the daemon calls `sb-thread:interrupt-thread worker (lambda () (signal 'clpm.repl-bridge:user-interrupt))`. The worker's eval handler catches the interrupt, unwinds, replies `interrupted` (but the client is gone — that's fine, the daemon discards the response).
+- **Client-side broken pipe.** Client closes its socket (e.g. user ctrl-C'd `clpm repl eval`). Daemon's accept-loop notices EOF on `read-line` or write failure on `write-line`. If a worker is mid-eval, the daemon calls `sb-thread:interrupt-thread worker (lambda () (signal 'clpm.repl:user-interrupt))`. The worker's eval handler catches the interrupt, unwinds, replies `interrupted` (but the client is gone — that's fine, the daemon discards the response).
 - **Explicit `interrupt` method.** Client sends `interrupt` over a *separate* connection (the original eval connection is busy reading the response). Daemon signals the worker as above, replies `{}` immediately to the interrupt request, then writes `interrupted` to the original eval connection.
 
-`clpm repl-bridge interrupt` uses the explicit method.
+`clpm repl call interrupt` uses the explicit method.
 
 **Acceptance criteria**
 
-- `clpm repl-bridge eval '(loop)'` from one terminal; `clpm repl-bridge interrupt` from another within 1 s; both commands return within 2 s. The eval terminal sees a JSON response with `code: "interrupted"`.
-- Ctrl-C on a running `clpm repl-bridge eval '(sleep 100)'` interrupts the daemon's worker within 500 ms (verified by sending a subsequent `ping` that succeeds).
-- Test `test/repl-bridge-interrupt-test.lisp` covers both paths.
+- `clpm repl eval '(loop)'` from one terminal; `clpm repl call interrupt` from another within 1 s; both commands return within 2 s. The eval terminal sees a JSON response with `code: "interrupted"`.
+- Ctrl-C on a running `clpm repl eval '(sleep 100)'` interrupts the daemon's worker within 500 ms (verified by sending a subsequent `ping` that succeeds).
+- Test `test/repl-interrupt-test.lisp` covers both paths.
 
-### #009 — `[x]` `P1` `repl-bridge` `eval` Condition marshalling
+### #009 — `[x]` `P1` `repl` `eval` Condition marshalling
 
 Capture details on conditions:
 
@@ -330,9 +326,9 @@ Capture details on conditions:
 - A condition signaled but *handled* within the form (e.g. `(handler-case (error "x") (error () 1))` returning `1`) appears in `conditions: []` — handled conditions are not reported.
 - Backtrace omits bridge internals; first frame is in user-supplied code.
 
-### #010 — `[x]` `P1` `repl-bridge` `package` Package persistence and per-call override
+### #010 — `[x]` `P1` `repl` `package` Package persistence and per-call override
 
-The daemon maintains `clpm.repl-bridge::*current-package*` as the persistent current package. Initial value: `(find-package "CL-USER")` (after `--no-load`) or the first package the project loads.
+The daemon maintains `clpm.repl::*current-package*` as the persistent current package. Initial value: `(find-package "CL-USER")` (after `--no-load`) or the first package the project loads.
 
 - `eval` with no `package` param uses the persistent current package.
 - `eval` with a `package` param binds `*package*` for that call only; does not mutate the persistent state.
@@ -345,32 +341,32 @@ Per-call package precedence: `params.package` > daemon's `*current-package*`.
 
 - Call 1: `eval '(defpackage :test-pkg)' 'cl-user'` → ok. Call 2: `eval '(in-package :test-pkg)' 'cl-user'` → ok, sets persistent. Call 3: `eval '(package-name *package*)'` → `"TEST-PKG"`.
 - `eval '(package-name *package*)' --package 'cl'` → `"COMMON-LISP"`. The persistent package is unchanged.
-- Test `test/repl-bridge-package-test.lisp`.
+- Test `test/repl-package-test.lisp`.
 
-### #011 — `[x]` `P1` `repl-bridge` `lifecycle` Pidfile + socket-path management
+### #011 — `[x]` `P1` `repl` `lifecycle` Pidfile + socket-path management
 
 Both daemon and client agree on:
 
-- Pidfile: `.clpm/repl-bridge.pid`. Contains the daemon PID as a decimal string on a single line.
-- Socket: `.clpm/repl-bridge.sock`. Created mode 0600.
-- Log: `.clpm/repl-bridge.log`. Append-only stdout/stderr capture.
-- Lock: `.clpm/repl-bridge.lock` (via `clpm.platform:with-file-lock` from #013 of the main tracker) — held during pidfile-write to prevent two `serve` invocations racing.
+- Pidfile: `.clpm/repl.pid`. Contains the daemon PID as a decimal string on a single line.
+- Socket: `.clpm/repl.sock`. Created mode 0600.
+- Log: `.clpm/repl.log`. Append-only stdout/stderr capture.
+- Lock: `.clpm/repl.lock` (via `clpm.platform:with-file-lock` from #013 of the main tracker) — held during pidfile-write to prevent two `serve` invocations racing.
 
 Stale-pid detection: on `serve` startup, if pidfile exists, read the PID and `kill(pid, 0)` (via `sb-posix:kill` with signal 0); if it fails with ESRCH, the previous daemon is gone — remove stale pidfile and socket, proceed. Otherwise, exit with "daemon already running."
 
 **Acceptance criteria**
 
-- `kill -9` the daemon, then `clpm repl-bridge eval ...` from a fresh shell: client detects no listener, removes stale files, auto-starts a new daemon. No human intervention required.
-- Two concurrent `serve` invocations: one wins (acquires the lock and the socket), the other exits with a clear message naming the live PID.
-- `clpm repl-bridge status` reports pid, socket path, log path, uptime, and the project root the daemon is rooted at.
+- `kill -9` the daemon, then `clpm repl eval ...` from a fresh shell: client detects no listener, removes stale files, auto-starts a new daemon. No human intervention required.
+- Two concurrent daemon starts: one wins (acquires the lock and the socket), the other exits with a clear message naming the live PID.
+- `clpm repl daemon --status` reports pid, socket path, log path, uptime, and the project root the daemon is rooted at.
 
-### #012 — `[x]` `P1` `repl-bridge` `lifecycle` `status` and `stop`
+### #012 — `[x]` `P1` `repl` `lifecycle` `daemon --status` and `daemon --stop`
 
 `status`:
 
 - No pidfile → "not running".
 - Pidfile + live process + responsive socket → "running (pid N, uptime X)".
-- Pidfile + live process + unresponsive socket → "running but unresponsive (pid N) — try `clpm repl-bridge stop`".
+- Pidfile + live process + unresponsive socket → "running but unresponsive (pid N) — try `clpm repl daemon --stop`".
 - Pidfile + dead process → "stale pidfile (cleaned)" and removes it.
 
 `stop`:
@@ -384,32 +380,32 @@ Stale-pid detection: on `serve` startup, if pidfile exists, read the PID and `ki
 - `status` reports each of the four states correctly. Test asserts the exit code (0 for any well-determined state).
 - `stop` is idempotent — running it twice in a row succeeds both times.
 
-### #013 — `[x]` `P1` `repl-bridge` `tests` End-to-end smoke test
+### #013 — `[x]` `P1` `repl` `tests` End-to-end smoke test
 
-Black-box test of the whole feature using the actual CLI: spawn a daemon via `clpm repl-bridge serve`, run a series of `clpm repl-bridge eval` commands, assert observed JSON output. Tear down with `stop`.
+Black-box test of the whole feature using the actual CLI: spawn a daemon via `clpm repl daemon`, run a series of `clpm repl eval` commands, assert observed JSON output. Tear down with `daemon --stop`.
 
 Coverage:
 
 - Cold start (no daemon) auto-spawns and runs an eval.
 - Three consecutive evals share state (`(defvar *x* 1)` then `*x*` returns 1).
 - Eval of a form that errors returns the right `error` shape.
-- `stop` cleans up files.
+- `daemon --stop` cleans up files.
 
 **Acceptance criteria**
 
-- `test/repl-bridge-e2e-test.lisp` runs in under 10 s and asserts each case.
+- `test/repl-e2e-test.lisp` runs in under 10 s and asserts each case.
 - No leaked daemons after the test exits (pgrep-style check at teardown).
 
-### #014 — `[x]` `P1` `repl-bridge` `help` Per-subcommand help
+### #014 — `[x]` `P1` `repl` `help` Per-subcommand help
 
-Per the pattern established in main-tracker #017: `clpm help repl-bridge` shows a top-level page; `clpm help repl-bridge eval`, `clpm help repl-bridge serve`, etc. show focused pages. `print-command-help` gains a `:repl-bridge` branch with sub-subcommand drilling.
+Per the pattern established in main-tracker #017: `clpm help repl` shows a top-level page; `clpm help repl daemon`, `clpm help repl eval`, and `clpm help repl call` show focused pages. `print-command-help` has a `:repl` branch with sub-subcommand drilling.
 
 **Acceptance criteria**
 
-- Five focused pages: `serve`, `eval`, `interrupt`, `status`, `stop`. Each cites its flags and a short example.
-- `test/help-output-test.lisp` extended to assert each page contains its `Usage: clpm repl-bridge <sub>` line and that the umbrella usage doesn't leak.
+- Three focused pages: `daemon`, `eval`, and `call`. Each cites its flags and a short example.
+- `test/help-output-test.lisp` extended to assert each page contains its `Usage: clpm repl <sub>` line and that the umbrella usage doesn't leak.
 
-### #015 — `[x]` `P1` `repl-bridge` `safety` Output size cap
+### #015 — `[x]` `P1` `repl` `safety` Output size cap
 
 Worker captures `*standard-output*` to a string-output stream. When the captured length exceeds 1 MB (sum of stdout + stderr), close the form's output streams to a sink (further writes silently discarded) and set a flag. The response carries `code: "output-truncated"` but still includes the truncated head.
 
@@ -418,7 +414,7 @@ Worker captures `*standard-output*` to a string-output stream. When the captured
 - `eval '(loop (format t "x"))'` (interrupted at some bound) returns a response with truncated output, ~1 MB in size, `code: "output-truncated"`, and the daemon survives.
 - A non-truncating eval (output < 1 MB) does not carry the truncated code.
 
-### #016 — `[x]` `P1` `repl-bridge` `safety` Request size cap
+### #016 — `[x]` `P1` `repl` `safety` Request size cap
 
 Daemon refuses requests larger than 64 KB. The first `read-line` is bounded; if the line exceeds the cap, the daemon reads-and-discards the rest, replies `protocol-error`, and closes the connection.
 
@@ -427,7 +423,7 @@ Daemon refuses requests larger than 64 KB. The first `read-line` is bounded; if 
 - 64 KB request: accepted.
 - 64 KB + 1 byte request: rejected with `protocol-error`; daemon remains responsive.
 
-### #017 — `[x]` `P2` `repl-bridge` `redef` Track redefined top-level forms
+### #017 — `[x]` `P2` `repl` `redef` Track redefined top-level forms
 
 A pre-eval pass walks the form (one level deep — no recursion into macroexpansion) looking for top-level definers. For each, record:
 
@@ -445,9 +441,9 @@ The persistent log survives across evals but resets on `reset` or daemon restart
 - Redefining the same function returns *one* entry (the most recent form), not two.
 - `defmethod` on the same `defgeneric` is tracked per method (qualifiers + specializers in the key).
 
-### #018 — `[x]` `P2` `repl-bridge` `redef` `diff` subcommand
+### #018 — `[x]` `P2` `repl` `redef` `list-redefinitions` method
 
-`clpm repl-bridge diff` walks the redefinition log; for each entry, locates the symbol's source file via `sb-introspect:find-definition-source` (or the equivalent), reads the file, finds the corresponding top-level form, and diffs the recorded form vs. the file form. Output is a list of `{kind, name, package, status}` where status is one of `up-to-date`, `differs`, `not-in-source`.
+`clpm repl call list-redefinitions` walks the redefinition log; for each entry, locates the symbol's source file via `sb-introspect:find-definition-source` (or the equivalent), reads the file, finds the corresponding top-level form, and reports whether the recorded form still matches source. Output is a list of `{kind, name, package, status}` where status is one of `up-to-date`, `differs`, `not-in-source`.
 
 This is the *state drift* mitigation. Run before declaring work done.
 
@@ -457,7 +453,7 @@ This is the *state drift* mitigation. Run before declaring work done.
 - Save the matching form to the source file; `diff` now reports `up-to-date`.
 - Doesn't false-positive on forms whose recorded printed form differs only in whitespace.
 
-### #019 — `[x]` `P2` `repl-bridge` `describe` `describe` and `set-package` methods
+### #019 — `[x]` `P2` `repl` `describe` `describe` and `set-package` methods
 
 `describe` captures `(describe symbol)` output as a string. `set-package` mutates the daemon's persistent current package without going through the worker (so it can't be interrupted and can't error from user code).
 
@@ -466,7 +462,7 @@ This is the *state drift* mitigation. Run before declaring work done.
 - `describe '(("symbol" . "car"))'` returns text containing `"COMMON-LISP:CAR"` and `"function"`.
 - `set-package '(("name" . "cl-user"))'` returns `{package: "COMMON-LISP-USER"}` and the next `eval` reports the new package.
 
-### #020 — `[x]` `P2` `repl-bridge` `lifecycle` `reset` method
+### #020 — `[x]` `P2` `repl` `lifecycle` `reset` method
 
 `reset` kills the worker thread (via `sb-thread:terminate-thread`) and spawns a fresh one. Useful when the worker's state is wedged (corrupt `*readtable*`, accidentally redefined `cl:car`, etc.) but the daemon is still serviceable.
 
@@ -485,15 +481,15 @@ Does not affect:
 
 ### #021 — `[x]` `P2` `docs` `skill` Claude Code skill markdown
 
-Ship `.claude/skills/clpm-repl-bridge.md` documenting how an LLM should drive the bridge:
+Ship `.claude/skills/clpm-repl.md` documenting how an LLM should drive the bridge:
 
-- "Always run `clpm repl-bridge eval` for one-shot forms; the daemon persists state between calls."
+- "Always run `clpm repl eval` for one-shot forms; the daemon persists state between calls."
 - "Prefer redefining a single `defun` over `asdf:load-system` reloads — much faster."
-- "After non-trivial in-image redefinitions, run `clpm repl-bridge diff` to see what's drifted from the source files."
-- "If a form hangs, run `clpm repl-bridge interrupt` from another shell or via a second tool call."
+- "After non-trivial in-image redefinitions, run `clpm repl call list-redefinitions` to see what's drifted from the source files."
+- "If a form hangs, run `clpm repl call interrupt` from another shell or via a second tool call."
 - "The eval response is one line of JSON: parse `result.value` (string), `result.output` (string), `error.code` if present."
 
-The skill is invoked via `/skill clpm-repl-bridge` in Claude Code, or auto-loaded from the project's `.claude/skills/` directory.
+The skill is invoked via `/skill clpm-repl` in Claude Code, or auto-loaded from the project's `.claude/skills/` directory.
 
 **Acceptance criteria**
 
@@ -503,14 +499,14 @@ The skill is invoked via `/skill clpm-repl-bridge` in Claude Code, or auto-loade
 
 ### #022 — `[x]` `P2` `docs` `readme` "AI-assisted development" section
 
-Add a README subsection (after "Trust & provenance" probably) explaining the bridge: what it is, why it exists, a 5-line copy-paste example showing `clpm repl-bridge serve` + an eval, and a pointer to the skill.
+Add a README subsection (after "Trust & provenance" probably) explaining the bridge: what it is, why it exists, a 5-line copy-paste example showing `clpm repl daemon --detach` + an eval, and a pointer to the skill.
 
 **Acceptance criteria**
 
 - README has a clear section header.
 - Example is copy-pasteable and works from `clpm new myproj --bin && cd myproj`.
 
-### #023 — `[x]` `P3` `repl-bridge` `health` `ping` and backtrace
+### #023 — `[x]` `P3` `repl` `health` `ping` and backtrace
 
 `ping` returns daemon health: pid, uptime, lisp impl/version, count of evals serviced. Cheap; doesn't touch the worker.
 
@@ -519,55 +515,55 @@ Backtrace in `eval-error` responses is the first 16 stack frames, skipping bridg
 **Acceptance criteria**
 
 - `ping` round-trip is under 5 ms wall-clock on localhost.
-- An `eval-error` includes `error.backtrace` as an array of up to 16 strings, none beginning with `CLPM.REPL-BRIDGE::` or `SB-IMPL::`.
+- An `eval-error` includes `error.backtrace` as an array of up to 16 strings, none beginning with `CLPM.REPL::` or `SB-IMPL::`.
 
-### #024 — `[x]` `P3` `repl-bridge` `cross-platform` Windows TCP fallback
+### #024 — `[x]` `P3` `repl` `cross-platform` Windows TCP fallback
 
-Windows lacks Unix domain sockets (until very recent builds). Fall back to a loopback TCP socket bound to `127.0.0.1` on a random ephemeral port; write `.clpm/repl-bridge.port` containing the port and a 32-hex-char shared token. Every request must include `"token": "..."` in its params; daemon rejects requests without the matching token.
+Windows lacks Unix domain sockets (until very recent builds). Fall back to a loopback TCP socket bound to `127.0.0.1` on a random ephemeral port; write `.clpm/repl.port` containing the port and a 32-hex-char shared token. Every request must include `"token": "..."` in its params; daemon rejects requests without the matching token.
 
 Deferred unless a Windows user files an issue.
 
 **Acceptance criteria**
 
-- `cmd-repl-bridge` detects the OS and uses the right transport.
+- `cmd-repl` detects the OS and uses the right transport.
 - Windows tests skip with a clear message if not running on Windows.
 
-### #025 — `[x]` `P3` `repl-bridge` `config` Manifest-level autostart and preload
+### #025 — `[x]` `P3` `repl` `config` Manifest-level autostart and preload
 
 Allow projects to express:
 
 ```lisp
-:repl-bridge (:autostart t :preload ("clpm" "alexandria"))
+:repl (:autostart t :preload ("clpm" "alexandria"))
 ```
 
-`autostart: t` means `clpm install` ends with a `clpm repl-bridge serve --daemonize` if no daemon is running. `preload` is a list of additional systems to `asdf:load-system` after the lockfile-resolved ones.
+`autostart: t` means `clpm deps sync` ends with a `clpm repl daemon --detach` if no daemon is running. `preload` is a list of additional systems to `asdf:load-system` after the lockfile-resolved ones.
 
 **Acceptance criteria**
 
-- Manifest parser (`src/project.lisp`) accepts the new `:repl-bridge` field, round-trips it.
-- `clpm install` honors `autostart: t`; daemon comes up with the listed systems loaded.
+- Manifest parser (`src/project.lisp`) accepts the new `:repl` field, round-trips it.
+- `clpm deps sync` honors `autostart: t`; daemon comes up with the listed systems loaded.
 
-### #026 — `[x]` `P3` `repl-bridge` `preload` Lockfile-driven preload
+### #026 — `[x]` `P3` `repl` `preload` Lockfile-driven preload
 
-`clpm repl-bridge serve` loads the project's lockfile-resolved systems on startup. Already implicit via #006 if `cmd-repl`'s loading is reused — promote it to an explicit, tested guarantee. The systems loaded are precisely those `clpm.solver:resolution-to-load-order` would return.
+`clpm repl daemon` loads the project's lockfile-resolved systems on startup. The systems loaded are precisely those `clpm.solver:resolution-to-load-order` would return.
 
 **Acceptance criteria**
 
-- After `serve`, `eval '(mapcar #\'asdf:component-name (asdf:already-loaded-systems))'` returns the lockfile's resolved systems plus their transitive deps.
+- After `daemon`, `eval '(mapcar #\'asdf:component-name (asdf:already-loaded-systems))'` returns the lockfile's resolved systems plus their transitive deps.
 - `--no-load` disables this; daemon starts with no project systems loaded.
 
-### #027 — `[x]` `P3` `repl-bridge` `obs` Structured event log
+### #027 — `[x]` `P3` `repl` `obs` Structured event log
 
-Daemon writes one JSON line per event to `.clpm/repl-bridge.log`: `{ts, event, id?, method?, elapsed_ms?, error?}`. Events: `accept`, `request`, `response`, `interrupt`, `worker-died`, `shutdown`.
+Daemon writes one JSON line per event to `.clpm/repl.log`: `{ts, event, id?, method?, elapsed_ms?, error?}`. Events: `accept`, `request`, `response`, `interrupt`, `worker-died`, `shutdown`.
 
-Lets the user (or LLM via `Bash(rg <error> .clpm/repl-bridge.log)`) see what's been happening without enabling verbose mode at the protocol layer.
+Lets the user (or LLM via `Bash(rg <error> .clpm/repl.log)`) see what's been happening without enabling verbose mode at the protocol layer.
 
 **Acceptance criteria**
 
 - One-line-per-event format; `jq` can consume the log.
 - Log rotates after 10 MB (rename to `.1`, start fresh).
 
-### #028 — `[x]` `P3` `repl-bridge` `cross-impl` CCL/ECL support
+### #028 — `[x]` `P3` `repl` `cross-impl` CCL/ECL support
 
 The bridge core is SBCL-specific in two places: thread interrupt (`sb-thread:interrupt-thread`) and socket binding (`sb-bsd-sockets`). Generalize:
 
@@ -589,7 +585,7 @@ Land in dependency order; each ticket is roughly self-contained but the daemon w
 
 1. **#001** (JSON reader) — unblocks everything.
 2. **#002 + #003 + #004** (server skeleton, eval worker, client). These three can land as a single PR or as three small ones; together they make a working daemon talking to a working client.
-3. **#005 + #006 + #007** (CLI wiring). End of week one: `clpm repl-bridge eval '(+ 1 2)'` works on a fresh project.
+3. **#005 + #006 + #007** (CLI wiring). End of week one: `clpm repl eval '(+ 1 2)'` works on a fresh project.
 4. **#008-#012** (interrupt, conditions, package, pidfile, status/stop). End of week two: feature is robust enough to use daily.
 5. **#013-#016** (e2e tests, help, output cap, request cap). Hardening pass.
 6. **#017-#020** (redefinition tracking, describe, reset). The productivity multiplier.

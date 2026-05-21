@@ -28,10 +28,10 @@ Commands:
   project ...      Create projects, workspaces, and packages
   deps ...         Manage, realize, and inspect dependencies
   registry ...     Manage registries, keys, trust, and publishing
-  run ...          Run entrypoints, tests, scripts, REPLs, or commands
+  run ...          Run entrypoints, tests, scripts, or commands
   store ...        Clean project outputs and garbage collect the store
   skill            Print an agent SKILL.md for using clpm
-  repl-bridge ...  Persistent Lisp image (for LLM-driven dev)
+  repl ...         Persistent Lisp image (for LLM-driven dev)
 
 Options:
   -v, --verbose    Verbose output
@@ -52,7 +52,7 @@ Examples:
   clpm project init myproject
   clpm deps add alexandria bordeaux-threads
   clpm deps sync
-  clpm run repl
+  clpm repl eval '(asdf:load-system \"myproject\")'
   clpm deps update alexandria
 " *version*))
 
@@ -109,7 +109,7 @@ Returns (values command command-args options)."
              (push (cons :lisp kind) options)))
           ;; Workspace-member target: `-p` / `--package`. Only consumed as a
           ;; global *before* the command, so subcommands are free to define
-          ;; their own `--package` flag (the repl-bridge introspection commands
+          ;; their own `--package` flag (the repl introspection commands
           ;; mean it as a Common Lisp package).
           ((and (null command)
                 (or (string= arg "-p") (string= arg "--package")))
@@ -184,7 +184,7 @@ Returns (values command command-args options)."
       (incf i))
     (if command
         (values command (nreverse command-args) options)
-        (values :deps (list "sync") options))))
+        (values :help nil options))))
 
 (defun apply-options (options)
   "Apply parsed options to global variables."
@@ -264,8 +264,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
              (apply #'clpm.commands:cmd-store command-args))
             (:skill
              (apply #'clpm.commands:cmd-skill command-args))
-            (:repl-bridge
-             (apply #'clpm.commands:cmd-repl-bridge command-args))
+            (:repl
+             (apply #'clpm.commands:cmd-repl command-args))
             (t
              (format *error-output* "Unknown command: ~A~%" command)
              (print-usage)
