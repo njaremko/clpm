@@ -1980,6 +1980,30 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None.
 
+### Iteration 62: Preserve Quicklisp Inner Pins on Update
+
+- Commands deleted:
+  - The accidental first-use path where `registry update` forgot configured
+    Quicklisp `systems.txt` / `releases.txt` pins after the local registry
+    cache was removed.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Local registry metadata is a cache of configured trust state, not the
+    source of that trust state.
+- Commands that survived and why:
+  - `registry update <quicklisp>` survives as ordinary refresh that enforces
+    all configured pins.
+  - `registry trust refresh <quicklisp>` survives as the only operation that
+    may intentionally replace Quicklisp pins.
+- Laws/protocol invariants added:
+  - Configured Quicklisp pins travel with the registry reference into every
+    clone/update operation.
+  - Removing `CLPM_HOME/registries/<name>/` must not weaken or reset
+    configured Quicklisp trust.
+- Remaining discomfort:
+  - None.
+
 ## Constructors
 
 Terminal constructors:

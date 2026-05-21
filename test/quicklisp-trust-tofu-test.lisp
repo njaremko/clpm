@@ -260,6 +260,27 @@ Returns (values base-url stop-fn)."
                               "Expected pinned releases sha256 ~S, got ~S"
                               releases-pin (clpm.project:registry-ref-quicklisp-releases-sha256 ref)))
 
+               ;; Mutate only systems.txt while distinfo.txt stays pinned and
+               ;; the local registry cache is absent. `registry update` must
+               ;; enforce configured systems pins rather than treating the
+               ;; missing in-memory pin as first use.
+               (uiop:delete-directory-tree
+                (merge-pathnames "registries/quicklisp/" clpm-home)
+                :validate t
+                :if-does-not-exist :ignore)
+               (write-text systems-txt "foo foo.asd foo\nbar bar.asd bar\n")
+               (multiple-value-bind (code _stdout stderr)
+                   (run-cli-captured '("registry" "update" "quicklisp"))
+                 (declare (ignore _stdout))
+                 (assert-eql 1 code)
+                 (assert-true (search "SHA-256 mismatch" stderr :test #'char-equal)
+                              "Expected systems mismatch error, got:~%~A" stderr)
+                 (assert-true (search "clpm registry trust refresh quicklisp"
+                                      stderr :test #'char-equal)
+                              "Expected canonical trust refresh command, got:~%~A"
+                              stderr))
+               (write-text systems-txt "foo foo.asd foo\n")
+
                ;; Mutate served distinfo; update should now fail without refresh.
                (write-text
                 distinfo

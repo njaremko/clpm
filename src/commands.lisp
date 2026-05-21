@@ -4296,6 +4296,10 @@ Default: remove the project's .clpm/ activation cache.
                                name
                                (clpm.project:registry-ref-url ref)
                                :trust-key (clpm.project:registry-ref-trust ref)
+                               :quicklisp-systems-sha256
+                               (clpm.project:registry-ref-quicklisp-systems-sha256 ref)
+                               :quicklisp-releases-sha256
+                               (clpm.project:registry-ref-quicklisp-releases-sha256 ref)
                                :kind (clpm.project:registry-ref-kind ref))))
                      (clpm.registry:update-registry reg))
                  (error (c)
@@ -4384,6 +4388,10 @@ Default: remove the project's .clpm/ activation cache.
                                 (clpm.project:registry-ref-url ref)
                                 :trust-key (clpm.project:registry-ref-trust ref)
                                 :kind kind
+                                :quicklisp-systems-sha256
+                                (clpm.project:registry-ref-quicklisp-systems-sha256 ref)
+                                :quicklisp-releases-sha256
+                                (clpm.project:registry-ref-quicklisp-releases-sha256 ref)
                                 :refresh-trust t)))
                       (clpm.registry:update-registry reg :refresh-trust t)
                       (log-info "Refreshed trust for ~A" name)
