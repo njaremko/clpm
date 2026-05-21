@@ -68,6 +68,7 @@
   (assert-contains stdout "repl")
   (dolist (scoped-option '("-j, --jobs"
                            "--lisp"
+                           "-p, --package"
                            "--offline"
                            "--insecure"
                            "--fetch-retries"

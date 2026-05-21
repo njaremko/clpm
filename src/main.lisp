@@ -35,7 +35,6 @@ Commands:
 
 Options:
   -v, --verbose    Verbose output
-  -p, --package M  Workspace member to target
   -h, --help       Show this help
   --version        Show version
 
@@ -305,8 +304,44 @@ Returns (values command command-args options)."
             (not (sync-lock-stage-p command-args)))))
     (t nil)))
 
+(defun workspace-target-command-p (command command-args)
+  "Return true when COMMAND may resolve a workspace member target."
+  (let ((subcommand (first command-args)))
+    (case command
+      (:project
+       (and (stringp subcommand)
+            (string= subcommand "package")))
+      (:deps
+       (and (stringp subcommand)
+            (member subcommand
+                    '("add" "remove" "sync" "update" "search" "info"
+                      "tree" "why" "audit" "sbom")
+                    :test #'string=)))
+      (:registry
+       (and (stringp subcommand)
+            (string= subcommand "publish")))
+      (:run
+       (or (null subcommand)
+           (string= subcommand "--")
+           (member subcommand
+                   '("exec" "test" "script" "scripts")
+                   :test #'string=)))
+      (:repl
+       (and (stringp subcommand)
+            (member subcommand '("daemon" "eval" "call")
+                    :test #'string=)))
+      (:store
+       (and (stringp subcommand)
+            (string= subcommand "clean")))
+      (t nil))))
+
 (defun validate-option-scope (command command-args options)
   "Reject global options that have no denotation for COMMAND."
+  (when (and (option-present-p :package options)
+             (not (workspace-target-command-p command command-args)))
+    (clpm.errors:signal-error
+     'clpm.errors:clpm-user-error
+     "workspace member target only applies to project-scoped commands: clpm project package, clpm deps ..., clpm registry publish, clpm run ..., clpm repl ..., or clpm store clean"))
   (when (and (option-present-p :insecure options)
              (not (registry-verification-command-p command command-args)))
     (clpm.errors:signal-error

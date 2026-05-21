@@ -44,7 +44,9 @@ when computing the effective set.")
 When not in a project, only the global config registries are used."
   (clpm.platform:ensure-directories)
   (multiple-value-bind (_project-root manifest-path _lock-path)
-      (clpm.project:find-project-root)
+      (if *target-package*
+          (find-effective-project-root)
+          (clpm.project:find-project-root))
     (declare (ignore _project-root _lock-path))
     (let ((refs
             (if manifest-path
@@ -402,6 +404,10 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
       ((null kind)
        (values nil nil nil nil nil))
       ((eq kind :project)
+       (when *target-package*
+         (log-error "-p/--package selects a workspace member and is only valid from a workspace root.")
+         (return-from find-effective-project-root
+           (values nil nil nil nil nil)))
        (values root manifest lock nil nil))
       ((eq kind :workspace)
        (let* ((ws (clpm.workspace:read-workspace-file workspace-path))
@@ -695,7 +701,8 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                         (:test-depends "test-depends")))))
 
         (uiop:with-current-directory (project-root)
-          (cmd-resolve))))))
+          (let ((*target-package* nil))
+            (cmd-resolve)))))))
 
 (defun cmd-remove (&rest args)
   "Remove a dependency from clpm.project and refresh clpm.lock."
@@ -761,7 +768,8 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                     (:test-depends "test-depends")))
 
         (uiop:with-current-directory (project-root)
-          (cmd-resolve))))))
+          (let ((*target-package* nil))
+            (cmd-resolve)))))))
 
 ;;; search command
 
@@ -2968,7 +2976,8 @@ See `clpm help repl' for the full surface."
       (unless (installed-and-fresh-p)
         (log-info "Project not installed/activated (or out of date); running 'clpm deps sync'...")
         (let ((rc (uiop:with-current-directory (project-root)
-                    (cmd-install))))
+                    (let ((*target-package* nil))
+                      (cmd-install)))))
           (unless (zerop rc)
             (return-from ensure-project-activated (values nil rc)))))
       (if (uiop:file-exists-p cp)
@@ -3545,7 +3554,8 @@ to the output path; no wrapper is needed since CCL doesn't grab CLI flags."
                     (not (uiop:file-exists-p config-path)))
             (log-info "Ensuring project is installed before packaging...")
             (let ((rc (uiop:with-current-directory (project-root)
-                        (cmd-install))))
+                        (let ((*target-package* nil))
+                          (cmd-install)))))
               (unless (zerop rc)
                 (return-from cmd-package rc)))
             (setf lock-path (merge-pathnames "clpm.lock" project-root)))
@@ -5608,6 +5618,7 @@ sub-subcommand=\"set\")."
             (p "Builds a distributable executable in dist/ based on clpm.project :package.")
             (p "")
             (p "Scoped options:")
+            (p "  -p, --package <member>  Workspace member target from a workspace root.")
             (p "  --lisp <impl>  Lisp implementation to use (sbcl|ccl|ecl).")
             0)
            ((and sub (string= sub "workspace"))
@@ -5726,6 +5737,9 @@ sub-subcommand=\"set\")."
             (p "  clpm deps sync [--to lock|source|build|active]")
             (p "  clpm deps update [system ...]")
             (p "  clpm deps search|info|tree|why|audit|sbom ...")
+            (p "")
+            (p "Scoped options:")
+            (p "  -p, --package <member>  Workspace member target from a workspace root.")
             0))))
       (:skill
        (p "Usage: clpm skill")
@@ -5829,6 +5843,9 @@ sub-subcommand=\"set\")."
             0)
            ((and sub (string= sub "publish"))
             (p "Usage: clpm registry publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>]")
+            (p "")
+            (p "Scoped options:")
+            (p "  -p, --package <member>  Workspace member target from a workspace root.")
             0)
            (t
             (p "Subcommands:")
@@ -5912,6 +5929,9 @@ sub-subcommand=\"set\")."
             (p "the exact parameter schema for a method.")
             (p "")
             (p "Run `clpm help repl <subcommand>` for per-subcommand details.")
+            (p "")
+            (p "Scoped options:")
+            (p "  -p, --package <member>  Workspace member target from a workspace root.")
             0))))
       (:run
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
@@ -5946,6 +5966,7 @@ sub-subcommand=\"set\")."
             (p "  clpm run scripts")
             (p "")
             (p "Scoped options:")
+            (p "  -p, --package <member>  Workspace member target from a workspace root.")
             (p "  --lisp <impl>  Lisp for entrypoint, test, and script execution.")
             0))))
       (:store
@@ -5953,6 +5974,9 @@ sub-subcommand=\"set\")."
          (cond
            ((and sub (string= sub "clean"))
             (p "Usage: clpm store clean [--dist] [--store]")
+            (p "")
+            (p "Scoped options:")
+            (p "  -p, --package <member>  Workspace member target from a workspace root.")
             0)
            ((and sub (string= sub "gc"))
             (p "Usage: clpm store gc [--dry-run]")

@@ -298,6 +298,9 @@ source fetch or build work: `deps sync` beyond the lock stage.
 `--lisp` is accepted only where CLPM chooses a Lisp implementation: build or
 active dependency realization, project packaging, and `run` operations that
 execute Lisp entrypoints/tests/scripts.
+`-p/--package` is accepted only where CLPM resolves project state from a
+workspace root: project packaging, dependency operations, registry publish,
+run, repl, and project-local store clean.
 Optional dependency flags are accepted only by dependency resolution:
 `deps sync` and `deps update`.
 Fetch tuning flags are accepted only by CLPM-managed network fetch
@@ -928,7 +931,7 @@ but output kind and machine-readable shape are semantic.
     top-level controls. It does not derive every leaf option by unioning the
     whole parser.
 - Commands that survived and why:
-  - `-v`, `-p`, `-h`, and `--version` survive in root help because they are
+  - `-v`, `-h`, and `--version` survive in root help because they are
     top-level controls.
   - `--offline`, `--insecure`, `--fetch-*`, `--with-*`, `--jobs`, and
     `--lisp` survive only as scoped inputs to commands whose denotation uses
@@ -937,9 +940,36 @@ but output kind and machine-readable shape are semantic.
   - Root help does not advertise an option that `parse [option, "help"]`
     rejects as semantically inert.
 - Remaining discomfort:
-  - `-p/--package` is still a broad context selector. It remains in root help
-    because workspace targeting is a pre-command concern, but its exact command
-    domain should stay under attack.
+  - `-p/--package` is still a broad context selector. Its exact command domain
+    should stay under attack.
+
+### Iteration 21: Attack Workspace Target Scope
+
+- Commands deleted:
+  - Inert `-p/--package <member>` placements on `help`, `--version`,
+    `doctor`, `skill`, `project init/new/workspace`, non-publishing registry
+    operations, and `store gc`.
+- Commands merged:
+  - Workspace member targeting is no longer a root option in help/README. It is
+    a scoped input to commands that resolve a project root.
+- Commands derived instead of exposed:
+  - `-p member deps search/info` now derives project registry context from the
+    selected workspace member instead of falling back to unrelated ambient
+    registry state.
+- Commands that survived and why:
+  - `-p member project package`, `deps ...`, `registry publish`, `run ...`,
+    `repl ...`, and `store clean` survive because each command observes or
+    mutates a project root.
+- Laws/protocol invariants added:
+  - No inert workspace target:
+    `parse ["-p", member, "help"] = Error`.
+  - Workspace target is a project-root selector:
+    `parse ["-p", member, op] = Right (op with ProjectTarget member)` only
+    when `op` resolves project state.
+- Remaining discomfort:
+  - `deps search/info` straddle global registry observation and project
+    registry observation. They survive under `-p` only because selected member
+    registries are now part of their denotation.
 
 ## Constructors
 
@@ -1172,7 +1202,7 @@ forall selector ctx world.
 Law: "root help mentions only root controls"
 forall scoped.
   scoped in {Offline, Insecure, FetchRetries, FetchTimeout,
-             WithOptional, WithAllOptional, Jobs, Lisp}
+             WithOptional, WithAllOptional, Jobs, Lisp, PackageTarget}
   => render Root commandSchema does not mention scoped
 ```
 
@@ -1359,6 +1389,9 @@ Failed-counterexample regressions:
 - `clpm --lisp sbcl help`, `clpm --lisp sbcl repl`, and
   `clpm --lisp sbcl deps sync --to source` are rejected; `--lisp` is only for
   CLPM-owned Lisp process construction.
+- `clpm --package app help`, `clpm --package app doctor`, and
+  `clpm --package app store gc` are rejected; workspace member targeting is
+  only for commands that resolve project state.
 - `clpm --with-optional foo help` and
   `clpm --with-all-optional repl` are rejected; optional opt-ins are only for
   dependency solving.

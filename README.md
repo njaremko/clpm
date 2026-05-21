@@ -264,12 +264,12 @@ explicit resource operations.
 ### Top-Level Options
 
 - `-v, --verbose` - Verbose output
-- `-p, --package <member>` - Workspace member to target from workspace root
 - `-h, --help` - Show root help
 - `--version` - Show the CLPM version
 
 ### Command-Scoped Options
 
+- `-p, --package <member>` - Workspace member to target from a workspace root
 - `-j, --jobs N` - Parallel dependency realization for `deps sync` beyond the lock stage
 - `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for build/package/run commands
 - `--offline` - Use cached artifacts for `deps sync` realization and `deps sbom`
