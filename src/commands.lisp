@@ -1566,6 +1566,12 @@ lockfile; NIL persists no opt-ins."
 scratch. Given one or more system IDs, only those systems are unlocked;
 every other system is pinned to its current lockfile selection (so unrelated
 deps don't churn)."
+  (dolist (system systems)
+    (when (and (stringp system)
+               (plusp (length system))
+               (char= (char system 0) #\-))
+      (log-error "Unknown option: ~A" system)
+      (return-from cmd-update 1)))
   (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
       (find-effective-project-root)
     (declare (ignore _workspace-path))

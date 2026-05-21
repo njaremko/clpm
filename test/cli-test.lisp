@@ -275,6 +275,17 @@
             (fail "Expected ~S before project lookup, got: ~A" expected err)))))))
 (format t "  Deps add argv validation PASSED~%")
 
+(format t "Testing deps update argv validation before project lookup...~%")
+(clpm.store:with-temp-dir (tmp)
+  (uiop:with-current-directory (tmp)
+    (multiple-value-bind (code _out err)
+        (run-cli-captured '("deps" "update" "--bogus"))
+      (declare (ignore _out))
+      (assert-eql 1 code)
+      (unless (search "Unknown option: --bogus" err)
+        (fail "Expected deps update option error before project lookup, got: ~A" err)))))
+(format t "  Deps update argv validation PASSED~%")
+
 (format t "Testing optional dependency option scope...~%")
 (dolist (args '(("--with-optional" "foo" "help")
                 ("--with-all-optional" "repl")))
