@@ -49,6 +49,18 @@
                 (get-output-stream-string out)
                 (get-output-stream-string err))))))
 
+(defun assert-duplicate-option (args option)
+  (multiple-value-bind (code stdout stderr)
+      (run-cli-captured args)
+    (declare (ignore stdout))
+    (assert-eql 1 code)
+    (assert-true (search (format nil "Duplicate option: ~A" option)
+                         stderr
+                         :test #'char-equal)
+                 "Expected duplicate ~A rejection, got:~%~A"
+                 option
+                 stderr)))
+
 (defun tar-list (tarball)
   (let ((tar (clpm.platform:find-tar)))
     (unless tar
@@ -103,9 +115,71 @@
            ;; Create a small local project.
            (assert-eql
             0
-            (clpm:run-cli (list "project" "new" project-name "--lib" "--dir" (namestring tmp))))
+           (clpm:run-cli (list "project" "new" project-name "--lib" "--dir" (namestring tmp))))
            (write-text (merge-pathnames ".jj/secret" project-root)
                        "private-control-data")
+
+           ;; Singleton value options must reject duplicates before writing
+           ;; release metadata.
+           (assert-duplicate-option
+            (list "registry" "publish"
+                  "--registry" (namestring reg-root)
+                  "--registry" (namestring (merge-pathnames "other-reg/" tmp))
+                  "--key-id" key-id
+                  "--keys-dir" (namestring keys-dir)
+                  "--project" (namestring project-root)
+                  "--tarball-url" "https://example.invalid/mylib-0.1.0.tar.gz")
+            "--registry")
+           (assert-duplicate-option
+            (list "registry" "publish"
+                  "--registry" (namestring reg-root)
+                  "--key-id" key-id
+                  "--key-id" "other-key"
+                  "--keys-dir" (namestring keys-dir)
+                  "--project" (namestring project-root)
+                  "--tarball-url" "https://example.invalid/mylib-0.1.0.tar.gz")
+            "--key-id")
+           (assert-duplicate-option
+            (list "registry" "publish"
+                  "--registry" (namestring reg-root)
+                  "--key-id" key-id
+                  "--keys-dir" (namestring keys-dir)
+                  "--keys-dir" (namestring (merge-pathnames "other-keys/" tmp))
+                  "--project" (namestring project-root)
+                  "--tarball-url" "https://example.invalid/mylib-0.1.0.tar.gz")
+            "--keys-dir")
+           (assert-duplicate-option
+            (list "registry" "publish"
+                  "--registry" (namestring reg-root)
+                  "--key-id" key-id
+                  "--keys-dir" (namestring keys-dir)
+                  "--project" (namestring project-root)
+                  "--project" (namestring (merge-pathnames "other-project/" tmp))
+                  "--tarball-url" "https://example.invalid/mylib-0.1.0.tar.gz")
+            "--project")
+           (assert-duplicate-option
+            (list "registry" "publish"
+                  "--registry" (namestring reg-root)
+                  "--key-id" key-id
+                  "--keys-dir" (namestring keys-dir)
+                  "--project" (namestring project-root)
+                  "--tarball-url" "https://example.invalid/mylib-0.1.0.tar.gz"
+                  "--tarball-url" "https://example.invalid/other.tar.gz")
+            "--tarball-url")
+           (assert-duplicate-option
+            (list "registry" "publish"
+                  "--registry" (namestring reg-root)
+                  "--key-id" key-id
+                  "--keys-dir" (namestring keys-dir)
+                  "--project" (namestring project-root)
+                  "--tarball-url" "https://example.invalid/mylib-0.1.0.tar.gz"
+                  "--tarball-out" (namestring tarballs-dir)
+                  "--tarball-out" (namestring (merge-pathnames "other-tarballs/" tmp)))
+            "--tarball-out")
+           (assert-true
+            (not (uiop:file-exists-p
+                  (merge-pathnames "registry/packages/mylib/0.1.0/release.sxp" reg-root)))
+            "Rejected duplicate publish should not write release metadata")
 
            ;; Publishing writes registry artifacts only; VCS commits belong to
            ;; the caller.

@@ -2628,6 +2628,15 @@ Law: "leaf singleton options are values"
     ["deps", "sbom", "--format"],
     ["project", "workspace", "list", "--dir"],
     ["registry", "add", "--name"],
+    ["registry", "init", opt] where opt in {"--dir", "--key-id", "--keys-dir"},
+    ["registry", "key", "generate", opt] where opt in {"--out", "--id"},
+    ["registry", "key", "list", "--keys-dir"],
+    ["registry", "key", "import", opt] where opt in {"--pub", "--id", "--keys-dir"},
+    ["registry", "key", "verify", opt] where opt in {"--pub", "--file", "--sig"},
+    ["registry", "publish", opt] where opt in {
+      "--registry", "--key-id", "--keys-dir", "--project",
+      "--tarball-url", "--tarball-out"
+    },
     ["repl", "eval", form, "--worker"]
   } => denote (parse argv) ctx world = FailedUsage
 
@@ -2856,8 +2865,9 @@ Failed-counterexample regressions:
   error can mask the malformed argv.
 - Duplicate singleton leaf options reject instead of silently overwriting:
   `deps search --limit`, `deps sbom --format`,
-  `project workspace list --dir`, `registry add --name`, and
-  `repl eval --worker`.
+  `project workspace list --dir`, `registry add --name`,
+  `registry init` value flags, `registry key generate/list/import/verify`
+  value flags, `registry publish` value flags, and `repl eval --worker`.
 - Root help, README, and generated `clpm skill` output state that scoped
   options must appear before the command token.
 - BRIDGE.md and `.claude/skills/clpm-repl-bridge.md` describe the surviving

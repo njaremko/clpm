@@ -27,6 +27,13 @@
   (unless (eql expected actual)
     (fail "expected ~S, got ~S" expected actual)))
 
+(defun assert-contains (haystack needle)
+  (assert-true (and (stringp haystack)
+                    (search needle haystack :test #'char-equal))
+               "expected ~S in:~%~A"
+               needle
+               haystack))
+
 (defun run-cli-captured (args)
   (let ((out (make-string-output-stream))
         (err (make-string-output-stream)))
@@ -35,6 +42,13 @@
       (let ((code (clpm:run-cli args)))
         (values code (get-output-stream-string out)
                 (get-output-stream-string err))))))
+
+(defun assert-duplicate-option (args option)
+  (multiple-value-bind (code stdout stderr)
+      (run-cli-captured args)
+    (declare (ignore stdout))
+    (assert-eql 1 code)
+    (assert-contains stderr (format nil "Duplicate option: ~A" option))))
 
 (defun read-bytes (path)
   (with-open-file (s path :element-type '(unsigned-byte 8))
@@ -61,6 +75,64 @@
     (unwind-protect
          (progn
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
+
+           ;; Singleton value options must reject duplicates before touching key files.
+           (assert-duplicate-option
+            (list "registry" "key" "generate"
+                  "--out" (namestring gen-dir)
+                  "--out" (namestring (merge-pathnames "other-gen/" tmp))
+                  "--id" "duplicate")
+            "--out")
+           (assert-duplicate-option
+            (list "registry" "key" "generate"
+                  "--out" (namestring gen-dir)
+                  "--id" "duplicate"
+                  "--id" "other")
+            "--id")
+           (assert-duplicate-option
+            (list "registry" "key" "list"
+                  "--keys-dir" (namestring gen-dir)
+                  "--keys-dir" (namestring (merge-pathnames "other-keys/" tmp)))
+            "--keys-dir")
+           (assert-duplicate-option
+            (list "registry" "key" "import"
+                  "--pub" (namestring (merge-pathnames "missing-a.pub" tmp))
+                  "--pub" (namestring (merge-pathnames "missing-b.pub" tmp))
+                  "--id" "duplicate")
+            "--pub")
+           (assert-duplicate-option
+            (list "registry" "key" "import"
+                  "--pub" (namestring (merge-pathnames "missing.pub" tmp))
+                  "--id" "duplicate"
+                  "--id" "other")
+            "--id")
+           (assert-duplicate-option
+            (list "registry" "key" "import"
+                  "--pub" (namestring (merge-pathnames "missing.pub" tmp))
+                  "--keys-dir" (namestring gen-dir)
+                  "--keys-dir" (namestring (merge-pathnames "other-keys/" tmp)))
+            "--keys-dir")
+           (assert-duplicate-option
+            (list "registry" "key" "verify"
+                  "--pub" (namestring (merge-pathnames "missing-a.pub" tmp))
+                  "--pub" (namestring (merge-pathnames "missing-b.pub" tmp))
+                  "--file" (namestring msg)
+                  "--sig" (namestring sig-path))
+            "--pub")
+           (assert-duplicate-option
+            (list "registry" "key" "verify"
+                  "--pub" (namestring (merge-pathnames "missing.pub" tmp))
+                  "--file" (namestring msg)
+                  "--file" (namestring (merge-pathnames "other-msg.bin" tmp))
+                  "--sig" (namestring sig-path))
+            "--file")
+           (assert-duplicate-option
+            (list "registry" "key" "verify"
+                  "--pub" (namestring (merge-pathnames "missing.pub" tmp))
+                  "--file" (namestring msg)
+                  "--sig" (namestring sig-path)
+                  "--sig" (namestring (merge-pathnames "other.sig" tmp)))
+            "--sig")
 
            ;; --- generate a key into a private dir.
            (assert-eql 0 (clpm:run-cli (list "registry" "key" "generate"

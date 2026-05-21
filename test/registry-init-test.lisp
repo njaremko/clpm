@@ -31,6 +31,30 @@
   (unless (eql expected actual)
     (fail "Assertion failed: expected ~S, got ~S" expected actual)))
 
+(defun assert-contains (haystack needle)
+  (assert-true (and (stringp haystack)
+                    (search needle haystack :test #'char-equal))
+               "Expected output to contain ~S, got:~%~A"
+               needle
+               haystack))
+
+(defun run-cli-captured (args)
+  (let ((out (make-string-output-stream))
+        (err (make-string-output-stream)))
+    (let ((*standard-output* out)
+          (*error-output* err))
+      (let ((code (clpm:run-cli args)))
+        (values code
+                (get-output-stream-string out)
+                (get-output-stream-string err))))))
+
+(defun assert-duplicate-option (args option)
+  (multiple-value-bind (code stdout stderr)
+      (run-cli-captured args)
+    (declare (ignore stdout))
+    (assert-eql 1 code)
+    (assert-contains stderr (format nil "Duplicate option: ~A" option))))
+
 (defun write-text (path text)
   (ensure-directories-exist path)
   (with-open-file (s path :direction :output
@@ -64,6 +88,31 @@
            (write-text (merge-pathnames (format nil "~A.pub" key-id)
                                         (clpm.platform:keys-dir))
                        pub-hex)
+
+           ;; Singleton value options must reject duplicates before touching
+           ;; registry files.
+           (assert-duplicate-option
+            (list "registry" "init"
+                  "--dir" (namestring reg-root)
+                  "--dir" (namestring (merge-pathnames "other-reg/" tmp))
+                  "--key-id" key-id
+                  "--keys-dir" (namestring keys-dir))
+            "--dir")
+           (assert-duplicate-option
+            (list "registry" "init"
+                  "--dir" (namestring reg-root)
+                  "--key-id" key-id
+                  "--key-id" "other-key"
+                  "--keys-dir" (namestring keys-dir))
+            "--key-id")
+           (assert-duplicate-option
+            (list "registry" "init"
+                  "--dir" (namestring reg-root)
+                  "--key-id" key-id
+                  "--keys-dir" (namestring keys-dir)
+                  "--keys-dir" (namestring (merge-pathnames "other-keys/" tmp)))
+            "--keys-dir")
+
            (assert-eql
             0
             (clpm:run-cli (list "registry" "init"
