@@ -2105,12 +2105,12 @@ NIL means the handler has already emitted its terminal frame."
 (defun %lookup-method (name)
   (cdr (assoc name +method-registry+ :test #'string=)))
 
-(defparameter +protocol-internal-methods+ '("shutdown" "query-response")
-  "Registered wire messages that are not part of method discovery.")
+(defparameter +undiscoverable-methods+ '("eval" "shutdown" "query-response")
+  "Registered wire messages that are not part of public `repl call' discovery.")
 
 (defun %discoverable-method-spec-p (spec)
   (not (member (method-spec-name spec)
-               +protocol-internal-methods+
+               +undiscoverable-methods+
                :test #'string=)))
 
 (defun %method-spec-as-json (spec)
@@ -2922,8 +2922,8 @@ version (because the file was just LOADed)."
   :name "methods"
   :summary "List public RPC methods with their parameter schemas and summaries."
   :doc "Returns `{methods: [<method-spec>, ...]}'. The list is generated
-from the same registry the dispatcher consults, minus protocol-internal
-continuation and lifecycle frames."
+from the same registry the dispatcher consults, minus `eval' and
+protocol-internal continuation/lifecycle frames."
   :params nil
   :handler
   (lambda (server params id ctx)
@@ -2965,7 +2965,9 @@ continuation and lifecycle frames."
 ;;; query-response is a continuation message routed inline by
 ;;; %route-query-response, not dispatched as a normal RPC. It remains
 ;;; registered for schema validation but is intentionally absent from
-;;; public `methods' / `help' discovery.
+;;; public `methods' / `help' discovery. The same discovery rule hides
+;;; eval: raw protocol clients may send it, but the public CLI constructor is
+;;; `clpm repl eval FORM', not `clpm repl call eval'.
 (%register-method
  (make-method-spec
   :name "query-response"

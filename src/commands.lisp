@@ -2955,8 +2955,8 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
   (format t "  clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]~%")
   (format t "  clpm repl eval FORM [--package P] [--worker W] [--debug] ...~%")
   (format t "  clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...~%~%")
-  (format t "Use `clpm repl call methods` to list daemon RPCs.~%")
-  (format t "Use `clpm repl call help --method eval` for a method schema.~%")
+  (format t "Use `clpm repl call methods` to list callable daemon RPCs.~%")
+  (format t "Use `clpm repl call help --method gc` for a callable method schema.~%")
   (format t "Use `clpm help repl` for CLI details.~%")
   0)
 
@@ -5520,7 +5520,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "clpm repl daemon --status"
     "clpm repl call ping"
     "clpm repl call methods"
-    "clpm repl call help --method eval"
+    "clpm repl call help --method gc"
     "clpm repl eval '(+ 1 2)'"
     "clpm repl daemon --stop"
     "```"
@@ -5965,7 +5965,7 @@ sub-subcommand=\"set\")."
             (p "")
             (p "Examples:")
             (p "  clpm repl call methods")
-            (p "  clpm repl call help --method eval")
+            (p "  clpm repl call help --method gc")
             (p "  clpm repl call gc --full true")
             (p "  clpm repl call compile-file --path src/foo.lisp")
             (p "  clpm repl call debug-abort --session 1")

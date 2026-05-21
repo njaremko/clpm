@@ -706,17 +706,17 @@ but output kind and machine-readable shape are semantic.
     `repl eval`, with human output, debug options, package/worker options, and
     JSON output where requested.
 - Commands that survived and why:
-  - `repl call methods` and `repl call help --method eval` survive because
-    schema discovery is an observation over the daemon protocol.
-  - Non-eval protocol methods survive under `call` because they operate on
+  - `repl call methods` survives because callable schema discovery is an
+    observation over the public daemon call surface.
+  - Non-eval callable protocol methods survive under `call` because they operate on
     persistent image/debugger/inspector/watch/trace state that has no smaller
     stable CLI constructor yet.
 - Laws/protocol invariants added:
   - Eval has exactly one public CLI constructor:
     `parse ["repl", "call", "eval", "--form", form] = Error`.
-  - Discovery is not dispatch:
+  - `eval` is not a callable discovery entry:
     `parse ["repl", "call", "help", "--method", "eval"] =
-     Right (repl (call Help {"method": "eval"}))`.
+     Failed unknown-method`.
 - Remaining discomfort:
   - `repl call METHOD` still accepts all registered non-eval protocol methods.
     The next attack is whether parameter construction is too loose at the CLI
@@ -1271,15 +1271,14 @@ but output kind and machine-readable shape are semantic.
     required. They are registered for dispatch/schema validation, but not
     projected through public discovery.
 - Commands that survived and why:
-  - `help --method eval` survives because `eval` is the internal RPC behind
-    the public `repl eval` constructor and agents need its parameter schema.
+  - Callable method help survives only for methods that `repl call METHOD`
+    may actually construct.
 - Laws/protocol invariants added:
   - `methods = discoverable(methodRegistry)`, not `methodRegistry`.
-  - `method in protocolInternal => help(method) = Failed unknown-method`.
+  - `method in undiscoverableMethods => help(method) = Failed unknown-method`.
 - Remaining discomfort:
-  - `eval` is schema-visible but not directly callable through `repl call`.
-    This is intentional while `repl eval` remains the single evaluation
-    constructor.
+  - None for protocol-only lifecycle and continuation methods. Iteration 39
+    closes the remaining `eval` discovery leak.
 
 ### Iteration 34: Reject Inert Daemon Action Flags
 
@@ -1411,6 +1410,33 @@ but output kind and machine-readable shape are semantic.
   - None for REPL trace isolation. The trace wrapper is intentionally simpler
     than implementation-native tracing; it records calls, not implementation
     internals.
+
+### Iteration 39: Hide Raw Eval From Call Discovery
+
+- Commands deleted:
+  - `repl call methods` no longer reports `eval`.
+  - `repl call help --method eval`.
+- Commands merged:
+  - Eval schema documentation moves to `clpm repl eval` CLI help and the
+    raw protocol tests. The public call constructor no longer advertises a
+    method it rejects.
+- Commands derived instead of exposed:
+  - The daemon still dispatches raw `eval` frames for the `clpm repl eval`
+    client, but callable discovery denotes only the subset constructible by
+    `repl call METHOD`.
+- Commands that survived and why:
+  - `repl call methods` survives as callable-method discovery.
+  - `repl call help --method METHOD` survives for callable methods such as
+    `gc`, `watch`, `trace`, `inspect`, and debugger session actions.
+- Laws/protocol invariants added:
+  - `eval notin callableMethodRegistry`.
+  - `methods = discoverable(callableMethodRegistry)`.
+  - `help(eval) = Failed unknown-method`.
+  - Raw protocol dispatch still satisfies
+    `dispatch(eval, params) = replEval(params)`.
+- Remaining discomfort:
+  - None for `eval` discovery. Method schemas still use string type names,
+    which remains a separate schema-algebra problem.
 
 ## Constructors
 
@@ -1557,9 +1583,11 @@ Law: "json is leaf-scoped"
 Law: "eval has one public CLI constructor"
   parse ["repl", "call", "eval", "--form", form] = Error
   parse ["repl", "eval", form] = Right (repl (eval form))
+  eval notin callableMethodRegistry
+  help(eval) = Failed unknown-method
 
 Law: "repl call is registry-closed"
-  method notin replMethodRegistry
+  method notin callableMethodRegistry
   => denote (repl (call method params)) ctx world = Failed 1 protocolError
   param notin paramsFor(method)
   => denote (repl (call method params)) ctx world = Failed 1 protocolError

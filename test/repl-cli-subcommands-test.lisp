@@ -88,25 +88,33 @@
                (format t "  daemon up~%")
 
                (format t "Test: call methods + help expose registry schema~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl" "call" "methods"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "\"eval\"")
-                 (assert-contains stdout "\"methods\""))
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl" "call" "help"
-                                       "--method" "eval"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "\"params\"")
-                 (assert-contains stdout "\"form\""))
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured
-                    '("repl" "call" "help"
-                      "--params-json" "{\"method\":\"eval\"}"))
-                 (assert-eql 0 rc)
-                 (assert-contains stdout "\"params\"")
-                 (assert-contains stdout "\"form\""))
-               (format t "  registry discovery OK~%")
+	               (multiple-value-bind (rc stdout)
+	                   (run-cli-captured '("repl" "call" "methods"))
+	                 (assert-eql 0 rc)
+	                 (assert-contains stdout "\"methods\"")
+	                 (assert-true (not (search "\"eval\"" stdout))
+	                              "methods should not advertise eval: ~A"
+	                              stdout))
+	               (multiple-value-bind (rc stdout)
+	                   (run-cli-captured '("repl" "call" "help"
+	                                       "--method" "gc"))
+	                 (assert-eql 0 rc)
+	                 (assert-contains stdout "\"params\"")
+	                 (assert-contains stdout "\"full\""))
+	               (multiple-value-bind (rc stdout)
+	                   (run-cli-captured
+	                    '("repl" "call" "help"
+	                      "--params-json" "{\"method\":\"gc\"}"))
+	                 (assert-eql 0 rc)
+	                 (assert-contains stdout "\"params\"")
+	                 (assert-contains stdout "\"full\""))
+	               (multiple-value-bind (rc stdout)
+	                   (run-cli-captured '("repl" "call" "help"
+	                                       "--method" "eval"))
+	                 (assert-eql 1 rc)
+	                 (assert-contains stdout "\"error\"")
+	                 (assert-contains stdout "unknown method"))
+	               (format t "  registry discovery OK~%")
 
                (format t "Test: call does not alias eval~%")
                (multiple-value-bind (rc _stdout stderr)

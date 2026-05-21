@@ -70,12 +70,12 @@
       (assert-true methods "no methods array in response: ~S" resp)
       (let ((names (loop for m in methods
                          collect (lookup m "name"))))
-        (dolist (expected '("ping" "current-package" "set-package" "eval"
+        (dolist (expected '("ping" "current-package" "set-package"
                             "interrupt" "reset" "describe"
                             "list-redefinitions" "methods" "help"))
           (assert-true (member expected names :test #'string=)
                        "missing method ~A; got ~S" expected names))
-        (dolist (internal '("shutdown" "query-response"))
+        (dolist (internal '("eval" "shutdown" "query-response"))
           (assert-true (not (member internal names :test #'string=))
                        "protocol-only method ~A leaked into methods: ~S"
                        internal names))))))
@@ -89,22 +89,22 @@
   (lambda (sock)
     (let* ((resp (clpm.repl:send-request
                   sock "help"
-                  :params (list :object (list (cons "method" "eval")))))
+                  :params (list :object (list (cons "method" "gc")))))
            (result (lookup resp "result"))
            (method (lookup result "method")))
       (assert-true method "no method object: ~S" resp)
       (let ((name (lookup method "name"))
             (doc (lookup method "doc"))
             (params (array-items (lookup method "params"))))
-        (assert-true (string= "eval" name) "wrong name: ~S" name)
-        (assert-true (and (stringp doc) (search "form" doc))
-                     "doc should mention 'form': ~S" doc)
-        (assert-true (find "form" params
+        (assert-true (string= "gc" name) "wrong name: ~S" name)
+        (assert-true (and (stringp doc) (search "full" doc))
+                     "doc should mention 'full': ~S" doc)
+        (assert-true (find "full" params
                            :test (lambda (s p) (string= s (lookup p "name"))))
-                     "no `form' param in eval spec: ~S" params)))))
+                     "no `full' param in gc spec: ~S" params)))))
 (with-daemon
   (lambda (sock)
-    (dolist (internal '("shutdown" "query-response"))
+    (dolist (internal '("eval" "shutdown" "query-response"))
       (let* ((resp (clpm.repl:send-request
                     sock "help"
                     :params (list :object (list (cons "method" internal)))))

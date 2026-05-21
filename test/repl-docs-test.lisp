@@ -63,38 +63,47 @@
                                   :on-event on-event))
 
 ;;; ----------------------------------------------------------------------------
-;;; #200: `methods' lists every registered RPC.
+;;; #200: `methods' lists public callable RPCs.
 
-(format t "Test: methods includes eval + watch + list-workers~%")
+(format t "Test: methods includes callable RPCs only~%")
 (with-daemon
   (lambda (sock)
     (let* ((resp (do-rpc sock "methods"))
            (entries (array-items (lookup (lookup resp "result") "methods")))
            (names (mapcar (lambda (e) (lookup e "name")) entries)))
-      (dolist (m '("eval" "watch" "list-workers" "inspect"
+      (dolist (m '("watch" "list-workers" "inspect"
                    "kill-worker" "unwatch" "image-info"))
         (assert-true (find m names :test #'string=)
-                     "~A missing from methods: ~S" m names)))))
+                     "~A missing from methods: ~S" m names))
+      (assert-true (not (find "eval" names :test #'string=))
+                   "eval should not be discoverable through repl call methods: ~S"
+                   names))))
 (format t "  methods OK~%")
 
 ;;; ----------------------------------------------------------------------------
-;;; #201: `help eval' returns its doc + params.
+;;; #201: `help' exposes callable method docs, not `eval'.
 
-(format t "Test: help eval has doc and param schema~%")
+(format t "Test: help for callable methods has docs and eval is hidden~%")
 (with-daemon
   (lambda (sock)
     (let* ((resp (do-rpc sock "help"
-                          (list (cons "method" "eval"))))
+                          (list (cons "method" "watch"))))
            (spec (lookup (lookup resp "result") "method"))
            (params (array-items (lookup spec "params"))))
-      (assert-true (string= "eval" (lookup spec "name"))
+      (assert-true (string= "watch" (lookup spec "name"))
                    "wrong name in help: ~S" spec)
       (assert-true (and (stringp (lookup spec "doc"))
                         (plusp (length (lookup spec "doc"))))
-                   "eval should have a docstring")
-      (assert-true (find "form" params
+                   "watch should have a docstring")
+      (assert-true (find "dir" params
                           :test (lambda (s p) (string= s (lookup p "name"))))
-                   "form param missing"))))
+                   "dir param missing"))
+    (let* ((resp (do-rpc sock "help"
+                         (list (cons "method" "eval"))))
+           (err (lookup resp "error")))
+      (assert-true err "help eval should fail: ~S" resp)
+      (assert-true (search "unknown method" (lookup err "message"))
+                   "wrong help eval error: ~S" err))))
 (format t "  help OK~%")
 
 ;;; ----------------------------------------------------------------------------
