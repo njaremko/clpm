@@ -1,4 +1,4 @@
-;;;; test/scripts-command-test.lisp - `clpm scripts` tests
+;;;; test/scripts-command-test.lisp - `clpm run scripts` tests
 
 (require :asdf)
 (require :sb-posix)
@@ -42,7 +42,7 @@
                           :external-format :utf-8)
     (write-string contents s)))
 
-(format t "Testing `clpm scripts`...~%")
+(format t "Testing `clpm run scripts`...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
@@ -100,7 +100,7 @@
            (uiop:with-current-directory (project-root)
              (let* ((out (with-output-to-string (s)
                            (let ((*standard-output* s))
-                             (assert-eql 0 (clpm:run-cli '("scripts" "list"))))))
+                             (assert-eql 0 (clpm:run-cli '("run" "scripts"))))))
                     (lines (remove "" (uiop:split-string out :separator '(#\Newline))
                                    :test #'string=)))
                (assert-equal '("aaa" "args" "zzz") lines)))
@@ -109,7 +109,7 @@
            (when (uiop:file-exists-p shell-args-path)
              (delete-file shell-args-path))
            (uiop:with-current-directory (project-root)
-             (assert-eql 0 (clpm:run-cli '("scripts" "run" "args" "--" "one" "two"))))
+             (assert-eql 0 (clpm:run-cli '("run" "script" "args" "--" "one" "two"))))
            (assert-true (uiop:file-exists-p shell-args-path)
                         "Missing shell args file: ~A" (namestring shell-args-path))
            (assert-equal (format nil "one~%two~%")
@@ -119,7 +119,7 @@
            (when (uiop:file-exists-p lisp-args-path)
              (delete-file lisp-args-path))
            (uiop:with-current-directory (project-root)
-             (assert-eql 19 (clpm:run-cli '("scripts" "run" "aaa" "--" "hi" "there"))))
+             (assert-eql 19 (clpm:run-cli '("run" "script" "aaa" "--" "hi" "there"))))
            (assert-true (uiop:file-exists-p lisp-args-path)
                         "Missing lisp args file: ~A" (namestring lisp-args-path))
            (let ((args (clpm.io.sexp:read-safe-sexp-from-file lisp-args-path)))

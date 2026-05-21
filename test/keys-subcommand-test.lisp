@@ -1,4 +1,4 @@
-;;;; keys-subcommand-test.lisp - `clpm keys list/import/verify`.
+;;;; keys-subcommand-test.lisp - `clpm registry key list/import/verify`.
 
 (require :asdf)
 (require :sb-posix)
@@ -63,21 +63,21 @@
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
 
            ;; --- generate a key into a private dir.
-           (assert-eql 0 (clpm:run-cli (list "keys" "generate"
+           (assert-eql 0 (clpm:run-cli (list "registry" "key" "generate"
                                              "--out" (namestring gen-dir)
                                              "--id" "primary")))
 
            ;; --- import that pub into the default keys dir.
            (let ((source-pub (merge-pathnames "primary.pub" gen-dir)))
-             (assert-eql 0 (clpm:run-cli (list "keys" "import"
+             (assert-eql 0 (clpm:run-cli (list "registry" "key" "import"
                                                "--pub" (namestring source-pub)
                                                "--id" "primary"))))
 
            ;; --- generate a second key elsewhere and import it under a new id.
-           (assert-eql 0 (clpm:run-cli (list "keys" "generate"
+           (assert-eql 0 (clpm:run-cli (list "registry" "key" "generate"
                                              "--out" (namestring (uiop:pathname-directory-pathname import-src))
                                              "--id" "key2")))
-           (assert-eql 0 (clpm:run-cli (list "keys" "import"
+           (assert-eql 0 (clpm:run-cli (list "registry" "key" "import"
                                              "--pub" (namestring
                                                       (merge-pathnames "key2.pub"
                                                                        (uiop:pathname-directory-pathname import-src)))
@@ -85,7 +85,7 @@
 
            ;; --- list shows both keys with fingerprints.
            (multiple-value-bind (code stdout stderr)
-               (run-cli-captured '("keys" "list"))
+               (run-cli-captured '("registry" "key" "list"))
              (declare (ignore stderr))
              (assert-eql 0 code)
              (assert-true (search "primary" stdout)
@@ -98,7 +98,7 @@
            ;; --- import refuses to overwrite an existing key.
            (let ((source-pub (merge-pathnames "primary.pub" gen-dir)))
              (multiple-value-bind (code _ err)
-                 (run-cli-captured (list "keys" "import"
+                 (run-cli-captured (list "registry" "key" "import"
                                          "--pub" (namestring source-pub)
                                          "--id" "primary"))
                (declare (ignore _))
@@ -125,7 +125,7 @@
                  (terpri s)))
              (let ((pub (merge-pathnames "primary.pub" gen-dir)))
                ;; Good signature -> rc 0.
-               (assert-eql 0 (clpm:run-cli (list "keys" "verify"
+               (assert-eql 0 (clpm:run-cli (list "registry" "key" "verify"
                                                  "--pub" (namestring pub)
                                                  "--file" (namestring msg)
                                                  "--sig" (namestring sig-path))))
@@ -133,7 +133,7 @@
                (write-bytes msg (make-array 3 :element-type '(unsigned-byte 8)
                                               :initial-contents '(99 99 99)))
                (multiple-value-bind (code _ err)
-                   (run-cli-captured (list "keys" "verify"
+                   (run-cli-captured (list "registry" "key" "verify"
                                            "--pub" (namestring pub)
                                            "--file" (namestring msg)
                                            "--sig" (namestring sig-path)))

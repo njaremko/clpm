@@ -1,6 +1,7 @@
 ;;;; test/repl-bridge-event-log-test.lisp - .clpm/repl-bridge.log JSON lines
 
 (require :asdf)
+(require :sb-posix)
 
 (let* ((this-file (or *load-truename* *load-pathname*))
        (test-dir (uiop:pathname-directory-pathname this-file))
@@ -42,7 +43,21 @@
 (defun event-type (obj)
   (event-field obj "event"))
 
-(clpm.store:with-temp-dir (tmp)
+(defun make-short-temp-dir ()
+  "Create a short temp directory so Unix-domain socket paths stay portable."
+  (let* ((template (namestring
+                    (merge-pathnames "rbXXXXXX" (uiop:temporary-directory))))
+         (dir (sb-posix:mkdtemp template)))
+    (uiop:ensure-directory-pathname dir)))
+
+(defmacro with-short-temp-dir ((var) &body body)
+  `(let ((,var (make-short-temp-dir)))
+     (unwind-protect
+          (progn ,@body)
+       (ignore-errors
+         (uiop:delete-directory-tree ,var :validate t)))))
+
+(with-short-temp-dir (tmp)
   (let* ((sock (namestring (merge-pathnames "rb.sock" tmp)))
          (log (namestring (merge-pathnames "rb.log" tmp))))
 
@@ -131,7 +146,7 @@
 ;;; rotates it to PATH.1 and starts a fresh file at PATH.
 ;;; --------------------------------------------------------------------------
 
-(clpm.store:with-temp-dir (tmp)
+(with-short-temp-dir (tmp)
   (let* ((log (namestring (merge-pathnames "rb.log" tmp)))
          (rotated (concatenate 'string log ".1")))
     (format t "Test: log rotation~%")

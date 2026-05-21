@@ -78,7 +78,7 @@
 
              ;; Loading a registry (via search) should compute the distinfo SHA-256
              ;; and persist a pinned sha256:... trust string to config.
-             (assert-true (zerop (clpm:run-cli '("search" "ql-quick")))
+             (assert-true (zerop (clpm:run-cli '("deps" "search" "ql-quick")))
                           "Expected search to succeed")
              (let* ((cfg (clpm.config:read-config))
                     (refs (clpm.config:config-registries cfg))

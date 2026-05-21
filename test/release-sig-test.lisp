@@ -196,7 +196,7 @@ Returns snapshot signature SHA-256 hex."
                   :registries ((:git :url ,url :name "good" :trust "ed25519:test")))
                 (merge-pathnames "clpm.project" project-good)))
              (uiop:with-current-directory (project-good)
-               (assert-true (zerop (clpm:run-cli '("resolve")))
+               (assert-true (zerop (clpm:run-cli '("deps" "sync" "--to" "lock")))
                             "Expected resolve to succeed with valid release signature"))
              ;; Lockfile should record trust and snapshot signature hash.
              (let* ((lock (clpm.project:read-lock-file (merge-pathnames "clpm.lock" project-good)))
@@ -224,12 +224,12 @@ Returns snapshot signature SHA-256 hex."
 
              ;; Resolve should fail without --insecure.
              (uiop:with-current-directory (project-bad)
-               (assert-true (not (zerop (clpm:run-cli '("resolve"))))
+               (assert-true (not (zerop (clpm:run-cli '("deps" "sync" "--to" "lock"))))
                             "Expected resolve to fail with invalid release signature"))
 
              ;; Resolve should succeed with --insecure.
              (uiop:with-current-directory (project-bad)
-               (assert-true (zerop (clpm:run-cli '("--insecure" "resolve")))
+               (assert-true (zerop (clpm:run-cli '("--insecure" "deps" "sync" "--to" "lock")))
                             "Expected resolve to succeed with --insecure")
                (assert-true (uiop:file-exists-p (merge-pathnames "clpm.lock" project-bad))
                             "Expected clpm.lock to be written"))))
@@ -241,4 +241,3 @@ Returns snapshot signature SHA-256 hex."
 (format t "  Release signature verification PASSED~%")
 (format t "~%Release signature tests PASSED!~%")
 (sb-ext:exit :code 0)
-

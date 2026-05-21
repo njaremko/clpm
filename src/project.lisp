@@ -25,7 +25,7 @@
   (scripts nil :type list)
   ;; Plist controlling the persistent Lisp daemon (`clpm repl-bridge'):
   ;;   (:autostart t :preload ("alexandria"))
-  ;; AUTOSTART means `clpm install' ends by launching `daemon --detach' if
+  ;; AUTOSTART means `clpm deps sync' ends by launching `daemon --detach' if
   ;; no daemon is already running. PRELOAD is a list of additional ASDF system
   ;; names to load after the project's own :systems.
   (repl-bridge nil :type list))
@@ -63,7 +63,7 @@
   (registries nil :type list)
   (resolved nil :type list)
   ;; System-id strings the user opted into via --with-optional. Persisted so a
-  ;; later `clpm install` (without flags) keeps them in the resolved set.
+  ;; later `clpm deps sync` (without flags) keeps them in the resolved set.
   (opted-in-optionals nil :type list))
 
 (defstruct locked-registry

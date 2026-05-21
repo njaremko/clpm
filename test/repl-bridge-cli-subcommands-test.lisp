@@ -2,6 +2,7 @@
 ;;;; small repl-bridge CLI algebra: daemon, eval, and call.
 
 (require :asdf)
+(require :sb-posix)
 
 (let* ((this-file (or *load-truename* *load-pathname*))
        (test-dir (uiop:pathname-directory-pathname this-file))
@@ -39,7 +40,21 @@
                 (get-output-stream-string out)
                 (get-output-stream-string err))))))
 
-(clpm.store:with-temp-dir (tmp)
+(defun make-short-temp-dir ()
+  "Create a short temp directory so Unix-domain socket paths stay portable."
+  (let* ((template (namestring
+                    (merge-pathnames "rbXXXXXX" (uiop:temporary-directory))))
+         (dir (sb-posix:mkdtemp template)))
+    (uiop:ensure-directory-pathname dir)))
+
+(defmacro with-short-temp-dir ((var) &body body)
+  `(let ((,var (make-short-temp-dir)))
+     (unwind-protect
+          (progn ,@body)
+       (ignore-errors
+         (uiop:delete-directory-tree ,var :validate t)))))
+
+(with-short-temp-dir (tmp)
   (let* ((proj (merge-pathnames "myproj/" tmp))
          (manifest (merge-pathnames "clpm.project" proj))
          (clpm-dir (merge-pathnames ".clpm/" proj))

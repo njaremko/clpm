@@ -1,4 +1,4 @@
-;;;; test/sbom-command-test.lisp - `clpm sbom` command tests
+;;;; test/sbom-command-test.lisp - `clpm deps sbom` command tests
 
 (require :asdf)
 (require :sb-posix)
@@ -48,7 +48,7 @@
                 (get-output-stream-string out)
                 (get-output-stream-string err))))))
 
-(format t "Testing `clpm sbom`...~%")
+(format t "Testing `clpm deps sbom`...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
@@ -160,7 +160,7 @@
 
            (uiop:with-current-directory (proj-root)
              (multiple-value-bind (code stdout stderr)
-                 (run-cli-captured '("sbom" "--format" "cyclonedx-json"))
+                 (run-cli-captured '("deps" "sbom" "--format" "cyclonedx-json"))
                (assert-eql 0 code)
                (assert-true (string= "" stderr) "Expected empty stderr, got:~%~A" stderr)
                (assert-contains stdout "\"bomFormat\":\"CycloneDX\"")
@@ -185,7 +185,7 @@
            ;; Output file mode.
            (let ((out-json (merge-pathnames "sbom.json" proj-root)))
              (uiop:with-current-directory (proj-root)
-               (assert-eql 0 (clpm:run-cli (list "sbom" "--format" "cyclonedx-json"
+               (assert-eql 0 (clpm:run-cli (list "deps" "sbom" "--format" "cyclonedx-json"
                                                  "--output" (namestring out-json)))))
              (assert-true (uiop:file-exists-p out-json)
                           "Expected output file to exist: ~A" (namestring out-json))
@@ -196,7 +196,7 @@
            (format t "Testing `--format cyclonedx-xml`...~%")
            (uiop:with-current-directory (proj-root)
              (multiple-value-bind (code stdout stderr)
-                 (run-cli-captured '("sbom" "--format" "cyclonedx-xml"))
+                 (run-cli-captured '("deps" "sbom" "--format" "cyclonedx-xml"))
                (assert-eql 0 code)
                (assert-true (string= "" stderr) "Expected empty stderr, got:~%~A" stderr)
                (assert-contains stdout "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -223,7 +223,7 @@
            (format t "Testing `--format spdx-json`...~%")
            (uiop:with-current-directory (proj-root)
              (multiple-value-bind (code stdout stderr)
-                 (run-cli-captured '("sbom" "--format" "spdx-json"))
+                 (run-cli-captured '("deps" "sbom" "--format" "spdx-json"))
                (assert-eql 0 code)
                (assert-true (string= "" stderr) "Expected empty stderr, got:~%~A" stderr)
                (assert-contains stdout "\"spdxVersion\":\"SPDX-2.3\"")
@@ -258,10 +258,10 @@
            (dolist (fmt '("cyclonedx-json" "cyclonedx-xml" "spdx-json"))
              (uiop:with-current-directory (proj-root)
                (multiple-value-bind (c1 s1 e1)
-                   (run-cli-captured (list "sbom" "--format" fmt))
+                   (run-cli-captured (list "deps" "sbom" "--format" fmt))
                  (declare (ignore e1))
                  (multiple-value-bind (c2 s2 e2)
-                     (run-cli-captured (list "sbom" "--format" fmt))
+                     (run-cli-captured (list "deps" "sbom" "--format" fmt))
                    (declare (ignore e2))
                    (assert-eql 0 c1)
                    (assert-eql 0 c2)
@@ -272,7 +272,7 @@
            ;; --- unsupported format rejected --------------------------------
            (uiop:with-current-directory (proj-root)
              (multiple-value-bind (code _ err)
-                 (run-cli-captured '("sbom" "--format" "spdx-tag-value"))
+                 (run-cli-captured '("deps" "sbom" "--format" "spdx-tag-value"))
                (declare (ignore _))
                (assert-true (not (zerop code))
                             "Expected non-zero rc for unsupported format")

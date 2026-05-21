@@ -67,7 +67,7 @@
      :release rel
      :deps deps)))
 
-(format t "Testing `clpm tree` and `clpm why`...~%")
+(format t "Testing `clpm deps tree` and `clpm deps why`...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((project-root (merge-pathnames "proj/" tmp))
@@ -110,7 +110,7 @@
     (uiop:with-current-directory (project-root)
       ;; tree (default depth)
       (multiple-value-bind (code stdout stderr)
-          (run-cli-captured '("tree"))
+          (run-cli-captured '("deps" "tree"))
         (declare (ignore stderr))
         (assert-eql 0 code)
         (assert-equal
@@ -125,7 +125,7 @@
 
       ;; tree --depth 1
       (multiple-value-bind (code stdout stderr)
-          (run-cli-captured '("tree" "--depth" "1"))
+          (run-cli-captured '("deps" "tree" "--depth" "1"))
         (declare (ignore stderr))
         (assert-eql 0 code)
         (assert-equal
@@ -139,7 +139,7 @@
 
       ;; tree --depth 0
       (multiple-value-bind (code stdout stderr)
-          (run-cli-captured '("tree" "--depth" "0"))
+          (run-cli-captured '("deps" "tree" "--depth" "0"))
         (declare (ignore stderr))
         (assert-eql 0 code)
         (assert-equal
@@ -150,7 +150,7 @@
 
       ;; why leaf
       (multiple-value-bind (code stdout stderr)
-          (run-cli-captured '("why" "leaf"))
+          (run-cli-captured '("deps" "why" "leaf"))
         (declare (ignore stderr))
         (assert-eql 0 code)
         (assert-equal
@@ -162,7 +162,7 @@
 
       ;; why root node
       (multiple-value-bind (code stdout stderr)
-          (run-cli-captured '("why" "foo"))
+          (run-cli-captured '("deps" "why" "foo"))
         (declare (ignore stderr))
         (assert-eql 0 code)
         (assert-equal
@@ -172,7 +172,7 @@
 
       ;; why missing node
       (multiple-value-bind (code stdout stderr)
-          (run-cli-captured '("why" "missing"))
+          (run-cli-captured '("deps" "why" "missing"))
         (declare (ignore stdout))
         (assert-eql 1 code)
         (assert-true (search "System not reachable" stderr :test #'char-equal)

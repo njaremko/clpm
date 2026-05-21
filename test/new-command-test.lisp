@@ -1,4 +1,4 @@
-;;;; test/new-command-test.lisp - `clpm new` scaffolding tests
+;;;; test/new-command-test.lisp - `clpm project new` scaffolding tests
 
 (require :asdf)
 
@@ -45,7 +45,7 @@
   (assert-equal *expected-gitignore*
                 (uiop:read-file-string (merge-pathnames ".gitignore" root))))
 
-(format t "Testing `clpm new` scaffolding...~%")
+(format t "Testing `clpm project new` scaffolding...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((workspace (merge-pathnames "ws/" tmp))
@@ -55,7 +55,7 @@
 
     ;; --bin
     (uiop:with-current-directory (workspace)
-      (assert-eql 0 (clpm:run-cli '("new" "binproj" "--bin"))))
+      (assert-eql 0 (clpm:run-cli '("project" "new" "binproj" "--bin"))))
     (assert-true (uiop:directory-exists-p bin-root) "Expected bin project dir")
     (dolist (rel '(".gitignore" "clpm.project" "binproj.asd" "src/binproj.lisp" "test/binproj-test.lisp"))
       (assert-true (uiop:file-exists-p (merge-pathnames rel bin-root))
@@ -87,7 +87,7 @@
 
     ;; --lib with --dir
     (uiop:with-current-directory (workspace)
-      (assert-eql 0 (clpm:run-cli (list "new" "libproj" "--lib" "--dir" (namestring workspace)))))
+      (assert-eql 0 (clpm:run-cli (list "project" "new" "libproj" "--lib" "--dir" (namestring workspace)))))
     (assert-true (uiop:directory-exists-p lib-root) "Expected lib project dir")
     (dolist (rel '(".gitignore" "clpm.project" "libproj.asd" "src/libproj.lisp" "test/libproj-test.lisp"))
       (assert-true (uiop:file-exists-p (merge-pathnames rel lib-root))
@@ -107,6 +107,6 @@
       (assert-true (null (clpm.project:project-package p))
                    "Did not expect :package metadata for --lib project"))))
 
-(format t "  `clpm new` scaffolding PASSED~%")
+(format t "  `clpm project new` scaffolding PASSED~%")
 (format t "~%New command tests PASSED!~%")
 (sb-ext:exit :code 0)

@@ -87,11 +87,11 @@
            ;; Create a small local project.
            (assert-eql
             0
-            (clpm:run-cli (list "new" project-name "--lib" "--dir" (namestring tmp))))
+            (clpm:run-cli (list "project" "new" project-name "--lib" "--dir" (namestring tmp))))
 
            ;; Publish into the local registry.
            (multiple-value-bind (code stdout _stderr)
-               (run-cli-captured (list "publish"
+               (run-cli-captured (list "registry" "publish"
                                        "--registry" (namestring reg-root)
                                        "--key-id" key-id
                                        "--keys-dir" (namestring keys-dir)

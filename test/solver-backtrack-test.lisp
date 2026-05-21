@@ -170,7 +170,7 @@
               (merge-pathnames "clpm.project" project-root)))
 
            (uiop:with-current-directory (project-root)
-             (assert-eql 0 (clpm:run-cli '("resolve"))))
+             (assert-eql 0 (clpm:run-cli '("deps" "sync" "--to" "lock"))))
 
            (let* ((lock (clpm.project:read-lock-file (merge-pathnames "clpm.lock" project-root)))
                   (locked-b (find-locked lock "b"))
@@ -200,7 +200,7 @@
                 :registries ((:git :url ,url :name "main")))
               (merge-pathnames "clpm.project" project-root)))
            (uiop:with-current-directory (project-root)
-             (assert-eql 0 (clpm:run-cli '("resolve"))))
+             (assert-eql 0 (clpm:run-cli '("deps" "sync" "--to" "lock"))))
            ;; Loosen to any version; solver should keep locked selection.
            (let ((url (format nil "file://~A" (namestring remote))))
              (clpm.io.sexp:write-canonical-sexp-to-file
@@ -212,7 +212,7 @@
                 :registries ((:git :url ,url :name "main")))
               (merge-pathnames "clpm.project" project-root)))
            (uiop:with-current-directory (project-root)
-             (assert-eql 0 (clpm:run-cli '("resolve"))))
+             (assert-eql 0 (clpm:run-cli '("deps" "sync" "--to" "lock"))))
            (let* ((lock (clpm.project:read-lock-file (merge-pathnames "clpm.lock" project-root)))
                   (locked-b (find-locked lock "b")))
              (assert-true locked-b "Expected b in lockfile")

@@ -59,7 +59,7 @@
 (defun index-of (needle haystack)
   (position needle haystack :test #'string=))
 
-(format t "Testing `clpm info`...~%")
+(format t "Testing `clpm deps info`...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
@@ -101,9 +101,9 @@
               :defaults nil))
 
            (multiple-value-bind (code stdout stderr)
-               (run-cli-captured '("info" "foo"))
+               (run-cli-captured '("deps" "info" "foo"))
              (unless (eql code 0)
-               (fail "clpm info failed: ~D~%stdout:~A~%stderr:~A" code stdout stderr))
+               (fail "clpm deps info failed: ~D~%stdout:~A~%stderr:~A" code stdout stderr))
              (let* ((lines (split-lines stdout))
                     (i-sel (index-of "Selected:" lines))
                     (i-cand (index-of "Candidates:" lines)))
@@ -124,9 +124,9 @@
            ;; --all (text mode) must surface per-candidate source + license,
            ;; matching what the JSON branch produces.
            (multiple-value-bind (code stdout stderr)
-               (run-cli-captured '("info" "foo" "--all"))
+               (run-cli-captured '("deps" "info" "foo" "--all"))
              (unless (eql code 0)
-               (fail "clpm info --all failed: ~D~%stdout:~A~%stderr:~A" code stdout stderr))
+               (fail "clpm deps info --all failed: ~D~%stdout:~A~%stderr:~A" code stdout stderr))
              (assert-true (search "https://example.invalid/foo-2.0.0.tgz" stdout)
                           "Expected v2 source URL in --all output:~%~A" stdout)
              (assert-true (search "https://example.invalid/foo-1.0.0.tgz" stdout)

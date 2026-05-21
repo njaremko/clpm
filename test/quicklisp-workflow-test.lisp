@@ -353,7 +353,7 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
                     (assert-eql 0 (clpm:run-cli (list "registry" "update" "quicklisp-local")))
 
                     ;; Create a new project and add a Quicklisp dependency.
-                    (assert-eql 0 (clpm:run-cli (list "new" "qlapp" "--bin" "--dir" (namestring ws))))
+                    (assert-eql 0 (clpm:run-cli (list "project" "new" "qlapp" "--bin" "--dir" (namestring ws))))
 
                     (let* ((app-root (merge-pathnames "qlapp/" ws))
                            (src-path (merge-pathnames "src/qlapp.lisp" app-root))
@@ -364,7 +364,7 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
 
                       (uiop:with-current-directory (app-root)
                         ;; Add dependency (from Quicklisp dist) and install everything.
-                        (let ((rc (clpm:run-cli (list "add" "ql-a" "--install"))))
+                        (let ((rc (clpm:run-cli (list "deps" "add" "ql-a"))))
                           (unless (eql rc 0)
                             ;; Dump build logs to help diagnose failures before temp cleanup.
                             (let* ((build-log-dir (merge-pathnames "build/" (clpm.platform:log-dir)))
@@ -376,7 +376,8 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
                                   (format *error-output* "~&==> ~A~%" (namestring p))
                                   (ignore-errors
                                     (format *error-output* "~A~%" (uiop:read-file-string p))))))
-                            (fail "clpm add --install failed with exit code ~D" rc)))
+                            (fail "clpm deps add failed with exit code ~D" rc)))
+                        (assert-eql 0 (clpm:run-cli (list "deps" "sync")))
 
                         ;; Update main to reference the dependency (ensures it really loads).
                         (write-text
@@ -422,8 +423,8 @@ SYSTEMS is a list of system names. FILES is an alist of (relative-path . content
                                              (clpm.project:locked-system-id locked))))))
 
                         ;; Run tests and package (exercises activation + build cache + save-lisp-and-die).
-                        (assert-eql 0 (clpm:run-cli (list "test")))
-                        (assert-eql 0 (clpm:run-cli (list "package")))
+                        (assert-eql 0 (clpm:run-cli (list "run" "test")))
+                        (assert-eql 0 (clpm:run-cli (list "project" "package")))
                         (assert-true (uiop:file-exists-p dist-bin)
                                      "Missing packaged binary: ~A" (namestring dist-bin))
                         (multiple-value-bind (out err rc)

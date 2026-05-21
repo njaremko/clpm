@@ -72,8 +72,8 @@
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
 
            (uiop:with-current-directory (ws-root)
-             (assert-eql 0 (clpm:run-cli '("new" "dep" "--lib")))
-             (assert-eql 0 (clpm:run-cli '("new" "app" "--bin"))))
+             (assert-eql 0 (clpm:run-cli '("project" "new" "dep" "--lib")))
+             (assert-eql 0 (clpm:run-cli '("project" "new" "app" "--bin"))))
 
            ;; Create workspace file listing members.
            (clpm.workspace:write-workspace-file
@@ -101,7 +101,7 @@
            ;; From workspace root, require -p for project commands.
            (uiop:with-current-directory (ws-root)
              (multiple-value-bind (code stdout stderr)
-                 (run-cli-captured '("resolve"))
+                 (run-cli-captured '("deps" "sync" "--to" "lock"))
                (declare (ignore stdout))
                (assert-true (not (zerop code)) "Expected resolve to fail at workspace root without -p")
                (assert-contains stderr "Use -p/--package")
@@ -109,7 +109,8 @@
 
            ;; Add dep as a path dependency to app from workspace root.
            (uiop:with-current-directory (ws-root)
-             (assert-eql 0 (clpm:run-cli '("-p" "app" "add" "--path" "../dep" "--install" "dep"))))
+             (assert-eql 0 (clpm:run-cli '("-p" "app" "deps" "add" "--path" "../dep" "dep")))
+             (assert-eql 0 (clpm:run-cli '("-p" "app" "deps" "sync"))))
 
            ;; Ensure project-local artifacts are in the member directory.
            (assert-true (uiop:file-exists-p (merge-pathnames "clpm.lock" app-root))
@@ -121,11 +122,10 @@
 
            ;; Run tests for app from workspace root.
            (uiop:with-current-directory (ws-root)
-             (assert-eql 0 (clpm:run-cli '("-p" "app" "test")))))
+             (assert-eql 0 (clpm:run-cli '("-p" "app" "run" "test")))))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME")))))
 
 (format t "~%Workspace member targeting tests PASSED!~%")
 (sb-ext:exit :code 0)
-

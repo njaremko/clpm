@@ -157,7 +157,7 @@
              (let ((*standard-output* out)
                    (*error-output* err))
                (uiop:with-current-directory (project-root)
-                 (assert-eql 2 (clpm:run-cli '("resolve")))))
+                 (assert-eql 2 (clpm:run-cli '("deps" "sync" "--to" "lock")))))
              (let ((err-str (get-output-stream-string err)))
                (assert-true (search "Conflict chain:" err-str)
                             "Expected 'Conflict chain' in stderr, got:~%~A"

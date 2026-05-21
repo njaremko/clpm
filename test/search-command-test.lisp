@@ -189,7 +189,7 @@ Returns (values base-url stop-fn)."
   "Return a file:// base URL for ROOT (directory)."
   (format nil "file://~A" (namestring (uiop:ensure-directory-pathname root))))
 
-(format t "Testing `clpm search` across git + Quicklisp...~%")
+(format t "Testing `clpm deps search` across git + Quicklisp...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
@@ -255,7 +255,7 @@ Returns (values base-url stop-fn)."
 
              ;; Search output should be deterministic and include both registries.
              (multiple-value-bind (code stdout stderr)
-                 (run-cli-captured '("search" "ql-"))
+                 (run-cli-captured '("deps" "search" "ql-"))
                (declare (ignore stderr))
                (assert-eql 0 code)
                (assert-eql
@@ -265,7 +265,7 @@ Returns (values base-url stop-fn)."
 
              ;; JSON output should be valid-ish and stable.
              (multiple-value-bind (code stdout stderr)
-                 (run-cli-captured '("search" "ql-" "--json"))
+                 (run-cli-captured '("deps" "search" "ql-" "--json"))
                (declare (ignore stderr))
                (assert-eql 0 code)
                (assert-true (search "\"system\"" stdout) "Expected JSON output to include system key")

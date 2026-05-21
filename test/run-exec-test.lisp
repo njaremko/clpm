@@ -119,11 +119,11 @@
              (assert-true (equal '("hello" "world") args)
                           "Unexpected args: ~S" args))
 
-           ;; `clpm exec` should set CLPM_PROJECT_ROOT for non-sbcl commands.
+           ;; `clpm run exec` should set CLPM_PROJECT_ROOT for non-sbcl commands.
            (uiop:with-current-directory (project-root)
-             (assert-eql 0 (clpm:run-cli '("exec" "--" "sh" "-c" "test -n \"$CLPM_PROJECT_ROOT\""))))
+             (assert-eql 0 (clpm:run-cli '("run" "exec" "--" "sh" "-c" "test -n \"$CLPM_PROJECT_ROOT\""))))
 
-           ;; `clpm exec -- sbcl ...` should inject --load asdf-config.lisp.
+           ;; `clpm run exec -- sbcl ...` should inject --load asdf-config.lisp.
            (assert-true (uiop:file-exists-p asdf-config)
                         "Missing activation config: ~A" (namestring asdf-config))
            (write-file loaded-path "")
@@ -134,16 +134,16 @@
              (format s "~%~A~%"
                      "(with-open-file (s \"exec-loaded.txt\" :direction :output :if-exists :supersede :external-format :utf-8)\n  (write-string \"loaded\" s))"))
            (uiop:with-current-directory (project-root)
-             (assert-eql 0 (clpm:run-cli '("exec" "--" "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
+             (assert-eql 0 (clpm:run-cli '("run" "exec" "--" "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
                                            "--eval" "(sb-ext:exit :code 0)"))))
            (assert-true (uiop:file-exists-p loaded-path)
                         "Expected exec-loaded.txt to be created by injected --load"))
 
            ;; Stale activation should be detected and repaired automatically.
            ;;
-           ;; Add a new local dependency via `clpm add --path` (this updates the
+           ;; Add a new local dependency via `clpm deps add --path` (this updates the
            ;; manifest + lockfile but does not activate by default), then `clpm run`
-           ;; should run `clpm install` to refresh activation before launching.
+           ;; should run `clpm deps sync` to refresh activation before launching.
            (write-file
             (merge-pathnames "dep.asd" dep-root)
             (format nil "~S~%"
@@ -162,7 +162,7 @@
            (when (uiop:file-exists-p dep-loaded-path)
              (delete-file dep-loaded-path))
            (uiop:with-current-directory (project-root)
-             (assert-eql 0 (clpm:run-cli '("add" "--path" "../dep" "dep"))))
+             (assert-eql 0 (clpm:run-cli '("deps" "add" "--path" "../dep" "dep"))))
            ;; Ensure lockfile changed but activation did not (yet).
            (let* ((env (clpm.io.sexp:read-safe-sexp-from-file env-path))
                   (env-lock (and (consp env) (eq (car env) :env)
@@ -172,7 +172,7 @@
              (assert-true (and (stringp env-lock) (stringp cur-lock))
                           "Expected :lockfile-sha256 in env.sexp (pre-refresh)")
              (assert-true (not (string= env-lock cur-lock))
-                          "Expected env to be stale after `clpm add` without install"))
+                          "Expected env to be stale after `clpm deps add` without sync"))
            (uiop:with-current-directory (project-root)
              (assert-eql 17 (clpm:run-cli '("run"))))
            (assert-true (uiop:file-exists-p dep-loaded-path)

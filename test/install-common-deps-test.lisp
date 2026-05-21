@@ -241,11 +241,11 @@
            (write-project project-root (format nil "file://~A" (namestring remote)))
            (uiop:with-current-directory (project-root)
              (multiple-value-bind (rc stdout stderr)
-                 (run-cli-captured '("add" "alexandria" "bordeaux-threads"))
+                 (run-cli-captured '("deps" "add" "alexandria" "bordeaux-threads"))
                (assert-eql 0 rc)
                (assert-no-mismatch-output stdout stderr))
              (multiple-value-bind (rc stdout stderr)
-                 (run-cli-captured '("install"))
+                 (run-cli-captured '("deps" "sync"))
                (assert-eql 0 rc)
                (assert-no-mismatch-output stdout stderr)))
            (let* ((lock (clpm.project:read-lock-file

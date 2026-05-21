@@ -121,7 +121,7 @@
 
           ;; Install from app root.
           (uiop:with-current-directory (app-root)
-            (assert-eql 0 (clpm:run-cli '("install"))))
+            (assert-eql 0 (clpm:run-cli '("deps" "sync"))))
 
           ;; Ensure lockfile records a resolved commit.
           (let* ((lock-path (merge-pathnames "clpm.lock" app-root))

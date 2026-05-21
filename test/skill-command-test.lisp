@@ -54,7 +54,7 @@
   (assert-contains stdout "---")
   (assert-contains stdout "name: clpm")
   (assert-contains stdout "# CLPM Agent Skill")
-  (assert-contains stdout "clpm install")
+  (assert-contains stdout "clpm deps sync")
   (assert-contains stdout "Strongly prefer it")
   (assert-contains stdout "Debug-first workflow")
   (assert-contains stdout "clpm repl-bridge eval '(error")

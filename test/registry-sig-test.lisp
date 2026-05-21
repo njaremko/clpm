@@ -107,13 +107,13 @@
 
            ;; Resolve should fail without --insecure.
            (uiop:with-current-directory (project-root)
-             (let ((rc (clpm:run-cli '("resolve"))))
+             (let ((rc (clpm:run-cli '("deps" "sync" "--to" "lock"))))
                (assert-true (not (zerop rc))
                             "Expected resolve to fail without --insecure")))
 
            ;; Resolve should succeed with --insecure.
            (uiop:with-current-directory (project-root)
-             (let ((rc (clpm:run-cli '("--insecure" "resolve"))))
+             (let ((rc (clpm:run-cli '("--insecure" "deps" "sync" "--to" "lock"))))
              (assert-true (zerop rc)
                             "Expected resolve to succeed with --insecure"))
              (assert-true (uiop:file-exists-p (merge-pathnames "clpm.lock" project-root))

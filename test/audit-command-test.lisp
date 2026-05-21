@@ -1,4 +1,4 @@
-;;;; test/audit-command-test.lisp - `clpm audit` command tests
+;;;; test/audit-command-test.lisp - `clpm deps audit` command tests
 
 (require :asdf)
 (require :sb-posix)
@@ -48,7 +48,7 @@
                 (get-output-stream-string out)
                 (get-output-stream-string err))))))
 
-(format t "Testing `clpm audit`...~%")
+(format t "Testing `clpm deps audit`...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
@@ -140,7 +140,7 @@
 
            (uiop:with-current-directory (proj-root)
              (multiple-value-bind (code stdout stderr)
-                 (run-cli-captured '("audit"))
+                 (run-cli-captured '("deps" "audit"))
                (assert-eql 0 code)
                (assert-true (string= "" stderr) "Expected empty stderr, got:~%~A" stderr)
                (assert-contains stdout "Project: proj 1.2.3")
@@ -168,7 +168,7 @@
            ;; JSON mode is deterministic and includes expected keys.
            (uiop:with-current-directory (proj-root)
              (multiple-value-bind (code stdout stderr)
-                 (run-cli-captured '("audit" "--json"))
+                 (run-cli-captured '("deps" "audit" "--json"))
                (assert-eql 0 code)
                (assert-true (string= "" stderr) "Expected empty stderr, got:~%~A" stderr)
                (assert-contains stdout "\"project\"")

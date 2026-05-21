@@ -74,7 +74,7 @@
                (assert-eql 0 (clpm:run-cli '("doctor")))
 
                ;; Install with parallel jobs (exercises solver + fetch + build + activation).
-               (assert-eql 0 (clpm:run-cli '("-j" "4" "install")))
+               (assert-eql 0 (clpm:run-cli '("-j" "4" "deps" "sync")))
 
                ;; Lockfile should include transitive path dependencies (lib-a -> lib-b).
                (assert-true (uiop:file-exists-p lock-path)
@@ -89,17 +89,17 @@
                               "Expected lib-b in lockfile, got ~S" ids))
 
                ;; Run tests.
-               (assert-eql 0 (clpm:run-cli '("test")))
+               (assert-eql 0 (clpm:run-cli '("run" "test")))
 
                ;; Run entrypoint with forwarded args.
                (assert-eql 0 (clpm:run-cli '("run" "--" "hello" "world")))
 
                ;; Exec should set CLPM_PROJECT_ROOT (quick smoke check).
-               (assert-eql 0 (clpm:run-cli '("exec" "--" "sh" "-c"
+               (assert-eql 0 (clpm:run-cli '("run" "exec" "--" "sh" "-c"
                                              "test -n \"$CLPM_PROJECT_ROOT\"")))
 
                ;; Package should produce a runnable executable in dist/.
-               (assert-eql 0 (clpm:run-cli '("package")))
+               (assert-eql 0 (clpm:run-cli '("project" "package")))
                (assert-true (uiop:file-exists-p dist-bin)
                             "Missing packaged binary: ~A" (namestring dist-bin))
                (multiple-value-bind (out err rc)
@@ -115,12 +115,12 @@
                               out))
 
                ;; Clean project-local outputs (including dist/).
-               (assert-eql 0 (clpm:run-cli '("clean" "--dist")))
+               (assert-eql 0 (clpm:run-cli '("store" "clean" "--dist")))
                (assert-true (not (uiop:directory-exists-p (merge-pathnames "dist/" app-root)))
                             "Expected dist/ to be removed")
 
                ;; GC should run (root-aware).
-               (assert-eql 0 (clpm:run-cli '("gc"))))))
+               (assert-eql 0 (clpm:run-cli '("store" "gc"))))))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME")))))

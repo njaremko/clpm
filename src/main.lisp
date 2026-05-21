@@ -25,33 +25,11 @@ Usage: clpm [options] <command> [args]
 Commands:
   help [cmd]      Show help for a command
   doctor          Check your environment
-  new <name> ...   Create a new project
-  init [name]      Initialize new project
-  add <dep> ...    Add a dependency
-  remove <dep>     Remove a dependency
-  search <query>   Search registries
-  info <system>    Show system details
-  tree             Show dependency tree
-  why <system>     Explain why a system is included
-  registry ...     Manage registries
-  resolve          Resolve dependencies and write lockfile
-  fetch            Download dependencies
-  build            Build dependencies
-  install          Resolve, fetch, and build (default)
-  update [sys...]  Update dependencies
-  repl             Start SBCL with project loaded
-  run              Run the project entrypoint
-  exec -- <cmd...> Run a command in the project env
-  test             Run project tests
-  package          Build a distributable executable
-  clean            Remove project-local outputs
-  gc               Garbage collect store
-  scripts ...      Run project scripts
-  audit            Show provenance report
-  sbom             Generate an SBOM for the lockfile
-  keys ...         Key management (registry signing)
-  publish ...      Publish to a registry
-  workspace ...    Workspace management
+  project ...      Create projects, workspaces, and packages
+  deps ...         Manage, realize, and inspect dependencies
+  registry ...     Manage registries, keys, trust, and publishing
+  run ...          Run entrypoints, tests, scripts, REPLs, or commands
+  store ...        Clean project outputs and garbage collect the store
   skill            Print an agent SKILL.md for using clpm
   repl-bridge ...  Persistent Lisp image (for LLM-driven dev)
 
@@ -70,12 +48,12 @@ Options:
 Examples:
   clpm doctor
   clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:example-key-id
-  clpm new myproject --bin
-  clpm init myproject
-  clpm add alexandria bordeaux-threads
-  clpm install
-  clpm repl
-  clpm update alexandria
+  clpm project new myproject --bin
+  clpm project init myproject
+  clpm deps add alexandria bordeaux-threads
+  clpm deps sync
+  clpm run repl
+  clpm deps update alexandria
 " *version*))
 
 (defun print-version ()
@@ -99,7 +77,7 @@ Returns (values command command-args options)."
            (push arg command-args))
           ((and command (string= arg "--"))
            ;; After a command is chosen, treat `--` as an "end of options"
-           ;; sentinel for forwarding args verbatim (e.g. `clpm exec -- <cmd...>`).
+           ;; sentinel for forwarding args verbatim (e.g. `clpm run exec -- <cmd...>`).
            (setf end-of-options t)
            (push arg command-args))
           ;; Global options
@@ -191,7 +169,8 @@ Returns (values command command-args options)."
            (if command
                (return-from parse-args
                  (values :help
-                         (list (string-downcase (symbol-name command)))
+                         (cons (string-downcase (symbol-name command))
+                               (nreverse command-args))
                          options))
                (return-from parse-args (values :help nil nil))))
           ((string= arg "--version")
@@ -203,9 +182,9 @@ Returns (values command command-args options)."
           (t
            (push arg command-args))))
       (incf i))
-    (values (or command :install)
-            (nreverse command-args)
-            options)))
+    (if command
+        (values command (nreverse command-args) options)
+        (values :deps (list "sync") options))))
 
 (defun apply-options (options)
   "Apply parsed options to global variables."
@@ -273,72 +252,24 @@ This function must not call `sb-ext:exit` so it can be used from tests."
              0)
             (:doctor
              (clpm.commands:cmd-doctor))
-            (:init
-             (clpm.commands:cmd-init
-              :name (first command-args)))
-            (:new
-             (apply #'clpm.commands:cmd-new command-args))
-            (:add
-             (apply #'clpm.commands:cmd-add command-args))
-            (:remove
-             (apply #'clpm.commands:cmd-remove command-args))
-            (:search
-             (apply #'clpm.commands:cmd-search command-args))
-            (:info
-             (apply #'clpm.commands:cmd-info command-args))
-            (:tree
-             (apply #'clpm.commands:cmd-tree command-args))
-            (:why
-             (apply #'clpm.commands:cmd-why command-args))
+            (:project
+             (apply #'clpm.commands:cmd-project command-args))
+            (:deps
+             (apply #'clpm.commands:cmd-deps command-args))
             (:registry
              (apply #'clpm.commands:cmd-registry command-args))
-            (:workspace
-             (apply #'clpm.commands:cmd-workspace command-args))
-            (:resolve
-             (clpm.commands:cmd-resolve))
-            (:fetch
-             (clpm.commands:cmd-fetch))
-            (:build
-             (clpm.commands:cmd-build))
-            (:install
-             (clpm.commands:cmd-install))
-            (:update
-             (apply #'clpm.commands:cmd-update command-args))
-            (:repl
-             (clpm.commands:cmd-repl
-              :load-system (first command-args)))
             (:run
              (apply #'clpm.commands:cmd-run command-args))
-            (:exec
-             (apply #'clpm.commands:cmd-exec command-args))
-            (:test
-             (apply #'clpm.commands:cmd-test command-args))
-            (:package
-             (apply #'clpm.commands:cmd-package command-args))
-            (:clean
-             (apply #'clpm.commands:cmd-clean command-args))
-            (:gc
-             (clpm.commands:cmd-gc
-              :dry-run (member "--dry-run" command-args
-                               :test #'string=)))
-	    (:scripts
-	     (apply #'clpm.commands:cmd-scripts command-args))
-	    (:keys
-	     (apply #'clpm.commands:cmd-keys command-args))
-	    (:publish
-	     (apply #'clpm.commands:cmd-publish command-args))
-	    (:audit
-	     (apply #'clpm.commands:cmd-audit command-args))
-	    (:sbom
-	     (apply #'clpm.commands:cmd-sbom command-args))
+            (:store
+             (apply #'clpm.commands:cmd-store command-args))
             (:skill
              (apply #'clpm.commands:cmd-skill command-args))
-	    (:repl-bridge
-	     (apply #'clpm.commands:cmd-repl-bridge command-args))
-	    (t
-	     (format *error-output* "Unknown command: ~A~%" command)
-	     (print-usage)
-	     1))))
+            (:repl-bridge
+             (apply #'clpm.commands:cmd-repl-bridge command-args))
+            (t
+             (format *error-output* "Unknown command: ~A~%" command)
+             (print-usage)
+             1))))
     (clpm.errors:clpm-error (c)
       (clpm.errors:format-error c)
       (cond

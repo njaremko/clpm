@@ -44,15 +44,15 @@
 
     ;; Create workspace
     (uiop:with-current-directory (base)
-      (assert-eql 0 (clpm:run-cli (list "new" "myws" "--workspace" "--dir" (namestring base)))))
+      (assert-eql 0 (clpm:run-cli (list "project" "new" "myws" "--workspace" "--dir" (namestring base)))))
     (assert-true (uiop:directory-exists-p ws-root) "Expected workspace directory")
     (assert-true (uiop:file-exists-p ws-path) "Expected clpm.workspace file")
     (let ((ws (clpm.workspace:read-workspace-file ws-path)))
       (assert-equal '() (clpm.workspace:workspace-members ws)))
 
     ;; Add members out of order; verify deterministic (sorted) members list.
-    (assert-eql 0 (clpm:run-cli (list "new" "zeta" "--lib" "--member-of" (namestring ws-root))))
-    (assert-eql 0 (clpm:run-cli (list "new" "alpha" "--bin" "--member-of" (namestring ws-root))))
+    (assert-eql 0 (clpm:run-cli (list "project" "new" "zeta" "--lib" "--member-of" (namestring ws-root))))
+    (assert-eql 0 (clpm:run-cli (list "project" "new" "alpha" "--bin" "--member-of" (namestring ws-root))))
 
     (assert-true (uiop:directory-exists-p (merge-pathnames "zeta/" ws-root))
                  "Expected member directory zeta/")

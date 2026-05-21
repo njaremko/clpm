@@ -73,7 +73,7 @@
          (assert-eql 0 (clpm:run-cli (list "registry" "update" "quicklisp")))
 
          ;; Create a new project.
-         (assert-eql 0 (clpm:run-cli (list "new" "ql-live-app" "--bin" "--dir" (namestring ws))))
+         (assert-eql 0 (clpm:run-cli (list "project" "new" "ql-live-app" "--bin" "--dir" (namestring ws))))
 
          (let* ((app-root (merge-pathnames "ql-live-app/" ws))
                 (src-path (merge-pathnames "src/ql-live-app.lisp" app-root))
@@ -83,8 +83,9 @@
                         "Missing project root: ~A" (namestring app-root))
            (uiop:with-current-directory (app-root)
              ;; Add dependencies from live Quicklisp and install.
-             (assert-eql 0 (clpm:run-cli (list "add" "alexandria" "--install")))
-             (assert-eql 0 (clpm:run-cli (list "add" "--test" "fiveam" "--install")))
+             (assert-eql 0 (clpm:run-cli (list "deps" "add" "alexandria")))
+             (assert-eql 0 (clpm:run-cli (list "deps" "add" "--test" "fiveam")))
+             (assert-eql 0 (clpm:run-cli (list "deps" "sync")))
 
              ;; Ensure project code actually uses Alexandria and FiveAM.
              (write-text
@@ -110,12 +111,12 @@
                 (format s "  :ok)~%")))
 
              ;; Run tests and build a binary.
-             (assert-eql 0 (clpm:run-cli (list "test")))
+             (assert-eql 0 (clpm:run-cli (list "run" "test")))
 
              ;; Exercise provenance and SBOM outputs.
-             (assert-eql 0 (clpm:run-cli (list "audit")))
+             (assert-eql 0 (clpm:run-cli (list "deps" "audit")))
              (let ((sbom-path (merge-pathnames "sbom.json" app-root)))
-               (assert-eql 0 (clpm:run-cli (list "sbom" "--format" "cyclonedx-json" "--out" (namestring sbom-path))))
+               (assert-eql 0 (clpm:run-cli (list "deps" "sbom" "--format" "cyclonedx-json" "--out" (namestring sbom-path))))
                (assert-true (uiop:file-exists-p sbom-path)
                             "Missing SBOM output: ~A" (namestring sbom-path))
                (assert-true (search "CycloneDX" (uiop:read-file-string sbom-path) :test #'char-equal)
@@ -123,10 +124,10 @@
                             (uiop:read-file-string sbom-path)))
 
              ;; Exercise tree/why UX (best-effort).
-             (assert-eql 0 (clpm:run-cli (list "tree" "--depth" "2")))
-             (assert-eql 0 (clpm:run-cli (list "why" "alexandria")))
+             (assert-eql 0 (clpm:run-cli (list "deps" "tree" "--depth" "2")))
+             (assert-eql 0 (clpm:run-cli (list "deps" "why" "alexandria")))
 
-             (assert-eql 0 (clpm:run-cli (list "package")))
+             (assert-eql 0 (clpm:run-cli (list "project" "package")))
              (assert-true (uiop:file-exists-p dist-bin)
                           "Missing packaged binary: ~A" (namestring dist-bin))
              (multiple-value-bind (out err rc)

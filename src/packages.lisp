@@ -396,6 +396,9 @@
            #:*lisp*
            #:*target-package*
            #:*with-optional*
+           #:cmd-project
+           #:cmd-deps
+           #:cmd-store
            #:cmd-init
            #:cmd-new
            #:cmd-add

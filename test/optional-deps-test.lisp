@@ -110,7 +110,7 @@
            ;; Default: no flags. b should be skipped.
            (format t "Optional dep skipped by default... ")
            (uiop:with-current-directory (proj)
-             (assert-eql 0 (clpm:run-cli '("resolve"))))
+             (assert-eql 0 (clpm:run-cli '("deps" "sync" "--to" "lock"))))
            (let ((lock (clpm.project:read-lock-file
                         (merge-pathnames "clpm.lock" proj))))
              (assert-true (find-locked lock "a") "a must be locked")
@@ -122,7 +122,7 @@
            ;; --with-optional b: b should be included AND persisted.
            (format t "--with-optional includes and persists... ")
            (uiop:with-current-directory (proj)
-             (assert-eql 0 (clpm:run-cli '("--with-optional" "b" "resolve"))))
+             (assert-eql 0 (clpm:run-cli '("--with-optional" "b" "deps" "sync" "--to" "lock"))))
            (let ((lock (clpm.project:read-lock-file
                         (merge-pathnames "clpm.lock" proj))))
              (assert-true (find-locked lock "b") "b must be locked after --with-optional b")
@@ -131,10 +131,10 @@
                           (clpm.project:lockfile-opted-in-optionals lock)))
            (format t "ok~%")
 
-           ;; Subsequent resolve without flags: persisted opt-in keeps b.
-           (format t "Subsequent resolve keeps persisted opt-in... ")
+           ;; Subsequent lock sync without flags: persisted opt-in keeps b.
+           (format t "Subsequent lock sync keeps persisted opt-in... ")
            (uiop:with-current-directory (proj)
-             (assert-eql 0 (clpm:run-cli '("resolve"))))
+             (assert-eql 0 (clpm:run-cli '("deps" "sync" "--to" "lock"))))
            (let ((lock (clpm.project:read-lock-file
                         (merge-pathnames "clpm.lock" proj))))
              (assert-true (find-locked lock "b")
@@ -147,7 +147,7 @@
            (format t "--with-all-optional picks all optionals... ")
            (delete-file (merge-pathnames "clpm.lock" proj))
            (uiop:with-current-directory (proj)
-             (assert-eql 0 (clpm:run-cli '("--with-all-optional" "resolve"))))
+             (assert-eql 0 (clpm:run-cli '("--with-all-optional" "deps" "sync" "--to" "lock"))))
            (let ((lock (clpm.project:read-lock-file
                         (merge-pathnames "clpm.lock" proj))))
              (assert-true (find-locked lock "b") "b must be locked under --with-all-optional"))

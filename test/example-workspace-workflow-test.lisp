@@ -59,10 +59,10 @@
 
            ;; Create workspace + members.
            (uiop:with-current-directory (base)
-             (assert-eql 0 (clpm:run-cli (list "new" "myws" "--workspace" "--dir" (namestring base)))))
+             (assert-eql 0 (clpm:run-cli (list "project" "new" "myws" "--workspace" "--dir" (namestring base)))))
            (assert-true (uiop:directory-exists-p ws-root) "Expected workspace root: ~A" (namestring ws-root))
-           (assert-eql 0 (clpm:run-cli (list "new" lib-name "--lib" "--member-of" (namestring ws-root))))
-           (assert-eql 0 (clpm:run-cli (list "new" app-name "--bin" "--member-of" (namestring ws-root))))
+           (assert-eql 0 (clpm:run-cli (list "project" "new" lib-name "--lib" "--member-of" (namestring ws-root))))
+           (assert-eql 0 (clpm:run-cli (list "project" "new" app-name "--bin" "--member-of" (namestring ws-root))))
            (assert-true (uiop:directory-exists-p lib-root) "Expected lib root: ~A" (namestring lib-root))
            (assert-true (uiop:directory-exists-p app-root) "Expected app root: ~A" (namestring app-root))
 
@@ -93,13 +93,14 @@
 
            ;; Add the lib as a path dependency (exercises -p targeting).
            (uiop:with-current-directory (ws-root)
-             (assert-eql 0 (clpm:run-cli (list "-p" app-name "add"
+             (assert-eql 0 (clpm:run-cli (list "-p" app-name "deps" "add"
                                                "--path" (format nil "../~A" lib-name)
-                                               "--install" lib-name))))
+                                               lib-name)))
+             (assert-eql 0 (clpm:run-cli (list "-p" app-name "deps" "sync"))))
 
            ;; Run tests and run the binary, both targeted from workspace root.
            (uiop:with-current-directory (ws-root)
-             (assert-eql 0 (clpm:run-cli (list "-p" app-name "test")))
+             (assert-eql 0 (clpm:run-cli (list "-p" app-name "run" "test")))
              (assert-eql 0 (clpm:run-cli (list "-p" app-name "run"))))
 
            ;; Ensure artifacts stay in the member directory (not the workspace root).
@@ -114,4 +115,3 @@
 (format t "  Workspace member workflow PASSED~%")
 (format t "~%Example workspace workflow tests PASSED!~%")
 (sb-ext:exit :code 0)
-

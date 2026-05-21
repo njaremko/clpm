@@ -70,7 +70,7 @@
            (uiop:with-current-directory (project-root)
              ;; First resolve writes lockfile.
              (multiple-value-bind (code out err)
-                 (run-cli-captured '("resolve"))
+                 (run-cli-captured '("deps" "sync" "--to" "lock"))
                (declare (ignore err))
                (assert-eql 0 code)
                (assert-true (search "Resolving dependencies" out :test #'char-equal)
@@ -79,7 +79,7 @@
 
              ;; Second resolve should short-circuit.
              (multiple-value-bind (code out err)
-                 (run-cli-captured '("resolve"))
+                 (run-cli-captured '("deps" "sync" "--to" "lock"))
                (declare (ignore err))
                (assert-eql 0 code)
                (assert-true (search "skipping resolve" out :test #'char-equal)
@@ -91,7 +91,7 @@
                (setf (clpm.project:project-version project) "0.1.1")
                (clpm.project:write-project-file project manifest-path))
              (multiple-value-bind (code out err)
-                 (run-cli-captured '("resolve"))
+                 (run-cli-captured '("deps" "sync" "--to" "lock"))
                (declare (ignore err))
                (assert-eql 0 code)
                (assert-true (search "Resolving dependencies" out :test #'char-equal)

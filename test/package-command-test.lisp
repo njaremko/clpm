@@ -1,4 +1,4 @@
-;;;; test/package-command-test.lisp - `clpm package` command tests
+;;;; test/package-command-test.lisp - `clpm project package` command tests
 
 (require :asdf)
 (require :sb-posix)
@@ -38,7 +38,7 @@
                           :external-format :utf-8)
     (write-string contents s)))
 
-(format t "Testing `clpm package`...~%")
+(format t "Testing `clpm project package`...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
@@ -90,7 +90,7 @@
             (merge-pathnames "clpm.project" project-root))
 
            (uiop:with-current-directory (project-root)
-             (assert-eql 0 (clpm:run-cli '("package"))))
+             (assert-eql 0 (clpm:run-cli '("project" "package"))))
 
            (assert-true (uiop:file-exists-p dist-bin)
                         "Missing packaged binary: ~A" (namestring dist-bin))
@@ -131,7 +131,7 @@
 	           ;; ECL packaging is explicitly deferred with a clear message.
 	           (uiop:with-current-directory (project-root)
 	             (let ((*error-output* (make-string-output-stream)))
-	               (assert-eql 1 (clpm:run-cli '("--lisp" "ecl" "package")))
+	               (assert-eql 1 (clpm:run-cli '("--lisp" "ecl" "project" "package")))
 	               (let ((err (get-output-stream-string *error-output*)))
 	                 (assert-true (search "Packaging on ECL is not yet implemented" err)
 	                              "Expected ECL-not-implemented message, got: ~S" err))))
@@ -142,7 +142,7 @@
 	           (when (null (clpm.platform:which "ccl"))
 	             (uiop:with-current-directory (project-root)
 	               (let ((*error-output* (make-string-output-stream)))
-	                 (let ((rc (clpm:run-cli '("--lisp" "ccl" "package"))))
+	                 (let ((rc (clpm:run-cli '("--lisp" "ccl" "project" "package"))))
 	                   (let ((err (get-output-stream-string *error-output*)))
 	                     (assert-true (and (integerp rc) (not (zerop rc)))
 	                                  "Expected non-zero rc when CCL missing, got ~S" rc)

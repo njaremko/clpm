@@ -145,7 +145,7 @@
                (assert-true (clpm.store:build-exists-p build-c) "Expected build C to exist pre-GC")
 
                ;; GC should keep referenced entries (A, B) and remove unreferenced (C).
-               (assert-eql 0 (clpm:run-cli '("gc")))
+               (assert-eql 0 (clpm:run-cli '("store" "gc")))
 
                (assert-true (clpm.store:source-exists-p tree-a) "Expected source A to be kept")
                (assert-true (clpm.store:source-exists-p tree-b) "Expected source B to be kept")

@@ -70,14 +70,14 @@
 
     ;; Install from app root.
     (uiop:with-current-directory (app-root)
-      (assert-eql 0 (clpm:run-cli '("install"))))
+      (assert-eql 0 (clpm:run-cli '("deps" "sync"))))
 
     ;; Verify activation config exists.
     (let ((config-path (merge-pathnames ".clpm/asdf-config.lisp" app-root)))
       (assert-true (uiop:file-exists-p config-path)
                    "Missing activation config: ~A" (namestring config-path))
       ;; Validate SBCL can load the dependency system non-interactively
-      ;; (this approximates what `clpm repl --load-system dep` would do).
+      ;; (this approximates what `clpm run repl dep` would do).
       (multiple-value-bind (output error-output exit-code)
           (clpm.platform:run-program
            (list "sbcl" "--noinform" "--non-interactive" "--disable-debugger"
@@ -94,4 +94,3 @@
 (format t "  (:path ...) end-to-end PASSED~%")
 (format t "~%Path dependency tests PASSED!~%")
 (sb-ext:exit :code 0)
-

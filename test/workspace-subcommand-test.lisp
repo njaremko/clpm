@@ -1,4 +1,4 @@
-;;;; test/workspace-subcommand-test.lisp - `clpm workspace` subcommand tests
+;;;; test/workspace-subcommand-test.lisp - `clpm project workspace` subcommand tests
 
 (require :asdf)
 (require :sb-posix)
@@ -48,7 +48,7 @@
                 (get-output-stream-string out)
                 (get-output-stream-string err))))))
 
-(format t "Testing `clpm workspace` subcommands...~%")
+(format t "Testing `clpm project workspace` subcommands...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
@@ -62,12 +62,12 @@
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
 
            ;; init
-           (assert-eql 0 (clpm:run-cli (list "workspace" "init" "--dir" (namestring ws-root))))
+           (assert-eql 0 (clpm:run-cli (list "project" "workspace" "init" "--dir" (namestring ws-root))))
            (assert-true (uiop:file-exists-p ws-path) "Expected clpm.workspace to exist")
 
            ;; add (normalize trailing slash)
-           (assert-eql 0 (clpm:run-cli (list "workspace" "add" "app/" "--dir" (namestring ws-root))))
-           (assert-eql 0 (clpm:run-cli (list "workspace" "add" "lib-a" "--dir" (namestring ws-root))))
+           (assert-eql 0 (clpm:run-cli (list "project" "workspace" "add" "app/" "--dir" (namestring ws-root))))
+           (assert-eql 0 (clpm:run-cli (list "project" "workspace" "add" "lib-a" "--dir" (namestring ws-root))))
 
            (let* ((ws (clpm.workspace:read-workspace-file ws-path))
                   (members (clpm.workspace:workspace-members ws)))
@@ -76,7 +76,7 @@
 
            ;; list
            (multiple-value-bind (code out err)
-               (run-cli-captured (list "workspace" "list" "--dir" (namestring ws-root)))
+               (run-cli-captured (list "project" "workspace" "list" "--dir" (namestring ws-root)))
              (declare (ignore err))
              (assert-eql 0 code)
              (assert-contains out "app")
@@ -87,13 +87,13 @@
              (ensure-directories-exist other)
              (uiop:with-current-directory (other)
                (multiple-value-bind (code _out err)
-                   (run-cli-captured '("workspace" "list"))
+                   (run-cli-captured '("project" "workspace" "list"))
                  (declare (ignore _out))
                  (assert-true (not (zerop code)) "Expected workspace list to fail outside workspace")
                  (assert-contains err "No clpm.workspace found"))))
 
            ;; remove (normalize trailing slash, idempotency error message)
-           (assert-eql 0 (clpm:run-cli (list "workspace" "remove" "app/" "--dir" (namestring ws-root))))
+           (assert-eql 0 (clpm:run-cli (list "project" "workspace" "remove" "app/" "--dir" (namestring ws-root))))
            (let* ((ws (clpm.workspace:read-workspace-file ws-path))
                   (members (clpm.workspace:workspace-members ws)))
              (assert-true (equal members '("lib-a"))
@@ -101,7 +101,7 @@
 
            ;; removing a missing member errors with current members listed
            (multiple-value-bind (code _out err)
-               (run-cli-captured (list "workspace" "remove" "nope"
+               (run-cli-captured (list "project" "workspace" "remove" "nope"
                                        "--dir" (namestring ws-root)))
              (declare (ignore _out))
              (assert-true (not (zerop code)) "Expected non-zero rc for missing member")

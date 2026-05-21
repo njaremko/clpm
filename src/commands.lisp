@@ -104,9 +104,9 @@ When not in a project, only the global config registries are used."
            (usage-error (fmt &rest fmt-args)
              (apply #'log-error fmt fmt-args)
              (log-error "Usage:")
-             (log-error "  clpm new <name> --workspace [--dir <path>]")
-             (log-error "  clpm new <name> --bin|--lib [--dir <path>]")
-             (log-error "  clpm new <name> --bin|--lib --member-of <workspace-dir>")
+             (log-error "  clpm project new <name> --workspace [--dir <path>]")
+             (log-error "  clpm project new <name> --bin|--lib [--dir <path>]")
+             (log-error "  clpm project new <name> --bin|--lib --member-of <workspace-dir>")
              (return-from cmd-new 1))
            (ensure-dir-arg (path)
              (uiop:ensure-directory-pathname
@@ -257,10 +257,10 @@ When not in a project, only the global config registries are used."
                 (format s "This is a CLPM workspace.~%~%")
                 (format s "## Common commands~%~%")
                 (format s "Add a binary member:~%~%")
-                (format s "  clpm new app --bin --member-of .~%~%")
+                (format s "  clpm project new app --bin --member-of .~%~%")
                 (format s "Target a member:~%~%")
-                (format s "  clpm -p app install~%")
-                (format s "  clpm -p app test~%")))
+                (format s "  clpm -p app deps sync~%")
+                (format s "  clpm -p app run test~%")))
              (log-info "Created workspace: ~A" (namestring ws-root))
              0))
           (t
@@ -303,6 +303,40 @@ When not in a project, only the global config registries are used."
                            (string-downcase (symbol-name kind))
                            (namestring project-root))
                  0))))))))
+
+(defun cmd-project (&rest args)
+  "Dispatch project-resource operations."
+  (let ((sub (first args))
+        (rest (rest args)))
+    (labels ((usage ()
+               (log-error "Usage:")
+               (log-error "  clpm project new <name> --workspace [--dir <path>]")
+               (log-error "  clpm project new <name> --bin|--lib [--dir <path>]")
+               (log-error "  clpm project new <name> --bin|--lib --member-of <workspace-dir>")
+               (log-error "  clpm project init [name]")
+               (log-error "  clpm project workspace <init|add|remove|list> ...")
+               (log-error "  clpm project package")
+               1))
+      (cond
+        ((or (null sub) (string= sub "help") (string= sub "--help"))
+         (usage))
+        ((string= sub "new")
+         (apply #'cmd-new rest))
+        ((string= sub "init")
+         (when (rest rest)
+           (log-error "Usage: clpm project init [name]")
+           (return-from cmd-project 1))
+         (cmd-init :name (first rest)))
+        ((string= sub "workspace")
+         (apply #'cmd-workspace rest))
+        ((string= sub "package")
+         (when rest
+           (log-error "Usage: clpm project package")
+           (return-from cmd-project 1))
+         (apply #'cmd-package rest))
+        (t
+         (log-error "Unknown project subcommand: ~A" sub)
+         (usage))))))
 
 ;;; add/remove commands
 
@@ -409,7 +443,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
        (values nil nil nil nil nil)))))
 
 (defun cmd-add (&rest args)
-  "Add dependencies to clpm.project and update clpm.lock."
+  "Add dependencies to clpm.project and refresh clpm.lock."
   (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
       (find-effective-project-root)
     (declare (ignore lock-path _workspace-path))
@@ -421,7 +455,6 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
     (let ((specs '())
           (dev-p nil)
           (test-p nil)
-          (install-p nil)
           (any-p nil)
           (caret-p nil)
           (registry-name nil)
@@ -437,8 +470,6 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                (setf dev-p t))
               ((string= arg "--test")
                (setf test-p t))
-              ((string= arg "--install")
-               (setf install-p t))
               ((string= arg "--any")
                (setf any-p t))
               ((string= arg "--caret")
@@ -489,7 +520,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
       (setf specs (nreverse specs))
 
       (unless specs
-        (log-error "Usage: clpm add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]...")
+        (log-error "Usage: clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]...")
         (return-from cmd-add 1))
 
       (when (and any-p caret-p)
@@ -664,12 +695,10 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                         (:test-depends "test-depends")))))
 
         (uiop:with-current-directory (project-root)
-          (if install-p
-              (cmd-install)
-              (cmd-resolve)))))))
+          (cmd-resolve))))))
 
 (defun cmd-remove (&rest args)
-  "Remove a dependency from clpm.project and update clpm.lock."
+  "Remove a dependency from clpm.project and refresh clpm.lock."
   (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
       (find-effective-project-root)
     (declare (ignore lock-path _workspace-path))
@@ -680,13 +709,11 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
 
     (let ((system-id nil)
           (dev-p nil)
-          (test-p nil)
-          (install-p nil))
+          (test-p nil))
       (dolist (arg args)
         (cond
           ((string= arg "--dev") (setf dev-p t))
           ((string= arg "--test") (setf test-p t))
-          ((string= arg "--install") (setf install-p t))
           ((and (plusp (length arg)) (char= (char arg 0) #\-))
            (log-error "Unknown option: ~A" arg)
            (return-from cmd-remove 1))
@@ -695,7 +722,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
            (log-error "Unexpected argument: ~A" arg)
            (return-from cmd-remove 1))))
       (unless system-id
-        (log-error "Usage: clpm remove <system> [--dev|--test] [--install]")
+        (log-error "Usage: clpm deps remove <system> [--dev|--test]")
         (return-from cmd-remove 1))
 
       (when (and dev-p test-p)
@@ -734,9 +761,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                     (:test-depends "test-depends")))
 
         (uiop:with-current-directory (project-root)
-          (if install-p
-              (cmd-install)
-              (cmd-resolve)))))))
+          (cmd-resolve))))))
 
 ;;; search command
 
@@ -744,7 +769,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
   "Search configured registries for systems matching a query string."
   (labels ((usage-error (fmt &rest fmt-args)
              (apply #'log-error fmt fmt-args)
-             (log-error "Usage: clpm search <query> [--limit N] [--json]")
+             (log-error "Usage: clpm deps search <query> [--limit N] [--json]")
              (return-from cmd-search 1))
            (parse-release-ref (release-ref)
              (let ((at-pos (and (stringp release-ref)
@@ -864,7 +889,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
   "Show information about a system across configured registries."
   (labels ((usage-error (fmt &rest fmt-args)
              (apply #'log-error fmt fmt-args)
-             (log-error "Usage: clpm info <system> [--json] [--all]")
+             (log-error "Usage: clpm deps info <system> [--json] [--all]")
              (return-from cmd-info 1))
            (release-ref (pkg ver)
              (format nil "~A@~A" pkg ver))
@@ -1106,7 +1131,7 @@ manifest; root-level entries in that set are tagged \"(optional)\"."
   "Print a dependency tree from the current project's lockfile."
   (labels ((usage-error (fmt &rest fmt-args)
              (apply #'log-error fmt fmt-args)
-             (log-error "Usage: clpm tree [--package <member>] [--depth N]")
+             (log-error "Usage: clpm deps tree [--package <member>] [--depth N]")
              (return-from cmd-tree 1)))
     (let ((package nil)
           (depth-limit nil))
@@ -1144,7 +1169,7 @@ manifest; root-level entries in that set are tagged \"(optional)\"."
               (log-no-project-found))
             (return-from cmd-tree 1))
           (unless lock-path
-            (log-error "No clpm.lock found - run 'clpm resolve' first")
+            (log-error "No clpm.lock found - run 'clpm deps sync --to lock' first")
             (return-from cmd-tree 1))
           (let* ((project (clpm.project:read-project-file manifest-path))
                  (lockfile (clpm.project:read-lock-file lock-path))
@@ -1226,7 +1251,7 @@ manifest; root-level entries in that set are tagged \"(optional)\"."
   "Explain why a system appears in the resolved dependency graph."
   (labels ((usage-error (fmt &rest fmt-args)
              (apply #'log-error fmt fmt-args)
-             (log-error "Usage: clpm why <system-id> [--package <member>]")
+             (log-error "Usage: clpm deps why <system-id> [--package <member>]")
              (return-from cmd-why 1)))
     (let ((package nil)
           (target nil))
@@ -1260,7 +1285,7 @@ manifest; root-level entries in that set are tagged \"(optional)\"."
               (log-no-project-found))
             (return-from cmd-why 1))
           (unless lock-path
-            (log-error "No clpm.lock found - run 'clpm resolve' first")
+            (log-error "No clpm.lock found - run 'clpm deps sync --to lock' first")
             (return-from cmd-why 1))
           (let* ((project (clpm.project:read-project-file manifest-path))
                  (lockfile (clpm.project:read-lock-file lock-path))
@@ -1388,7 +1413,7 @@ lockfile; NIL persists no opt-ins."
           (log-no-project-found)
           (return-from cmd-fetch 1))
         (return-from cmd-fetch 1))
-      (log-error "No clpm.lock found - run 'clpm resolve' first")
+      (log-error "No clpm.lock found - run 'clpm deps sync --to lock' first")
       (return-from cmd-fetch 1))
     (log-info "Fetching dependencies...")
     (let ((lockfile (clpm.project:read-lock-file lock-path)))
@@ -1441,7 +1466,7 @@ lockfile; NIL persists no opt-ins."
         (log-no-project-found))
       (return-from cmd-build 1))
     (unless lock-path
-      (log-error "No clpm.lock found - run 'clpm resolve' first")
+      (log-error "No clpm.lock found - run 'clpm deps sync --to lock' first")
       (return-from cmd-build 1))
     (log-info "Building dependencies...")
     (let* ((project (clpm.project:read-project-file manifest-path))
@@ -1517,7 +1542,7 @@ lockfile; NIL persists no opt-ins."
                                      :lisp-kind kind
                                      :lisp-version lisp-version))
       (log-info "Project installed successfully")
-      (log-info "Run 'clpm repl' to start a REPL with the project loaded")
+      (log-info "Run 'clpm run repl' to start a REPL with the project loaded")
       ;; Manifest may request that the repl-bridge daemon come up automatically
       ;; on install. Skipped when a daemon for this project is already running,
       ;; or when stdout isn't a tty (we don't want this happening inside CI).
@@ -1548,7 +1573,7 @@ deps don't churn)."
                                (clpm.project:read-lock-file lock-path))))
       (when selective
         (unless existing-lock
-          (log-error "No clpm.lock found - run 'clpm install' before 'clpm update <system>'")
+          (log-error "No clpm.lock found - run 'clpm deps sync' before 'clpm deps update <system>'")
           (return-from cmd-update 1))
         (let ((locked-ids (mapcar #'clpm.project:locked-system-id
                                   (clpm.project:lockfile-resolved existing-lock))))
@@ -1588,6 +1613,94 @@ deps don't churn)."
             (return-from cmd-update 2)))))
     0))
 
+(defun cmd-deps-sync (&rest args)
+  "Realize dependency state through a selected pipeline stage."
+  (let ((stage :active))
+    (labels ((usage-error (fmt &rest fmt-args)
+               (apply #'log-error fmt fmt-args)
+               (log-error "Usage: clpm deps sync [--to lock|source|build|active]")
+               (return-from cmd-deps-sync 1))
+             (parse-stage (raw)
+               (cond
+                 ((string= raw "lock") :lock)
+                 ((string= raw "source") :source)
+                 ((string= raw "build") :build)
+                 ((string= raw "active") :active)
+                 (t nil)))
+             (run-step (fn)
+               (let ((rc (funcall fn)))
+                 (unless (zerop rc)
+                   (return-from cmd-deps-sync rc)))))
+      (loop while args do
+        (let ((arg (pop args)))
+          (cond
+            ((string= arg "--to")
+             (let ((raw (pop args)))
+               (unless (and (stringp raw) (plusp (length raw)))
+                 (usage-error "Missing value for --to"))
+               (let ((parsed (parse-stage raw)))
+                 (unless parsed
+                   (usage-error "Invalid sync stage: ~A" raw))
+                 (setf stage parsed))))
+            (t
+             (usage-error "Unknown option: ~A" arg)))))
+      (case stage
+        (:lock
+         (cmd-resolve))
+        (:source
+         (run-step #'cmd-resolve)
+         (cmd-fetch))
+        (:build
+         (run-step #'cmd-resolve)
+         (run-step #'cmd-fetch)
+         (cmd-build))
+        (:active
+         (cmd-install))))))
+
+(defun cmd-deps (&rest args)
+  "Dispatch dependency-resource operations."
+  (let ((sub (first args))
+        (rest (rest args)))
+    (labels ((usage ()
+               (log-error "Usage:")
+               (log-error "  clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>...")
+               (log-error "  clpm deps remove [--dev|--test] <system>")
+               (log-error "  clpm deps sync [--to lock|source|build|active]")
+               (log-error "  clpm deps update [system ...]")
+               (log-error "  clpm deps search <query> [--limit N] [--json]")
+               (log-error "  clpm deps info <system> [--json] [--all]")
+               (log-error "  clpm deps tree [--package <member>] [--depth N]")
+               (log-error "  clpm deps why <system> [--package <member>]")
+               (log-error "  clpm deps audit [--json]")
+               (log-error "  clpm deps sbom --format <format> [--out <path>]")
+               1))
+      (cond
+        ((or (null sub) (string= sub "help") (string= sub "--help"))
+         (usage))
+        ((string= sub "add")
+         (apply #'cmd-add rest))
+        ((string= sub "remove")
+         (apply #'cmd-remove rest))
+        ((string= sub "sync")
+         (apply #'cmd-deps-sync rest))
+        ((string= sub "update")
+         (apply #'cmd-update rest))
+        ((string= sub "search")
+         (apply #'cmd-search rest))
+        ((string= sub "info")
+         (apply #'cmd-info rest))
+        ((string= sub "tree")
+         (apply #'cmd-tree rest))
+        ((string= sub "why")
+         (apply #'cmd-why rest))
+        ((string= sub "audit")
+         (apply #'cmd-audit rest))
+        ((string= sub "sbom")
+         (apply #'cmd-sbom rest))
+        (t
+         (log-error "Unknown deps subcommand: ~A" sub)
+         (usage))))))
+
 ;;; repl command
 
 (defun cmd-repl (&key load-system)
@@ -1600,14 +1713,14 @@ deps don't churn)."
         (log-no-project-found))
       (return-from cmd-repl 1))
     (unless lock-path
-      (log-error "No clpm.lock found - run 'clpm install' first")
+      (log-error "No clpm.lock found - run 'clpm deps sync' first")
       (return-from cmd-repl 1))
     (let* ((project (when manifest-path
                       (clpm.project:read-project-file manifest-path)))
            (kind (effective-lisp-kind project))
            (config-path (merge-pathnames ".clpm/asdf-config.lisp" project-root)))
       (unless (uiop:file-exists-p config-path)
-        (log-error "Project not activated - run 'clpm install' first")
+        (log-error "Project not activated - run 'clpm deps sync' first")
         (return-from cmd-repl 1))
       (let ((argv (clpm.lisp:lisp-run-argv kind
                                           :load-files (list (namestring config-path))
@@ -1731,7 +1844,7 @@ workflows, not the runtime image."
 running for PROJECT-ROOT by launching `daemon --detach' when one is not.
 
 Idempotent: if the existing pidfile points at a live process, do nothing.
-Failures are logged but never propagate -- `clpm install' must not fail
+Failures are logged but never propagate -- `clpm deps sync' must not fail
 because the daemon couldn't come up."
   (handler-case
       (multiple-value-bind (sock pid log) (%bridge-paths project-root)
@@ -2824,7 +2937,7 @@ See `clpm help repl-bridge' for the full surface."
                    t)))))
     (let ((cp (config-path)))
       (unless (installed-and-fresh-p)
-        (log-info "Project not installed/activated (or out of date); running 'clpm install'...")
+        (log-info "Project not installed/activated (or out of date); running 'clpm deps sync'...")
         (let ((rc (uiop:with-current-directory (project-root)
                     (cmd-install))))
           (unless (zerop rc)
@@ -2979,6 +3092,44 @@ Returns an integer exit code."
         exit-code))))
 
 (defun cmd-run (&rest args)
+  "Dispatch project execution operations."
+  (let ((sub (first args))
+        (rest (rest args)))
+    (cond
+      ((or (null sub) (string= sub "--"))
+       (apply #'cmd-run-entrypoint args))
+      ((string= sub "repl")
+       (when (rest rest)
+         (log-error "Usage: clpm run repl [system]")
+         (return-from cmd-run 1))
+       (cmd-repl :load-system (first rest)))
+      ((string= sub "exec")
+       (apply #'cmd-exec rest))
+      ((string= sub "test")
+       (when rest
+         (log-error "Usage: clpm run test")
+         (return-from cmd-run 1))
+       (cmd-test))
+      ((string= sub "script")
+       (apply #'cmd-scripts (cons "run" rest)))
+      ((string= sub "scripts")
+       (when rest
+         (log-error "Usage: clpm run scripts")
+         (return-from cmd-run 1))
+       (cmd-scripts "list"))
+      ((or (string= sub "help") (string= sub "--help"))
+       (log-error "Usage:")
+       (log-error "  clpm run [-- <args...>]")
+       (log-error "  clpm run repl [system]")
+       (log-error "  clpm run exec -- <cmd...>")
+       (log-error "  clpm run test")
+       (log-error "  clpm run script <name> [-- <args...>]")
+       (log-error "  clpm run scripts")
+       1)
+      (t
+       (apply #'cmd-run-entrypoint args)))))
+
+(defun cmd-run-entrypoint (&rest args)
   "Run the project entrypoint defined in clpm.project :run."
   (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
       (find-effective-project-root)
@@ -2986,21 +3137,21 @@ Returns an integer exit code."
     (unless manifest-path
       (when (null workspace-root)
         (log-no-project-found))
-      (return-from cmd-run 1))
+      (return-from cmd-run-entrypoint 1))
     (let* ((project (clpm.project:read-project-file manifest-path))
            (run (clpm.project:project-run project)))
       (unless run
         (log-error "No :run entry configured in clpm.project")
-        (return-from cmd-run 1))
+        (return-from cmd-run-entrypoint 1))
       (let ((system (getf run :system))
             (fn-spec (getf run :function)))
         (unless (and (stringp system) (stringp fn-spec))
           (log-error "Invalid :run entry: expected (:system <string> :function <string>)")
-          (return-from cmd-run 1))
+          (return-from cmd-run-entrypoint 1))
         (multiple-value-bind (config-path rc)
             (ensure-project-activated project-root)
           (unless (zerop rc)
-            (return-from cmd-run rc))
+            (return-from cmd-run-entrypoint rc))
           (let* ((run-args (if (and args (string= (first args) "--"))
                                (rest args)
                                args))
@@ -3025,7 +3176,7 @@ Returns an integer exit code."
 (defun cmd-exec (&rest args)
   "Run an external command in the project's activated environment.
 
-Usage: clpm exec -- <cmd...>"
+Usage: clpm run exec -- <cmd...>"
   (multiple-value-bind (project-root manifest-path _lock-path workspace-root _workspace-path)
       (find-effective-project-root)
     (declare (ignore _lock-path _workspace-path))
@@ -3037,7 +3188,7 @@ Usage: clpm exec -- <cmd...>"
       (when (and cmd (string= (first cmd) "--"))
         (setf cmd (rest cmd)))
       (unless cmd
-        (log-error "Usage: clpm exec -- <cmd...>")
+        (log-error "Usage: clpm run exec -- <cmd...>")
         (return-from cmd-exec 1))
 
       (multiple-value-bind (config-path rc)
@@ -3175,8 +3326,8 @@ Returns (values parsed-scripts exit-code)."
           (cond
             ((or (null sub) (string= sub "help") (string= sub "--help"))
              (log-info "Usage:")
-             (log-info "  clpm scripts list")
-             (log-info "  clpm scripts run <name> [-- <args...>]")
+             (log-info "  clpm run scripts")
+             (log-info "  clpm run script <name> [-- <args...>]")
              0)
             ((string= sub "list")
              (dolist (name (sort (mapcar (lambda (s) (getf s :name)) parsed) #'string<))
@@ -3185,7 +3336,7 @@ Returns (values parsed-scripts exit-code)."
             ((string= sub "run")
              (let ((name (second args)))
                (unless (and (stringp name) (plusp (length name)))
-                 (log-error "Usage: clpm scripts run <name> [-- <args...>]")
+                 (log-error "Usage: clpm run script <name> [-- <args...>]")
                  (return-from cmd-scripts 1))
                (let* ((rest (cddr args))
                       (forward (if (and rest (string= (first rest) "--"))
@@ -3227,7 +3378,7 @@ Returns (values parsed-scripts exit-code)."
                       (log-error "Unsupported script type: ~S" (getf script :type))
                       1))))))
             (t
-             (log-error "Usage: clpm scripts <list|run> [args]")
+             (log-error "Usage: clpm run <scripts|script> [args]")
              1)))))))
 
 ;;; test command
@@ -3367,10 +3518,10 @@ to the output path; no wrapper is needed since CCL doesn't grab CLI flags."
                 (return-from cmd-package rc)))
             (setf lock-path (merge-pathnames "clpm.lock" project-root)))
           (unless (and lock-path (uiop:file-exists-p lock-path))
-            (log-error "Missing clpm.lock - run 'clpm install' first")
+            (log-error "Missing clpm.lock - run 'clpm deps sync' first")
             (return-from cmd-package 1))
           (unless (uiop:file-exists-p config-path)
-            (log-error "Missing activation config - run 'clpm install' first")
+            (log-error "Missing activation config - run 'clpm deps sync' first")
             (return-from cmd-package 1))
 
           (multiple-value-bind (pkg-name fn-name)
@@ -3514,7 +3665,7 @@ Default: remove the project's .clpm/ activation cache.
            (setf clean-store t))
           (t
            (log-error "Unknown option: ~A" arg)
-           (log-error "Usage: clpm clean [--dist] [--store]")
+           (log-error "Usage: clpm store clean [--dist] [--store]")
            (return-from cmd-clean 1)))))
     (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
         (find-effective-project-root)
@@ -3556,6 +3707,34 @@ Default: remove the project's .clpm/ activation cache.
                   dry-run (length deleted))
         (log-info "Nothing to clean"))
     0))
+
+(defun cmd-store (&rest args)
+  "Dispatch store-resource cleanup operations."
+  (let ((sub (first args))
+        (rest (rest args)))
+    (labels ((usage ()
+               (log-error "Usage:")
+               (log-error "  clpm store clean [--dist] [--store]")
+               (log-error "  clpm store gc [--dry-run]")
+               1))
+      (cond
+        ((or (null sub) (string= sub "help") (string= sub "--help"))
+         (usage))
+        ((string= sub "clean")
+         (apply #'cmd-clean rest))
+        ((string= sub "gc")
+         (let ((dry-run nil))
+           (dolist (arg rest)
+             (cond
+               ((string= arg "--dry-run") (setf dry-run t))
+               (t
+                (log-error "Unknown option: ~A" arg)
+                (log-error "Usage: clpm store gc [--dry-run]")
+                (return-from cmd-store 1))))
+           (cmd-gc :dry-run dry-run)))
+        (t
+         (log-error "Unknown store subcommand: ~A" sub)
+         (usage))))))
 
 ;;; Helper functions
 
@@ -3605,10 +3784,10 @@ Default: remove the project's .clpm/ activation cache.
   (labels ((usage-error (fmt &rest fmt-args)
              (apply #'log-error fmt fmt-args)
              (log-error "Usage:")
-             (log-error "  clpm workspace init [--dir <path>]")
-             (log-error "  clpm workspace add <member> [--dir <path>]")
-             (log-error "  clpm workspace remove <member> [--dir <path>]")
-             (log-error "  clpm workspace list [--dir <path>]")
+             (log-error "  clpm project workspace init [--dir <path>]")
+             (log-error "  clpm project workspace add <member> [--dir <path>]")
+             (log-error "  clpm project workspace remove <member> [--dir <path>]")
+             (log-error "  clpm project workspace list [--dir <path>]")
              (return-from cmd-workspace 1))
            (parse-dir-arg (rest)
              (let ((dir nil)
@@ -3635,10 +3814,10 @@ Default: remove the project's .clpm/ activation cache.
       (cond
         ((or (null sub) (string= sub "help") (string= sub "--help"))
          (log-info "Usage:")
-         (log-info "  clpm workspace init [--dir <path>]")
-         (log-info "  clpm workspace add <member> [--dir <path>]")
-         (log-info "  clpm workspace remove <member> [--dir <path>]")
-         (log-info "  clpm workspace list [--dir <path>]")
+         (log-info "  clpm project workspace init [--dir <path>]")
+         (log-info "  clpm project workspace add <member> [--dir <path>]")
+         (log-info "  clpm project workspace remove <member> [--dir <path>]")
+         (log-info "  clpm project workspace list [--dir <path>]")
          0)
         ((string= sub "init")
          (multiple-value-bind (dir extra)
@@ -3663,14 +3842,14 @@ Default: remove the project's .clpm/ activation cache.
            (let ((member (first extra))
                  (extra (rest extra)))
              (when (or (null member) extra)
-               (usage-error "Usage: clpm workspace add <member> [--dir <path>]"))
+               (usage-error "Usage: clpm project workspace add <member> [--dir <path>]"))
              (let ((norm (%normalize-workspace-member-arg member)))
                (unless norm
                  (return-from cmd-workspace 1))
                (multiple-value-bind (root ws-path)
                    (workspace-root-and-path dir)
                  (unless (and root ws-path (uiop:file-exists-p ws-path))
-                   (usage-error "No clpm.workspace found (run: clpm workspace init)"))
+                   (usage-error "No clpm.workspace found (run: clpm project workspace init)"))
                  (let* ((ws (clpm.workspace:read-workspace-file ws-path))
                         (members (sort (remove-duplicates
                                         (append (or (clpm.workspace:workspace-members ws) '())
@@ -3687,7 +3866,7 @@ Default: remove the project's .clpm/ activation cache.
            (let ((member (first extra))
                  (extra (rest extra)))
              (when (or (null member) extra)
-               (usage-error "Usage: clpm workspace remove <member> [--dir <path>]"))
+               (usage-error "Usage: clpm project workspace remove <member> [--dir <path>]"))
              (let ((norm (%normalize-workspace-member-arg member)))
                (unless norm
                  (return-from cmd-workspace 1))
@@ -3695,7 +3874,7 @@ Default: remove the project's .clpm/ activation cache.
                    (workspace-root-and-path dir)
                  (declare (ignore root))
                  (unless (and ws-path (uiop:file-exists-p ws-path))
-                   (usage-error "No clpm.workspace found (run: clpm workspace init)"))
+                   (usage-error "No clpm.workspace found (run: clpm project workspace init)"))
                  (let* ((ws (clpm.workspace:read-workspace-file ws-path))
                         (current (or (clpm.workspace:workspace-members ws) '())))
                    (unless (member norm current :test #'string=)
@@ -3718,7 +3897,7 @@ Default: remove the project's .clpm/ activation cache.
                (workspace-root-and-path dir)
              (declare (ignore root))
              (unless (and ws-path (uiop:file-exists-p ws-path))
-               (usage-error "No clpm.workspace found (run: clpm workspace init)"))
+               (usage-error "No clpm.workspace found (run: clpm project workspace init)"))
              (let* ((ws (clpm.workspace:read-workspace-file ws-path))
                     (members (sort (copy-list (or (clpm.workspace:workspace-members ws) '()))
                                    #'string<)))
@@ -3736,7 +3915,7 @@ Default: remove the project's .clpm/ activation cache.
         (rest (rest args)))
     (cond
       ((or (null subcommand) (string= subcommand "help"))
-       (log-error "Usage: clpm registry <list|add|update|trust> [options]")
+       (log-error "Usage: clpm registry <list|add|update|trust|init|key|publish> [options]")
        (return-from cmd-registry 1))
 
       ((string= subcommand "list")
@@ -3949,6 +4128,12 @@ Default: remove the project's .clpm/ activation cache.
                    (return-from cmd-registry 1))))))
          0))
 
+      ((string= subcommand "key")
+       (apply #'cmd-keys rest))
+
+      ((string= subcommand "publish")
+       (apply #'cmd-publish rest))
+
       ((string= subcommand "trust")
        (let ((action (first rest))
              (rest (rest rest)))
@@ -4105,10 +4290,10 @@ in PATH, or NIL if the file isn't a recognizable Ed25519 public key."
     (labels ((usage-error (fmt &rest fmt-args)
                (apply #'log-error fmt fmt-args)
                (log-error "Usage:")
-               (log-error "  clpm keys generate --out <dir> --id <id>")
-               (log-error "  clpm keys list [--keys-dir <dir>]")
-               (log-error "  clpm keys import --pub <path> [--id <id>] [--keys-dir <dir>]")
-               (log-error "  clpm keys verify --pub <path> --file <path> --sig <path>")
+               (log-error "  clpm registry key generate --out <dir> --id <id>")
+               (log-error "  clpm registry key list [--keys-dir <dir>]")
+               (log-error "  clpm registry key import --pub <path> [--id <id>] [--keys-dir <dir>]")
+               (log-error "  clpm registry key verify --pub <path> --file <path> --sig <path>")
                (return-from cmd-keys 1)))
       (cond
         ((or (null subcommand) (string= subcommand "help"))
@@ -4319,7 +4504,7 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
         (git-commit-p nil))
     (labels ((usage-error (fmt &rest fmt-args)
                (apply #'log-error fmt fmt-args)
-               (log-error "Usage: clpm publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>] [--git-commit]")
+               (log-error "Usage: clpm registry publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>] [--git-commit]")
                (return-from cmd-publish 1)))
       ;; Parse args.
       (loop while args do
@@ -4547,7 +4732,7 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
   (let ((jsonp nil))
     (labels ((usage-error (fmt &rest fmt-args)
                (apply #'log-error fmt fmt-args)
-               (log-error "Usage: clpm audit [--json]")
+               (log-error "Usage: clpm deps audit [--json]")
                (return-from cmd-audit 1))
              (dash (s) (if (and (stringp s) (plusp (length s))) s "-"))
              (starts-with-p (s prefix)
@@ -4569,7 +4754,7 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
             (log-no-project-found))
           (return-from cmd-audit 1))
         (unless lock-path
-          (log-error "No clpm.lock found (run: clpm resolve or clpm install)")
+          (log-error "No clpm.lock found (run: clpm deps sync --to lock or clpm deps sync)")
           (return-from cmd-audit 1))
 
         (let* ((project (clpm.project:read-project-file manifest-path))
@@ -5009,7 +5194,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
         (output nil))
     (labels ((usage-error (fmt &rest fmt-args)
                (apply #'log-error fmt fmt-args)
-               (log-error "Usage: clpm sbom --format <~{~A~^|~}> [--output <path>]"
+               (log-error "Usage: clpm deps sbom --format <~{~A~^|~}> [--output <path>]"
                           *sbom-supported-formats*)
                (return-from cmd-sbom 1))
              (nonempty-string (s)
@@ -5042,7 +5227,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
             (log-no-project-found))
           (return-from cmd-sbom 1))
         (unless lock-path
-          (log-error "No clpm.lock found (run: clpm resolve or clpm install)")
+          (log-error "No clpm.lock found (run: clpm deps sync --to lock or clpm deps sync)")
           (return-from cmd-sbom 1))
 
         (let* ((lock (clpm.project:read-lock-file lock-path))
@@ -5133,73 +5318,73 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "- `clpm.project` is the source manifest. Edit it through `clpm` commands when possible."
     "- `clpm.workspace` groups project members. Pass global `-p <member>` / `--package <member>` before the command when a workspace root has multiple members."
     "- `clpm.lock` records resolved releases and should be regenerated by CLPM, not patched by hand."
-    "- The store is content-addressed and shared. Prefer `clpm clean` / `clpm gc` over manual deletion."
+    "- The store is content-addressed and shared. Prefer `clpm store clean` / `clpm store gc` over manual deletion."
     "- Registry trust is part of correctness. Do not use `--insecure` except for explicit debugging."
     ""
     "## First Moves"
     ""
     "1. Run `clpm doctor` when the environment is suspect."
     "2. Run `clpm help <command>` before using an unfamiliar command."
-    "3. In a project, run `clpm install` to resolve, fetch, build, and activate dependencies."
-    "4. Use `clpm tree` and `clpm why <system>` to understand dependency shape before changing it."
+    "3. In a project, run `clpm deps sync` to resolve, fetch, build, and activate dependencies."
+    "4. Use `clpm deps tree` and `clpm deps why <system>` to understand dependency shape before changing it."
     ""
     "## Common Workflows"
     ""
     "### Create or Initialize Projects"
     ""
     "```sh"
-    "clpm new my-app --bin"
-    "clpm new my-lib --lib"
-    "clpm init my-existing-project"
+    "clpm project new my-app --bin"
+    "clpm project new my-lib --lib"
+    "clpm project init my-existing-project"
     "```"
     ""
     "### Manage Dependencies"
     ""
     "```sh"
-    "clpm add alexandria"
-    "clpm add alexandria bordeaux-threads"
-    "clpm add alexandria@^1.4.0"
-    "clpm add --dev fiveam"
-    "clpm remove alexandria"
-    "clpm update"
-    "clpm update alexandria"
+    "clpm deps add alexandria"
+    "clpm deps add alexandria bordeaux-threads"
+    "clpm deps add alexandria@^1.4.0"
+    "clpm deps add --dev fiveam"
+    "clpm deps remove alexandria"
+    "clpm deps update"
+    "clpm deps update alexandria"
     "```"
     ""
-    "Prefer `clpm add` / `clpm remove` over manually editing dependency lists. After dependency changes, run `clpm install` and then the relevant tests."
+    "Prefer `clpm deps add` / `clpm deps remove` over manually editing dependency lists. After dependency changes, run `clpm deps sync` and then the relevant tests."
     ""
     "### Resolve, Fetch, Build"
     ""
     "```sh"
-    "clpm resolve"
-    "clpm fetch"
-    "clpm build"
-    "clpm install"
+    "clpm deps sync --to lock"
+    "clpm deps sync --to source"
+    "clpm deps sync --to build"
+    "clpm deps sync"
     "```"
     ""
-    "`clpm install` is the normal all-in-one path. Use the separate commands when debugging one stage."
+    "`clpm deps sync` is the normal all-in-one path. Use `--to` when debugging one stage."
     ""
     "### Run Code"
     ""
     "```sh"
-    "clpm repl"
+    "clpm run repl"
     "clpm run"
-    "clpm exec -- sbcl --script scripts/check.lisp"
-    "clpm test"
-    "clpm scripts list"
-    "clpm scripts run <name> -- <args>"
+    "clpm run exec -- sbcl --script scripts/check.lisp"
+    "clpm run test"
+    "clpm run scripts"
+    "clpm run script <name> -- <args>"
     "```"
     ""
-    "Use `clpm exec -- <cmd>` when a non-CLPM command needs the activated project environment."
+    "Use `clpm run exec -- <cmd>` when a non-CLPM command needs the activated project environment."
     ""
     "### Inspect Dependencies"
     ""
     "```sh"
-    "clpm search split-sequence"
-    "clpm info split-sequence"
-    "clpm tree --depth 3"
-    "clpm why alexandria"
-    "clpm audit"
-    "clpm sbom --format cyclonedx-json --out sbom.json"
+    "clpm deps search split-sequence"
+    "clpm deps info split-sequence"
+    "clpm deps tree --depth 3"
+    "clpm deps why alexandria"
+    "clpm deps audit"
+    "clpm deps sbom --format cyclonedx-json --out sbom.json"
     "```"
     ""
     "Use `--json` on commands that support it when you need machine-readable output."
@@ -5210,8 +5395,8 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "clpm registry list"
     "clpm registry update"
     "clpm registry add --name main --url <git-url> --trust ed25519:<key-id>"
-    "clpm keys list"
-    "clpm keys import --pub registry.pub --id main"
+    "clpm registry key list"
+    "clpm registry key import --pub registry.pub --id main"
     "```"
     ""
     "If resolution or fetch fails, inspect registry configuration and trust before weakening integrity checks."
@@ -5220,7 +5405,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     ""
     "`clpm repl-bridge` gives agents a persistent project-scoped Lisp image. Strongly prefer it for iterative Common Lisp development and debugging because definitions, packages, workers, restarts, frame locals, and debugger sessions can persist across calls."
     ""
-    "Use the bridge before starting a fresh `sbcl`, `clpm repl`, or ad hoc script when you need to understand a live condition, inspect a value, redefine one function, time a form, trace calls, or confirm image state. Fresh processes are still right for clean end-to-end tests, packaging, and dependency graph changes."
+    "Use the bridge before starting a fresh `sbcl`, `clpm run repl`, or ad hoc script when you need to understand a live condition, inspect a value, redefine one function, time a form, trace calls, or confirm image state. Fresh processes are still right for clean end-to-end tests, packaging, and dependency graph changes."
     ""
     "The public bridge CLI is deliberately small:"
     ""
@@ -5307,7 +5492,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     ""
     "Before stopping work, close kept debugger sessions, unwatch file watches, untrace functions, kill or reset throwaway workers, and run `clpm repl-bridge call list-redefinitions`. A non-empty result means the image contains definitions that may still need to be written to source. Use `clpm repl-bridge daemon --stop` for normal shutdown; let `daemon --status` or `daemon --stop` clean stale pid/socket files instead of deleting `.clpm/repl-bridge.*` by hand."
     ""
-    "After changing `clpm.project`, `clpm.lock`, registries, or dependency sources, run `clpm install`, then restart the daemon so its ASDF registry and loaded systems match the new dependency graph."
+    "After changing `clpm.project`, `clpm.lock`, registries, or dependency sources, run `clpm deps sync`, then restart the daemon so its ASDF registry and loaded systems match the new dependency graph."
     ""
     "## Safety Rules for Agents"
     ""
@@ -5316,7 +5501,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "- Keep dependency changes small and explain why each system was added or removed."
     "- Prefer focused CLPM commands over shelling into implementation details."
     "- Prefer `clpm repl-bridge eval FORM --debug` for Common Lisp bug investigation; use plain `eval` only when you already know the form should succeed."
-    "- After changing manifests, run `clpm install` and the narrowest relevant test command."
+    "- After changing manifests, run `clpm deps sync` and the narrowest relevant test command."
     "- Before stopping work after repl-bridge edits, check `clpm repl-bridge call list-redefinitions` for in-image definitions that still need source changes."
     "- Do not leave kept debug sessions, watches, traces, or throwaway workers behind."
     ""
@@ -5343,12 +5528,18 @@ SUB-SUBCOMMAND, when supplied, drills one level deeper (e.g.
 sub-subcommand=\"set\")."
   (labels ((p (fmt &rest args)
              (apply #'format t (concatenate 'string fmt "~%") args)))
+    (unless (member command
+                    '(:help :doctor :project :deps :registry :run :store
+                      :skill :repl-bridge)
+                    :test #'eq)
+      (log-error "Unknown command: ~A" command)
+      (return-from print-command-help 1))
     (case command
       (:help
        (p "Usage: clpm help <command> [subcommand]")
        (p "")
        (p "Examples:")
-       (p "  clpm help new")
+       (p "  clpm help project new")
        (p "  clpm help registry add")
        0)
       (:doctor
@@ -5361,124 +5552,112 @@ sub-subcommand=\"set\")."
        (p "  - tar present")
        (p "  - Registries configured (global config and/or current project)")
        0)
-      (:new
-       (p "Usage: clpm new <name> --bin|--lib [--dir <path>]")
-       (p "")
-       (p "Options:")
-       (p "  --bin         Create an executable project scaffold")
-       (p "  --lib         Create a library project scaffold")
-       (p "  --dir <path>  Destination directory (default: current dir)")
-       0)
-      (:init
-       (p "Usage: clpm init [name]")
-       (p "")
-       (p "Creates clpm.project in the current directory.")
-       0)
-      (:add
-       (p "Usage: clpm add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]...")
-       (p "")
-       (p "Examples:")
-       (p "  clpm add alexandria")
-       (p "  clpm add alexandria bordeaux-threads")
-       (p "  clpm add --caret alexandria")
-       (p "  clpm add alexandria@^1.4.0")
-       (p "  clpm add --path ../my-lib my-lib")
-       (p "  clpm add --git https://example.invalid/repo.git --ref main my-lib")
-       (p "")
-       (p "Options:")
-       (p "  --dev         Add to :dev-depends")
-       (p "  --test        Add to :test-depends")
-       (p "  --any         Explicitly set :constraint nil (any version)")
-       (p "  --caret       Set caret constraint based on highest available version")
-       (p "  --registry    Select registry when multiple provide the system")
-       (p "  --install     Run 'clpm install' after updating manifests")
-       (p "  --path <dir>  Use a local path dependency")
-       (p "  --git <url>   Use a git dependency")
-       (p "  --ref <ref>   Git ref (branch/tag/commit) to resolve")
-       0)
-      (:remove
-       (p "Usage: clpm remove [--dev|--test] <dep>")
-       (p "")
-       (p "Options:")
-       (p "  --dev   Remove from :dev-depends")
-       (p "  --test  Remove from :test-depends")
-       0)
-      (:search
-       (p "Usage: clpm search <query> [--limit N] [--json]")
-       (p "")
-       (p "Search registries for systems matching <query>.")
-       (p "")
-       (p "Options:")
-       (p "  --limit N  Limit number of results (after sorting)")
-       (p "  --json     Emit a stable JSON array")
-       0)
-      (:info
-       (p "Usage: clpm info <system> [--json] [--all]")
-       (p "")
-       (p "Show details about a system and available releases.")
-       (p "")
-       (p "Options:")
-       (p "  --json   Emit a stable JSON object")
-       (p "  --all    Include metadata for all candidates")
-       0)
-      (:tree
-       (p "Usage: clpm tree [--package <member>] [--depth N]")
-       (p "")
-       (p "Print the resolved dependency tree for the current project/workspace.")
-       (p "")
-       (p "Options:")
-       (p "  --package <member>  Workspace member to target (same as global -p/--package)")
-       (p "  --depth N           Max depth (0 = roots only)")
-       0)
-      (:why
-       (p "Usage: clpm why <system> [--package <member>]")
-       (p "")
-       (p "Explain why <system> appears in the resolved dependency graph.")
-       (p "")
-       (p "Options:")
-       (p "  --package <member>  Workspace member to target (same as global -p/--package)")
-       0)
-      (:scripts
+      (:project
+       (let ((sub (and (stringp subcommand) (string-downcase subcommand)))
+             (ssub (and (stringp sub-subcommand)
+                        (string-downcase sub-subcommand))))
+         (cond
+           ((and sub (string= sub "new"))
+            (p "Usage:")
+            (p "  clpm project new <name> --workspace [--dir <path>]")
+            (p "  clpm project new <name> --bin|--lib [--dir <path>]")
+            (p "  clpm project new <name> --bin|--lib --member-of <workspace-dir>")
+            0)
+           ((and sub (string= sub "init"))
+            (p "Usage: clpm project init [name]")
+            (p "")
+            (p "Creates clpm.project in the current directory.")
+            0)
+           ((and sub (string= sub "package"))
+            (p "Usage: clpm project package")
+            (p "")
+            (p "Builds a distributable executable in dist/ based on clpm.project :package.")
+            0)
+           ((and sub (string= sub "workspace"))
+            (cond
+              ((and ssub (string= ssub "init"))
+               (p "Usage: clpm project workspace init [--dir <path>]")
+               0)
+              ((and ssub (string= ssub "add"))
+               (p "Usage: clpm project workspace add <member> [--dir <path>]")
+               0)
+              ((and ssub (string= ssub "remove"))
+               (p "Usage: clpm project workspace remove <member> [--dir <path>]")
+               0)
+              ((and ssub (string= ssub "list"))
+               (p "Usage: clpm project workspace list [--dir <path>]")
+               0)
+              (t
+               (p "Usage:")
+               (p "  clpm project workspace init [--dir <path>]")
+               (p "  clpm project workspace add <member> [--dir <path>]")
+               (p "  clpm project workspace remove <member> [--dir <path>]")
+               (p "  clpm project workspace list [--dir <path>]")
+               0)))
+           (t
+            (p "Usage:")
+            (p "  clpm project new <name> --workspace [--dir <path>]")
+            (p "  clpm project new <name> --bin|--lib [--dir <path>]")
+            (p "  clpm project init [name]")
+            (p "  clpm project workspace <init|add|remove|list> ...")
+            (p "  clpm project package")
+            0))))
+      (:deps
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
          (cond
-           ((and sub (string= sub "list"))
-            (p "Usage: clpm scripts list")
+           ((and sub (string= sub "add"))
+            (p "Usage: clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]...")
             (p "")
-            (p "List script names declared in clpm.project, one per line.")
+            (p "Examples:")
+            (p "  clpm deps add alexandria")
+            (p "  clpm deps add alexandria bordeaux-threads")
+            (p "  clpm deps add --caret alexandria")
+            (p "  clpm deps add alexandria@^1.4.0")
+            (p "  clpm deps add --path ../my-lib my-lib")
+            (p "")
+            (p "Run `clpm deps sync` after dependency edits to realize the graph.")
             0)
-           ((and sub (string= sub "run"))
-            (p "Usage: clpm scripts run <name> [-- <args...>]")
+           ((and sub (string= sub "remove"))
+            (p "Usage: clpm deps remove [--dev|--test] <dep>")
+            0)
+           ((and sub (string= sub "sync"))
+            (p "Usage: clpm deps sync [--to lock|source|build|active]")
             (p "")
-            (p "Execute the script named <name>. Arguments after `--` are forwarded")
-            (p "verbatim to the script's command (shell scripts) or its function")
-            (p "(lisp scripts).")
+            (p "Stages:")
+            (p "  lock    Resolve dependencies and write clpm.lock")
+            (p "  source  Resolve and fetch sources")
+            (p "  build   Resolve, fetch, and build")
+            (p "  active  Resolve, fetch, build, and activate (default)")
+            0)
+           ((and sub (string= sub "update"))
+            (p "Usage: clpm deps update [system ...]")
+            0)
+           ((and sub (string= sub "search"))
+            (p "Usage: clpm deps search <query> [--limit N] [--json]")
+            0)
+           ((and sub (string= sub "info"))
+            (p "Usage: clpm deps info <system> [--json] [--all]")
+            0)
+           ((and sub (string= sub "tree"))
+            (p "Usage: clpm deps tree [--package <member>] [--depth N]")
+            0)
+           ((and sub (string= sub "why"))
+            (p "Usage: clpm deps why <system> [--package <member>]")
+            0)
+           ((and sub (string= sub "audit"))
+            (p "Usage: clpm deps audit [--json]")
+            0)
+           ((and sub (string= sub "sbom"))
+            (p "Usage: clpm deps sbom --format <cyclonedx-json|cyclonedx-xml|spdx-json> [--out <path>]")
             0)
            (t
             (p "Usage:")
-            (p "  clpm scripts list")
-            (p "  clpm scripts run <name> [-- <args...>]")
-            (p "")
-            (p "List and run project scripts defined in clpm.project.")
-            (p "")
-            (p "Script forms in clpm.project:")
-            (p "  (:script :name \"fmt\" :type :shell :command (\"sh\" \"-c\" \"...\"))")
-            (p "  (:script :name \"task\" :type :lisp :system \"my-app\" :function \"my-app::main\")")
+            (p "  clpm deps add [options] <system>...")
+            (p "  clpm deps remove [options] <system>")
+            (p "  clpm deps sync [--to lock|source|build|active]")
+            (p "  clpm deps update [system ...]")
+            (p "  clpm deps search|info|tree|why|audit|sbom ...")
             0))))
-      (:audit
-       (p "Usage: clpm audit [--json]")
-       (p "")
-       (p "Show a provenance and trust report for the current lockfile.")
-       0)
-      (:sbom
-       (p "Usage: clpm sbom --format <cyclonedx-json|cyclonedx-xml|spdx-json> [--out <path>]")
-       (p "")
-       (p "Generate a software bill of materials (SBOM) from the lockfile.")
-       (p "")
-       (p "Supported formats:")
-       (p "  cyclonedx-json   CycloneDX 1.5 JSON (default-friendly, widely tooled)")
-       (p "  cyclonedx-xml    CycloneDX 1.5 XML  (same content, XML serialization)")
-       (p "  spdx-json        SPDX 2.3 JSON      (alternate schema used by many auditors)")
-       0)
       (:skill
        (p "Usage: clpm skill")
        (p "")
@@ -5487,197 +5666,101 @@ sub-subcommand=\"set\")."
        (p "Example:")
        (p "  clpm skill > SKILL.md")
        0)
-      (:keys
-       (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
-         (cond
-           ((and sub (string= sub "generate"))
-            (p "Usage: clpm keys generate --out <dir> --id <id>")
-            (p "")
-            (p "Generate an Ed25519 keypair under <dir>. The id is used as the")
-            (p "basename for both files:")
-            (p "  <id>.key  32-byte seed as ASCII hex (64 chars) (keep secret)")
-            (p "  <id>.pub  32-byte public key as ASCII hex (64 chars)")
-            0)
-           ((and sub (string= sub "list"))
-            (p "Usage: clpm keys list [--keys-dir <dir>]")
-            (p "")
-            (p "List .pub files in <keys-dir> (default: ~/.config/clpm/keys/).")
-            (p "Each entry is printed as `<id>~Cfingerprint:<16 hex chars>`."
-               #\Tab)
-            (p "The fingerprint is the first 16 chars of the SHA-256 of the raw")
-            (p "32-byte public key bytes.")
-            0)
-           ((and sub (string= sub "import"))
-            (p "Usage: clpm keys import --pub <path> [--id <id>] [--keys-dir <dir>]")
-            (p "")
-            (p "Validate <path> as an Ed25519 public key (64-char hex) and copy it")
-            (p "into <keys-dir>/<id>.pub. <id> defaults to the source file's basename.")
-            (p "Refuses to overwrite an existing destination so trust anchors don't")
-            (p "silently rotate.")
-            0)
-           ((and sub (string= sub "verify"))
-            (p "Usage: clpm keys verify --pub <path> --file <path> --sig <path>")
-            (p "")
-            (p "Standalone Ed25519 detached-signature check. Exit 0 on a valid")
-            (p "signature, non-zero on mismatch or any error reading the inputs.")
-            0)
-           (t
-            (p "Usage:")
-            (p "  clpm keys generate --out <dir> --id <id>")
-            (p "  clpm keys list [--keys-dir <dir>]")
-            (p "  clpm keys import --pub <path> [--id <id>] [--keys-dir <dir>]")
-            (p "  clpm keys verify --pub <path> --file <path> --sig <path>")
-            (p "")
-            (p "Manage Ed25519 keys for signing registries and releases.")
-            (p "")
-            (p "Run `clpm help keys <subcommand>` for per-subcommand details.")
-            0))))
-      (:publish
-       (p "Usage: clpm publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>] [--git-commit]")
-       (p "")
-       (p "Publish the current project to a git-backed registry.")
-       (p "")
-       (p "Notes:")
-       (p "  - This writes files into the registry directory; it does not push.")
-       (p "  - Use --tarball-out to write the tarball to a file/dir (optional).")
-       (p "  - Use --git-commit to commit the changes inside the registry (optional).")
-       0)
-      (:workspace
-       (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
-         (cond
-           ((and sub (string= sub "init"))
-            (p "Usage: clpm workspace init [--dir <path>]")
-            (p "")
-            (p "Create an empty clpm.workspace in <path> (default: current dir).")
-            (p "Errors if clpm.workspace already exists at that location.")
-            0)
-           ((and sub (string= sub "add"))
-            (p "Usage: clpm workspace add <member> [--dir <path>]")
-            (p "")
-            (p "Add <member> (a path relative to the workspace root) to :members.")
-            (p "Trailing slashes are stripped. Members are kept sorted; adding the")
-            (p "same member twice is a no-op.")
-            0)
-           ((and sub (string= sub "remove"))
-            (p "Usage: clpm workspace remove <member> [--dir <path>]")
-            (p "")
-            (p "Remove <member> from :members and rewrite clpm.workspace. The")
-            (p "on-disk member directory is NOT deleted. Errors with the current")
-            (p "member list when <member> is unknown.")
-            0)
-           ((and sub (string= sub "list"))
-            (p "Usage: clpm workspace list [--dir <path>]")
-            (p "")
-            (p "Print one workspace member per line in sorted order.")
-            0)
-           (t
-            (p "Usage:")
-            (p "  clpm workspace init [--dir <path>]")
-            (p "  clpm workspace add <member> [--dir <path>]")
-            (p "  clpm workspace remove <member> [--dir <path>]")
-            (p "  clpm workspace list [--dir <path>]")
-            (p "")
-            (p "Manage workspaces and workspace members.")
-            (p "")
-            (p "Run `clpm help workspace <subcommand>` for per-subcommand details.")
-            0))))
       (:registry
-       (p "Usage: clpm registry <add|list|update|trust|init> [options]")
+       (p "Usage: clpm registry <add|list|update|trust|init|key|publish> [options]")
        (p "")
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
-		         (cond
-		           ((and sub (string= sub "add"))
-	            (p "Usage: clpm registry add --name <name> --url <git-url> --trust <ed25519:key-id>")
-	            (p "   or: clpm registry add --quicklisp [--name quicklisp] [--url <dist-url>]")
-	            (p "")
-	            (p "Example:")
-	            (p "  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:abcd...")
-	            (p "  clpm registry add --quicklisp")
-	            (p "")
-	            (p "Quicklisp note: dists do not publish version constraints between systems,")
-	            (p "so transitive deps from a QL registry get a `nil` constraint (any version).")
-	            (p "The synthetic version is the dist date (e.g. 20241012). Pin a specific")
-	            (p "constraint in your clpm.project to override.")
-	            0)
+         (cond
+           ((and sub (string= sub "add"))
+            (p "Usage: clpm registry add --name <name> --url <git-url> --trust <ed25519:key-id>")
+            (p "   or: clpm registry add --quicklisp [--name quicklisp] [--url <dist-url>]")
+            (p "")
+            (p "Example:")
+            (p "  clpm registry add --name main --url https://example.invalid/registry.git --trust ed25519:abcd...")
+            (p "  clpm registry add --quicklisp")
+            (p "")
+            (p "Quicklisp note: dists do not publish version constraints between systems,")
+            (p "so transitive deps from a QL registry get a `nil` constraint (any version).")
+            (p "The synthetic version is the dist date (e.g. 20241012). Pin a specific")
+            (p "constraint in your clpm.project to override.")
+            0)
            ((and sub (string= sub "list"))
             (p "Usage: clpm registry list")
             0)
            ((and sub (string= sub "update"))
             (p "Usage: clpm registry update [--refresh-trust] [name ...]")
             0)
-	           ((and sub (string= sub "trust"))
-	            (let ((ssub (and (stringp sub-subcommand)
-	                             (string-downcase sub-subcommand))))
-	              (cond
-	                ((and ssub (string= ssub "list"))
-	                 (p "Usage: clpm registry trust list")
-	                 (p "")
-	                 (p "Print each configured registry with its current trust setting.")
-	                 0)
-	                ((and ssub (string= ssub "set"))
-	                 (p "Usage: clpm registry trust set <name> <trust>")
-	                 (p "")
-	                 (p "Set the trust string for the registry named <name>. Pass `none`")
-	                 (p "or `nil` to clear the trust setting (no signature verification).")
-	                 (p "For Ed25519 registries, the trust string is typically")
-	                 (p "`ed25519:<key-id>`.")
-	                 0)
-	                ((and ssub (string= ssub "refresh"))
-	                 (p "Usage: clpm registry trust refresh <name>")
-	                 (p "")
-	                 (p "Re-pin the Quicklisp dist's systems.txt / releases.txt SHA-256")
-	                 (p "hashes from the live registry contents. Only meaningful for")
-	                 (p "Quicklisp registries; a no-op (or error) for Ed25519 git ones.")
-	                 0)
-	                (t
-	                 (p "Usage: clpm registry trust <list|set|refresh> [args]")
-	                 (p "")
-	                 (p "Subcommands:")
-	                 (p "  list                 List registries and trust settings")
-	                 (p "  set <name> <trust>   Set trust string (use 'none' to clear)")
-	                 (p "  refresh <name>       Refresh pinned trust (Quicklisp only)")
-	                 0))))
-	           ((and sub (string= sub "init"))
-	            (p "Usage: clpm registry init --dir <path> --key-id <id> --keys-dir <dir>")
-	            0)
-	           (t
-	            (p "Subcommands:")
-	            (p "  add      Add or update a configured registry")
-	            (p "  list     List configured registries")
-	            (p "  update   Update cloned registries (optionally by name)")
-	            (p "  trust    Manage registry trust settings")
-	            (p "  init     Initialize a new git registry directory")
-	            0))))
-      (:resolve
-       (p "Usage: clpm resolve")
-       (p "")
-       (p "Resolves dependencies and writes clpm.lock deterministically.")
-       0)
-      (:fetch
-       (p "Usage: clpm fetch [--offline]")
-       (p "")
-       (p "Downloads dependencies specified in clpm.lock.")
-       0)
-      (:build
-       (p "Usage: clpm build")
-       (p "")
-       (p "Builds dependencies specified in clpm.lock into the store.")
-       0)
-      (:install
-       (p "Usage: clpm install")
-       (p "")
-       (p "Runs resolve + fetch + build and activates the project.")
-       0)
-      (:update
-       (p "Usage: clpm update [system ...]")
-       (p "")
-       (p "Updates dependency selections and rewrites clpm.lock.")
-       0)
-      (:repl
-       (p "Usage: clpm repl [system]")
-       (p "")
-       (p "Starts SBCL with the project environment loaded.")
-       0)
+           ((and sub (string= sub "key"))
+            (let ((ssub (and (stringp sub-subcommand)
+                             (string-downcase sub-subcommand))))
+              (cond
+                ((and ssub (string= ssub "generate"))
+                 (p "Usage: clpm registry key generate --out <dir> --id <id>")
+                 0)
+                ((and ssub (string= ssub "list"))
+                 (p "Usage: clpm registry key list [--keys-dir <dir>]")
+                 0)
+                ((and ssub (string= ssub "import"))
+                 (p "Usage: clpm registry key import --pub <path> [--id <id>] [--keys-dir <dir>]")
+                 0)
+                ((and ssub (string= ssub "verify"))
+                 (p "Usage: clpm registry key verify --pub <path> --file <path> --sig <path>")
+                 0)
+                (t
+                 (p "Usage:")
+                 (p "  clpm registry key generate --out <dir> --id <id>")
+                 (p "  clpm registry key list [--keys-dir <dir>]")
+                 (p "  clpm registry key import --pub <path> [--id <id>] [--keys-dir <dir>]")
+                 (p "  clpm registry key verify --pub <path> --file <path> --sig <path>")
+                 0))))
+           ((and sub (string= sub "trust"))
+            (let ((ssub (and (stringp sub-subcommand)
+                             (string-downcase sub-subcommand))))
+              (cond
+                ((and ssub (string= ssub "list"))
+                 (p "Usage: clpm registry trust list")
+                 (p "")
+                 (p "Print each configured registry with its current trust setting.")
+                 0)
+                ((and ssub (string= ssub "set"))
+                 (p "Usage: clpm registry trust set <name> <trust>")
+                 (p "")
+                 (p "Set the trust string for the registry named <name>. Pass `none`")
+                 (p "or `nil` to clear the trust setting (no signature verification).")
+                 (p "For Ed25519 registries, the trust string is typically")
+                 (p "`ed25519:<key-id>`.")
+                 0)
+                ((and ssub (string= ssub "refresh"))
+                 (p "Usage: clpm registry trust refresh <name>")
+                 (p "")
+                 (p "Re-pin the Quicklisp dist's systems.txt / releases.txt SHA-256")
+                 (p "hashes from the live registry contents. Only meaningful for")
+                 (p "Quicklisp registries; a no-op (or error) for Ed25519 git ones.")
+                 0)
+                (t
+                 (p "Usage: clpm registry trust <list|set|refresh> [args]")
+                 (p "")
+                 (p "Subcommands:")
+                 (p "  list                 List registries and trust settings")
+                 (p "  set <name> <trust>   Set trust string (use 'none' to clear)")
+                 (p "  refresh <name>       Refresh pinned trust (Quicklisp only)")
+                 0))))
+           ((and sub (string= sub "init"))
+            (p "Usage: clpm registry init --dir <path> --key-id <id> --keys-dir <dir>")
+            0)
+           ((and sub (string= sub "publish"))
+            (p "Usage: clpm registry publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>] [--git-commit]")
+            0)
+           (t
+            (p "Subcommands:")
+            (p "  add      Add or update a configured registry")
+            (p "  list     List configured registries")
+            (p "  update   Update cloned registries (optionally by name)")
+            (p "  trust    Manage registry trust settings")
+            (p "  init     Initialize a new git registry directory")
+            (p "  key      Manage registry signing keys")
+            (p "  publish  Publish a project to a registry")
+            0))))
       (:repl-bridge
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
          (cond
@@ -5750,38 +5833,46 @@ sub-subcommand=\"set\")."
             (p "Run `clpm help repl-bridge <subcommand>` for per-subcommand details.")
             0))))
       (:run
-       (p "Usage: clpm run [-- <args...>]")
-       (p "")
-       (p "Runs the entrypoint configured in clpm.project :run.")
-       0)
-      (:exec
-       (p "Usage: clpm exec -- <cmd...>")
-       (p "")
-       (p "Runs a command in the project environment (after activation).")
-       0)
-      (:test
-       (p "Usage: clpm test")
-       (p "")
-       (p "Builds test dependencies and runs configured ASDF test systems.")
-       0)
-      (:package
-       (p "Usage: clpm package")
-       (p "")
-       (p "Builds a distributable executable in dist/ based on clpm.project :package.")
-       0)
-      (:clean
-       (p "Usage: clpm clean [--dist] [--store]")
-       (p "")
-       (p "Removes project-local outputs.")
-       (p "  --dist   also remove dist/")
-       (p "  --store  untrack this project from projects.sxp and GC the store;")
-       (p "           entries still reachable from other registered projects stay")
-       0)
-      (:gc
-       (p "Usage: clpm gc [--dry-run]")
-       (p "")
-       (p "Garbage collects unreferenced store entries.")
-       0)
+       (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
+         (cond
+           ((and sub (string= sub "repl"))
+            (p "Usage: clpm run repl [system]")
+            0)
+           ((and sub (string= sub "exec"))
+            (p "Usage: clpm run exec -- <cmd...>")
+            0)
+           ((and sub (string= sub "test"))
+            (p "Usage: clpm run test")
+            0)
+           ((and sub (string= sub "script"))
+            (p "Usage: clpm run script <name> [-- <args...>]")
+            0)
+           ((and sub (string= sub "scripts"))
+            (p "Usage: clpm run scripts")
+            0)
+           (t
+            (p "Usage:")
+            (p "  clpm run [-- <args...>]")
+            (p "  clpm run repl [system]")
+            (p "  clpm run exec -- <cmd...>")
+            (p "  clpm run test")
+            (p "  clpm run script <name> [-- <args...>]")
+            (p "  clpm run scripts")
+            0))))
+      (:store
+       (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
+         (cond
+           ((and sub (string= sub "clean"))
+            (p "Usage: clpm store clean [--dist] [--store]")
+            0)
+           ((and sub (string= sub "gc"))
+            (p "Usage: clpm store gc [--dry-run]")
+            0)
+           (t
+            (p "Usage:")
+            (p "  clpm store clean [--dist] [--store]")
+            (p "  clpm store gc [--dry-run]")
+            0))))
       (t
        (log-error "Unknown command: ~A" command)
        1))))

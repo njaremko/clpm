@@ -1,4 +1,4 @@
-;;;; update-selective-test.lisp - clpm update <system> only relaxes the named system.
+;;;; update-selective-test.lisp - clpm deps update <system> only relaxes the named system.
 
 (require :asdf)
 (require :sb-posix)
@@ -138,7 +138,7 @@
               (merge-pathnames "clpm.project" proj)))
 
            (uiop:with-current-directory (proj)
-             (assert-eql 0 (clpm:run-cli '("resolve"))))
+             (assert-eql 0 (clpm:run-cli '("deps" "sync" "--to" "lock"))))
 
            (let* ((lock (clpm.project:read-lock-file
                          (merge-pathnames "clpm.lock" proj))))
@@ -152,10 +152,10 @@
                                '(("a" "1.0.0") ("a" "1.1.0")
                                  ("b" "1.0.0") ("b" "1.1.0")))
 
-           ;; clpm update a -> only a should bump.
+           ;; clpm deps update a -> only a should bump.
            (format t "Selective update: only named system moves... ")
            (uiop:with-current-directory (proj)
-             (assert-eql 0 (clpm:run-cli '("update" "a"))))
+             (assert-eql 0 (clpm:run-cli '("deps" "update" "a"))))
            (let ((lock (clpm.project:read-lock-file
                         (merge-pathnames "clpm.lock" proj))))
              (assert-true (string= "1.1.0" (locked-version lock "a"))
@@ -166,10 +166,10 @@
                           (locked-version lock "b")))
            (format t "ok~%")
 
-           ;; clpm update -> bumps everything.
+           ;; clpm deps update -> bumps everything.
            (format t "Full update: all systems move... ")
            (uiop:with-current-directory (proj)
-             (assert-eql 0 (clpm:run-cli '("update"))))
+             (assert-eql 0 (clpm:run-cli '("deps" "update"))))
            (let ((lock (clpm.project:read-lock-file
                         (merge-pathnames "clpm.lock" proj))))
              (assert-true (string= "1.1.0" (locked-version lock "b"))
@@ -177,17 +177,17 @@
                           (locked-version lock "b")))
            (format t "ok~%")
 
-           ;; clpm update unknown-system -> nonzero, lockfile unchanged.
+           ;; clpm deps update unknown-system -> nonzero, lockfile unchanged.
            (format t "Unknown system errors out... ")
            (uiop:with-current-directory (proj)
-             (let ((rc (clpm:run-cli '("update" "no-such-system"))))
+             (let ((rc (clpm:run-cli '("deps" "update" "no-such-system"))))
                (unless (and (integerp rc) (not (zerop rc)))
                  (fail "expected non-zero rc for unknown system, got ~S" rc))))
            (format t "ok~%")
 
            ;; Forced-bump scenario: c@2 depends on b@^2, c@1 doesn't.
            ;; Lock at c@1 + b@1, then publish c@2 (requires b@^2) and
-           ;; `clpm update c` -> b must also move even though it's unlocked.
+           ;; `clpm deps update c` -> b must also move even though it's unlocked.
            (format t "Untargeted system bumps when forced... ")
            ;; Reset registry to a clean two-package state.
            (uiop:delete-directory-tree remote :validate t)
@@ -205,7 +205,7 @@
            (uiop:delete-directory-tree clpm-home :validate t)
            (ensure-directories-exist clpm-home)
            (uiop:with-current-directory (proj)
-             (assert-eql 0 (clpm:run-cli '("resolve"))))
+             (assert-eql 0 (clpm:run-cli '("deps" "sync" "--to" "lock"))))
            ;; Publish b@2.0.0 and c@2.0.0 with system-deps c -> b@^2.0.0.
            (dolist (s '(("b" "2.0.0") ("c" "2.0.0")))
              (ensure-directories-exist
@@ -223,7 +223,7 @@
            (git! git '("commit" "-m" "v2") remote)
            ;; Update only c; b should be forced from 1.0.0 to 2.0.0.
            (uiop:with-current-directory (proj)
-             (assert-eql 0 (clpm:run-cli '("update" "c"))))
+             (assert-eql 0 (clpm:run-cli '("deps" "update" "c"))))
            (let ((lock (clpm.project:read-lock-file
                         (merge-pathnames "clpm.lock" proj))))
              (assert-true (string= "2.0.0" (locked-version lock "c"))

@@ -1,4 +1,4 @@
-;;;; test/add-disambiguate-registry-test.lisp - clpm add --registry disambiguation tests
+;;;; test/add-disambiguate-registry-test.lisp - clpm deps add --registry disambiguation tests
 
 (require :asdf)
 (require :sb-posix)
@@ -150,7 +150,7 @@
         :key #'clpm.project:locked-system-id
         :test #'string=))
 
-(format t "Testing clpm add --registry disambiguation...~%")
+(format t "Testing clpm deps add --registry disambiguation...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
@@ -179,7 +179,7 @@
              ;; No --registry: should error and list providers deterministically.
              (uiop:with-current-directory (proj)
                (multiple-value-bind (code stdout stderr)
-                   (run-cli-captured '("add" "foo"))
+                   (run-cli-captured '("deps" "add" "foo"))
                  (declare (ignore stdout))
                  (assert-eql 1 code)
                  (assert-contains stderr "multiple registries")
@@ -189,7 +189,7 @@
              ;; Unknown registry name: should error and list providers.
              (uiop:with-current-directory (proj)
                (multiple-value-bind (code stdout stderr)
-                   (run-cli-captured '("add" "--registry" "nope" "foo"))
+                   (run-cli-captured '("deps" "add" "--registry" "nope" "foo"))
                  (declare (ignore stdout))
                  (assert-eql 1 code)
                  (assert-contains stderr "does not provide")
@@ -198,7 +198,7 @@
 
              ;; With --registry: should succeed and pin to that registry.
              (uiop:with-current-directory (proj)
-               (assert-eql 0 (clpm:run-cli '("add" "--registry" "a" "foo"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "add" "--registry" "a" "foo"))))
 
              (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj)))
                     (deps (clpm.project:project-depends project))

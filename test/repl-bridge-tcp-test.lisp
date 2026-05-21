@@ -7,6 +7,7 @@
 
 (require :asdf)
 (require :sb-bsd-sockets)
+(require :sb-posix)
 
 (let* ((this-file (or *load-truename* *load-pathname*))
        (test-dir (uiop:pathname-directory-pathname this-file))
@@ -35,6 +36,20 @@
 (defun lookup (object key)
   (when (and (consp object) (eq (car object) :object))
     (cdr (assoc key (cadr object) :test #'string=))))
+
+(defun make-short-temp-dir ()
+  "Create a short temp directory so Unix-domain socket paths stay portable."
+  (let* ((template (namestring
+                    (merge-pathnames "rbXXXXXX" (uiop:temporary-directory))))
+         (dir (sb-posix:mkdtemp template)))
+    (uiop:ensure-directory-pathname dir)))
+
+(defmacro with-short-temp-dir ((var) &body body)
+  `(let ((,var (make-short-temp-dir)))
+     (unwind-protect
+          (progn ,@body)
+       (ignore-errors
+         (uiop:delete-directory-tree ,var :validate t)))))
 
 ;;; ----------------------------------------------------------------------------
 ;;; #024 acceptance: cmd-repl-bridge detects the OS and uses the right
@@ -245,7 +260,7 @@
 (unless (and (find-package "UIOP/OS")
              (fboundp (find-symbol "OS-WINDOWS-P" "UIOP/OS"))
              (funcall (find-symbol "OS-WINDOWS-P" "UIOP/OS")))
-  (clpm.store:with-temp-dir (tmp)
+  (with-short-temp-dir (tmp)
     (let* ((sock-path (namestring (merge-pathnames "rb.sock" tmp)))
            (server-thread
              (sb-thread:make-thread

@@ -1,4 +1,4 @@
-;;;; test/clean-command-test.lisp - `clpm clean` tests
+;;;; test/clean-command-test.lisp - `clpm store clean` tests
 
 (require :asdf)
 (require :sb-posix)
@@ -31,7 +31,7 @@
   (unless (eql expected actual)
     (fail "Assertion failed: expected ~S, got ~S" expected actual)))
 
-(format t "Testing `clpm clean`...~%")
+(format t "Testing `clpm store clean`...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
@@ -46,7 +46,7 @@
 
            ;; Create a project.
            (uiop:with-current-directory (workspace)
-             (assert-eql 0 (clpm:run-cli '("new" "app" "--bin"))))
+             (assert-eql 0 (clpm:run-cli '("project" "new" "app" "--bin"))))
 
            (let* ((project-root (merge-pathnames "app/" workspace))
                   (clpm-dir (merge-pathnames ".clpm/" project-root))
@@ -61,7 +61,7 @@
 
              ;; Default: removes .clpm only.
              (uiop:with-current-directory (project-root)
-               (assert-eql 0 (clpm:run-cli '("clean"))))
+               (assert-eql 0 (clpm:run-cli '("store" "clean"))))
              (assert-true (not (uiop:directory-exists-p clpm-dir))
                           "Expected .clpm to be removed")
              (assert-true (uiop:directory-exists-p dist-dir)
@@ -74,7 +74,7 @@
              ;; With --dist: removes both .clpm and dist.
              (ensure-directories-exist (merge-pathnames "x" clpm-dir))
              (uiop:with-current-directory (project-root)
-               (assert-eql 0 (clpm:run-cli '("clean" "--dist"))))
+               (assert-eql 0 (clpm:run-cli '("store" "clean" "--dist"))))
              (assert-true (not (uiop:directory-exists-p clpm-dir))
                           "Expected .clpm to be removed with --dist")
              (assert-true (not (uiop:directory-exists-p dist-dir))
@@ -110,7 +110,7 @@
                                     :test #'string=)
                             "expected B in index before --store")
                (uiop:with-current-directory (project-a)
-                 (assert-eql 0 (clpm:run-cli '("clean" "--store"))))
+                 (assert-eql 0 (clpm:run-cli '("store" "clean" "--store"))))
                (let ((roots (clpm.store:read-project-index-roots)))
                  (assert-true (not (member a-true roots :test #'string=))
                               "expected A to be untracked, roots=~S" roots)
@@ -120,6 +120,6 @@
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME")))))
 
-(format t "  `clpm clean` PASSED~%")
+(format t "  `clpm store clean` PASSED~%")
 (format t "~%Clean command tests PASSED!~%")
 (sb-ext:exit :code 0)

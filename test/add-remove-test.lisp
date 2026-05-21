@@ -1,4 +1,4 @@
-;;;; test/add-remove-test.lisp - clpm add/remove command tests
+;;;; test/add-remove-test.lisp - clpm deps add/remove command tests
 
 (require :asdf)
 (require :sb-posix)
@@ -145,7 +145,7 @@
         :key #'clpm.project:locked-system-id
         :test #'string=))
 
-(format t "Testing clpm add/remove...~%")
+(format t "Testing clpm deps add/remove...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
@@ -172,7 +172,7 @@
              ;; Project 1: implicit constraint is nil (any version).
              (write-empty-project proj1 url)
              (uiop:with-current-directory (proj1)
-               (assert-eql 0 (clpm:run-cli '("add" "foo"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "add" "foo"))))
              (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj1)))
                     (deps (clpm.project:project-depends project))
                     (dep (find-dep deps "foo")))
@@ -184,7 +184,7 @@
 
              ;; Idempotency: add again doesn't duplicate.
              (uiop:with-current-directory (proj1)
-               (assert-eql 0 (clpm:run-cli '("add" "foo"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "add" "foo"))))
              (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj1)))
                     (deps (clpm.project:project-depends project)))
                (assert-eql 1 (length deps)))
@@ -200,7 +200,7 @@
 
              ;; --caret should choose a caret constraint based on highest version.
              (uiop:with-current-directory (proj1)
-               (assert-eql 0 (clpm:run-cli '("add" "--caret" "foo"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "add" "--caret" "foo"))))
              (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj1)))
                     (deps (clpm.project:project-depends project))
                     (dep (find-dep deps "foo")))
@@ -213,7 +213,7 @@
 
              ;; Explicit semver constraint.
              (uiop:with-current-directory (proj1)
-               (assert-eql 0 (clpm:run-cli '("add" "foo@^1.0.0"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "add" "foo@^1.0.0"))))
              (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj1)))
                     (dep (find-dep (clpm.project:project-depends project) "foo")))
                (assert-true dep "Expected foo in depends after update")
@@ -231,7 +231,7 @@
 
              ;; Exact constraint.
              (uiop:with-current-directory (proj1)
-               (assert-eql 0 (clpm:run-cli '("add" "foo@=2.0.0"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "add" "foo@=2.0.0"))))
              (let* ((lock (clpm.project:read-lock-file (merge-pathnames "clpm.lock" proj1)))
                     (locked (find-locked lock "foo")))
                (assert-true locked "Expected foo in lockfile")
@@ -242,7 +242,7 @@
 
              ;; Remove.
              (uiop:with-current-directory (proj1)
-               (assert-eql 0 (clpm:run-cli '("remove" "foo"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "remove" "foo"))))
              (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj1)))
                     (deps (clpm.project:project-depends project)))
                (assert-eql 0 (length deps)))
@@ -250,7 +250,7 @@
              ;; Multiple dependency specs in one add invocation.
              (write-empty-project proj-multi url)
              (uiop:with-current-directory (proj-multi)
-               (assert-eql 0 (clpm:run-cli '("add" "foo@=1.0.0" "bar@=2.0.0"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "add" "foo@=1.0.0" "bar@=2.0.0"))))
              (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj-multi)))
                     (deps (clpm.project:project-depends project))
                     (foo (find-dep deps "foo"))
@@ -283,9 +283,9 @@
              ;; Project 2: dev/test sections.
              (write-empty-project proj2 url)
              (uiop:with-current-directory (proj2)
-               (assert-eql 0 (clpm:run-cli '("add" "--dev" "foo@=1.0.0"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "add" "--dev" "foo@=1.0.0"))))
              (uiop:with-current-directory (proj2)
-               (assert-eql 0 (clpm:run-cli '("add" "--test" "bar@=1.0.0"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "add" "--test" "bar@=1.0.0"))))
 
              (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj2))))
                (assert-eql 0 (length (clpm.project:project-depends project)))
@@ -295,18 +295,18 @@
                             "Expected bar in test-depends"))
 
              (uiop:with-current-directory (proj2)
-               (assert-eql 0 (clpm:run-cli '("remove" "--dev" "foo"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "remove" "--dev" "foo"))))
              (let* ((lock (clpm.project:read-lock-file (merge-pathnames "clpm.lock" proj2))))
                (assert-true (null (find-locked lock "foo"))
                             "Expected foo removed from lockfile"))
              (uiop:with-current-directory (proj2)
-               (assert-eql 0 (clpm:run-cli '("remove" "--test" "bar"))))
+               (assert-eql 0 (clpm:run-cli '("deps" "remove" "--test" "bar"))))
 
              (let* ((project (clpm.project:read-project-file (merge-pathnames "clpm.project" proj2))))
                (assert-eql 0 (length (clpm.project:project-dev-depends project)))
                (assert-eql 0 (length (clpm.project:project-test-depends project))))
 
-             ;; Path + --install (activation config).
+             ;; Path dependency + sync (activation config).
              (let* ((dep-root (merge-pathnames "dep/" ws))
                     (app-root (merge-pathnames "app/" ws)))
                (ensure-directories-exist dep-root)
@@ -343,7 +343,8 @@
                             :registries ()))
                   s))
                (uiop:with-current-directory (app-root)
-                 (assert-eql 0 (clpm:run-cli '("add" "dep" "--path" "../dep" "--install"))))
+                 (assert-eql 0 (clpm:run-cli '("deps" "add" "dep" "--path" "../dep")))
+                 (assert-eql 0 (clpm:run-cli '("deps" "sync"))))
                (let ((config-path (merge-pathnames ".clpm/asdf-config.lisp" app-root)))
                  (assert-true (uiop:file-exists-p config-path)
                               "Missing activation config: ~A" (namestring config-path))

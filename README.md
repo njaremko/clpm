@@ -38,19 +38,20 @@ clpm registry trust set quicklisp tofu
 clpm registry update quicklisp
 
 # Create a new project
-clpm new myproject --bin
+clpm project new myproject --bin
 cd myproject
 
 # Add deps from Quicklisp (nil constraint = "any"; lockfile pins a version)
-clpm add alexandria --install
-clpm add --test fiveam --install
+clpm deps add alexandria
+clpm deps add --test fiveam
+clpm deps sync
 
 # Run commands
-clpm test
+clpm run test
 clpm run
 
 # Produce a distributable executable in dist/
-clpm package
+clpm project package
 ./dist/myproject
 
 # Optional: configure a signed git registry (example values)
@@ -76,14 +77,14 @@ clpm registry update --refresh-trust quicklisp
 To inspect what CLPM actually used, run:
 
 ```bash
-clpm audit
-clpm audit --json
+clpm deps audit
+clpm deps audit --json
 ```
 
 To generate a deterministic SBOM from your lockfile:
 
 ```bash
-clpm sbom --format cyclonedx-json --out sbom.json
+clpm deps sbom --format cyclonedx-json --out sbom.json
 ```
 
 ## AI-assisted development: the repl-bridge operator manual
@@ -95,7 +96,7 @@ reloading systems, capturing stdout/stderr per call, surfacing in-image drift
 from disk.
 
 ```bash
-clpm install                                          # one-time setup
+clpm deps sync                                       # one-time setup
 clpm repl-bridge daemon --detach                      # background daemon
 clpm repl-bridge eval '(asdf:load-system "my-app")'
 clpm repl-bridge eval '(my-app:hello)'
@@ -207,7 +208,7 @@ despite some legacy comments). The rules a user needs to know:
 2. **Within a system, candidates are ordered highest-version-first**,
    with the lockfile's previously-chosen version (if any) lifted to the
    front so re-runs are stable.
-3. **`clpm update <sys>`** lifts the lockfile preference for the named
+3. **`clpm deps update <sys>`** lifts the lockfile preference for the named
    systems only; everything else is held at its current pin unless a
    transitive constraint forces it to move. Unlocked systems are
    selected first so any constraints they propagate land before still-
@@ -226,33 +227,28 @@ despite some legacy comments). The rules a user needs to know:
 |---------|-------------|
 | `clpm help <cmd>` | Show command-specific help |
 | `clpm doctor` | Check environment and configuration |
-| `clpm new <name> --bin\|--lib [--dir <path>]` | Create a new project scaffold |
-| `clpm init [name]` | Initialize new project |
-| `clpm add <dep>[@<constraint>]...` | Add one or more dependencies |
-| `clpm remove <dep>` | Remove a dependency |
-| `clpm search <query>` | Search configured registries |
-| `clpm info <system>` | Show system details |
-| `clpm tree` | Show dependency tree |
-| `clpm why <system>` | Explain why a system is included |
-| `clpm registry <add\|list\|update\|trust\|init> ...` | Manage registries |
-| `clpm workspace <init\|add\|list> ...` | Workspace management |
-| `clpm resolve` | Resolve dependencies and write lockfile |
-| `clpm fetch` | Download dependencies |
-| `clpm build` | Build dependencies |
-| `clpm install` | Resolve, fetch, and build |
-| `clpm update [sys...]` | Update dependencies |
-| `clpm repl` | Start a REPL with the project loaded |
+| `clpm project new <name> --bin\|--lib [--dir <path>]` | Create a new project scaffold |
+| `clpm project init [name]` | Initialize new project |
+| `clpm project workspace <init\|add\|remove\|list> ...` | Workspace management |
+| `clpm project package` | Build a distributable executable |
+| `clpm deps add <dep>[@<constraint>]...` | Add one or more dependencies |
+| `clpm deps remove <dep>` | Remove a dependency |
+| `clpm deps sync [--to lock\|source\|build\|active]` | Resolve, fetch, build, and activate by stage |
+| `clpm deps update [sys...]` | Update dependencies |
+| `clpm deps search <query>` | Search configured registries |
+| `clpm deps info <system>` | Show system details |
+| `clpm deps tree` | Show dependency tree |
+| `clpm deps why <system>` | Explain why a system is included |
+| `clpm deps audit [--json]` | Provenance report |
+| `clpm deps sbom --format <cyclonedx-json\|cyclonedx-xml\|spdx-json>` | SBOM export |
+| `clpm registry <add\|list\|update\|trust\|init\|key\|publish> ...` | Manage registries, keys, trust, and publishing |
 | `clpm run [-- <args...>]` | Run the project entrypoint |
-| `clpm exec -- <cmd...>` | Run a command in the project env |
-| `clpm test` | Run project tests |
-| `clpm package` | Build a distributable executable |
-| `clpm clean [--dist]` | Remove project-local outputs |
-| `clpm gc` | Garbage collect store |
-| `clpm scripts <list\|run> ...` | Script/task runner |
-| `clpm audit [--json]` | Provenance report |
-| `clpm sbom --format <cyclonedx-json\|cyclonedx-xml\|spdx-json>` | SBOM export |
-| `clpm keys generate ...` | Key management (registry signing) |
-| `clpm publish ...` | Publish to a git-backed registry |
+| `clpm run repl [system]` | Start a REPL with the project loaded |
+| `clpm run exec -- <cmd...>` | Run a command in the project env |
+| `clpm run test` | Run project tests |
+| `clpm run script <name>` | Run a project script |
+| `clpm store clean [--dist]` | Remove project-local outputs |
+| `clpm store gc` | Garbage collect store |
 
 ### Global Options
 
@@ -288,7 +284,7 @@ registry/
 
 ```bash
 # Generate an Ed25519 keypair (writes <id>.key and <id>.pub)
-clpm keys generate --out ./keys --id mykey
+clpm registry key generate --out ./keys --id mykey
 
 # Initialize a registry directory with an empty signed snapshot
 clpm registry init --dir ./my-registry --key-id mykey --keys-dir ./keys
@@ -304,15 +300,15 @@ This is a fully local example you can run on one machine using a `file://` tarba
 ```bash
 # 1) Create a local registry
 mkdir -p /tmp/clpm-demo
-clpm keys generate --out /tmp/clpm-demo/keys --id demo
+clpm registry key generate --out /tmp/clpm-demo/keys --id demo
 clpm registry init --dir /tmp/clpm-demo/registry --key-id demo --keys-dir /tmp/clpm-demo/keys
 jj git init /tmp/clpm-demo/registry
 
 # 2) Create a project to publish
-clpm new demo-lib --lib --dir /tmp/clpm-demo
+clpm project new demo-lib --lib --dir /tmp/clpm-demo
 
 # 3) Publish it (writes release metadata + signatures into the registry)
-clpm publish \
+clpm registry publish \
   --registry /tmp/clpm-demo/registry \
   --key-id demo \
   --keys-dir /tmp/clpm-demo/keys \

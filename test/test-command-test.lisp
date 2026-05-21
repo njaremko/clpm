@@ -1,4 +1,4 @@
-;;;; test/test-command-test.lisp - `clpm test` command tests
+;;;; test/test-command-test.lisp - `clpm run test` command tests
 
 (require :asdf)
 (require :sb-posix)
@@ -38,7 +38,7 @@
                           :external-format :utf-8)
     (write-string contents s)))
 
-(format t "Testing `clpm test`...~%")
+(format t "Testing `clpm run test`...~%")
 
 (clpm.store:with-temp-dir (tmp)
   (let* ((clpm-home (merge-pathnames "clpm-home/" tmp))
@@ -103,7 +103,7 @@
             (merge-pathnames "clpm.project" project-root))
 
            (uiop:with-current-directory (project-root)
-             (assert-eql 0 (clpm:run-cli '("test"))))
+             (assert-eql 0 (clpm:run-cli '("run" "test"))))
 
            ;; Now include a failing test system as well.
            (clpm.io.sexp:write-canonical-sexp-to-file
@@ -121,8 +121,8 @@
             (merge-pathnames "clpm.project" project-root))
 
            (uiop:with-current-directory (project-root)
-             (assert-true (not (zerop (clpm:run-cli '("test"))))
-                          "Expected `clpm test` to fail when a test system fails"))))
+             (assert-true (not (zerop (clpm:run-cli '("run" "test"))))
+                          "Expected `clpm run test` to fail when a test system fails"))))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME"))))
