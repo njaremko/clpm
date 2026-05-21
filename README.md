@@ -261,14 +261,19 @@ explicit resource operations.
 | `clpm store clean [--dist]` | Remove project-local outputs |
 | `clpm store gc` | Garbage collect store |
 
-### Global Options
+### Top-Level Options
 
 - `-v, --verbose` - Verbose output
-- `-j, --jobs N` - Parallel dependency realization jobs
-- `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for build, package, and run commands
 - `-p, --package <member>` - Workspace member to target from workspace root
+- `-h, --help` - Show root help
+- `--version` - Show the CLPM version
+
+### Command-Scoped Options
+
+- `-j, --jobs N` - Parallel dependency realization for `deps sync` beyond the lock stage
+- `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for build/package/run commands
 - `--offline` - Use cached artifacts for `deps sync` realization and `deps sbom`
-- `--insecure` - Skip signature verification for registry-loading commands
+- `--insecure` - Skip signature verification on verifier-bearing registry/dependency commands
 - `--fetch-retries N` - Retry budget for CLPM-managed fetches (default: 3, env: `CLPM_FETCH_RETRIES`)
 - `--fetch-timeout SECS` - Per-request CLPM fetch timeout (default: 60, env: `CLPM_FETCH_TIMEOUT`)
 - `--with-optional <sys>` - Opt in to an optional dependency for `deps sync/update` (repeatable)

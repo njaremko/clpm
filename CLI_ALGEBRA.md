@@ -915,6 +915,32 @@ but output kind and machine-readable shape are semantic.
     process" under one resource. The current defense is activation context:
     both are observations of the project activation, not dependency mutation.
 
+### Iteration 20: Attack Root Help Scope Drift
+
+- Commands deleted:
+  - No executable command was deleted; the cut deletes root-help claims that
+    scoped options are globally meaningful.
+- Commands merged:
+  - Scoped option documentation now belongs to command-specific help and the
+    README's scoped-options section, not the root schema overview.
+- Commands derived instead of exposed:
+  - Root help is the schema projection for command constructors and true
+    top-level controls. It does not derive every leaf option by unioning the
+    whole parser.
+- Commands that survived and why:
+  - `-v`, `-p`, `-h`, and `--version` survive in root help because they are
+    top-level controls.
+  - `--offline`, `--insecure`, `--fetch-*`, `--with-*`, `--jobs`, and
+    `--lisp` survive only as scoped inputs to commands whose denotation uses
+    them.
+- Laws/protocol invariants added:
+  - Root help does not advertise an option that `parse [option, "help"]`
+    rejects as semantically inert.
+- Remaining discomfort:
+  - `-p/--package` is still a broad context selector. It remains in root help
+    because workspace targeting is a pre-command concern, but its exact command
+    domain should stay under attack.
+
 ## Constructors
 
 Terminal constructors:
@@ -1142,6 +1168,12 @@ Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
     Succeeded world (HumanText (render selector commandSchema))
+
+Law: "root help mentions only root controls"
+forall scoped.
+  scoped in {Offline, Insecure, FetchRetries, FetchTimeout,
+             WithOptional, WithAllOptional, Jobs, Lisp}
+  => render Root commandSchema does not mention scoped
 ```
 
 ## Algebraic and Interaction Laws
@@ -1299,6 +1331,9 @@ Denotation properties:
 Observation properties:
 
 - `help` only advertises public commands.
+- Root `help` advertises only top-level controls; scoped dependency,
+  registry, fetch, and Lisp-selection options live on command-specific help
+  and README scoped-option documentation.
 - `deps search/info/audit/sbom --json` remain stable.
 
 Failed-counterexample regressions:

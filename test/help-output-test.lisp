@@ -37,6 +37,10 @@
                needle
                haystack))
 
+(defun assert-not-contains (haystack needle fmt &rest args)
+  (when (search needle haystack :test #'char-equal)
+    (apply #'fail fmt args)))
+
 (defun run-cli-captured (args)
   (let ((out (make-string-output-stream))
         (err (make-string-output-stream)))
@@ -62,9 +66,21 @@
   (assert-contains stdout "store")
   (assert-contains stdout "skill")
   (assert-contains stdout "repl")
-  (assert-true (not (search "repl-bridge" stdout :test #'char-equal))
-               "top-level help still advertises obsolete repl-bridge:~%~A"
-               stdout))
+  (dolist (scoped-option '("-j, --jobs"
+                           "--lisp"
+                           "--offline"
+                           "--insecure"
+                           "--fetch-retries"
+                           "--fetch-timeout"
+                           "--with-optional"
+                           "--with-all-optional"))
+    (assert-not-contains stdout scoped-option
+                         "top-level help still advertises scoped option ~S:~%~A"
+                         scoped-option
+                         stdout))
+  (assert-not-contains stdout "repl-bridge"
+                       "top-level help still advertises obsolete repl-bridge:~%~A"
+                       stdout))
 (format t "  `--help` output PASSED~%")
 
 (format t "Testing bare `clpm` (no args) prints help...~%")
@@ -94,6 +110,35 @@
   (assert-eql 0 code)
   (assert-contains stdout "Usage: clpm deps search"))
 (format t "  `clpm help deps search` PASSED~%")
+
+(format t "Testing scoped option help...~%")
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "deps" "sync"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "--offline")
+  (assert-contains stdout "--jobs")
+  (assert-contains stdout "--lisp")
+  (assert-contains stdout "--fetch-retries")
+  (assert-contains stdout "--with-optional")
+  (assert-contains stdout "--insecure"))
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "registry" "update"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "--insecure")
+  (assert-contains stdout "--fetch-retries"))
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "project" "package"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "--lisp"))
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "run"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "--lisp"))
+(format t "  Scoped option help PASSED~%")
 
 (format t "Testing `clpm help skill` output...~%")
 (multiple-value-bind (code stdout stderr)

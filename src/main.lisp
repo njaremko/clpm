@@ -35,17 +35,12 @@ Commands:
 
 Options:
   -v, --verbose    Verbose output
-  -j, --jobs N     Parallel jobs for dependency realization (default: 1)
-  --lisp <impl>    Lisp for build/package/run commands (sbcl|ccl|ecl)
   -p, --package M  Workspace member to target
-  --offline        Use cached artifacts for dependency realization/SBOM
-  --insecure       Skip signature verification for registry-loading commands
-  --fetch-retries N      Retry budget for CLPM-managed fetches (default: 3, env: CLPM_FETCH_RETRIES)
-  --fetch-timeout SECS   Per-request CLPM fetch timeout (default: 60, env: CLPM_FETCH_TIMEOUT)
-  --with-optional SYS    Include optional dependency in deps sync/update
-  --with-all-optional    Include all optional dependencies in deps sync/update
   -h, --help       Show this help
   --version        Show version
+
+Command-scoped options are documented on the commands that accept them.
+Use `clpm help <command> [subcommand]` before passing scoped options.
 
 Examples:
   clpm doctor
