@@ -1,239 +1,942 @@
-# `clpm repl-bridge` algebra
+# `clpm repl-bridge` denotational algebra
 
-This note is the semantic target for the bridge. The bridge should not be
-understood as a collection of JSON handlers. It should be understood as a
-state machine over a live Lisp image, with JSON and the CLI as views of that
-machine.
+Mode: semantic design specification.
+
+Implementation allowed: no. This document is the algebra gate for future
+implementation work; code changes should follow only after this spec remains
+lawful under the current evidence and a user explicitly asks for
+implementation.
 
 ## Intent
 
-The bridge exists so an agent can use a Common Lisp image with REPL-quality
-feedback:
+The bridge denotes an interactive, project-scoped SBCL REPL service for an
+LLM. It should be simple to drive, hard to misuse, and powerful enough to use
+Common Lisp as Common Lisp: persistent packages and history, hot
+redefinition, restarts, frame evaluation, inspector sessions, source
+navigation, compilation diagnostics, tracing, profiling, watches, and daemon
+introspection.
 
-- evaluate forms in persistent package and history state;
-- observe values, stdout, stderr, conditions, restarts, and source locations;
-- recover through the condition system without re-running side effects;
-- inspect object graphs;
-- keep long-running processes observable and interruptible;
-- ask the daemon what operations and live state exist.
+This algebra models the public meaning of the bridge:
 
-Out of scope: human editor integration, replacing SLIME/Slynk, or making
-every SBCL implementation detail portable.
+1. Typed client actions over a live image.
+2. Server frames observable by JSON-RPC clients.
+3. Persistent resources that must be queryable: workers, debug sessions,
+   inspectors, watches, redefinitions, traces, and method schemas.
+4. CLI commands as renderings of the same typed actions.
+
+This algebra deliberately ignores:
+
+1. Socket implementation, TCP-vs-Unix transport mechanics, thread libraries,
+   mailbox representations, locks, counters, caches, and log rotation.
+2. The internal denotation of arbitrary SBCL/Common Lisp programs. The bridge
+   treats SBCL as an external semantic oracle with its own image transition
+   semantics.
+3. Human editor integration and replacement of SLIME/Slynk.
+4. Sandboxing. A bridge action has the authority of the hosted image and host
+   process.
+
+Primary users are LLM agents and simple non-Lisp tools. Humans may use the
+CLI, but the design center is a stateless tool caller driving a stateful
+server.
+
+Representative examples:
+
+1. Evaluate `(defun f (x) (+ x 1))`, then evaluate `(f 41)` without reloading
+   the system.
+2. Enter a debugger on an error, inspect frame locals, then invoke a restart
+   without re-running side effects.
+3. Open an inspector on a value, traverse into a part, evaluate with `*`
+   bound to the focus, then close the session.
+4. Watch `src/*.lisp`, reload on save, then check `diff` before handoff.
+5. Ask `methods` or `help` to discover the exact request schema rather than
+   relying on stale documentation.
+
+Edge cases and failures:
+
+1. Reader errors, eval errors, resource exhaustion, output caps, worker death,
+   unavailable frame variables, missing packages/symbols/systems/files, bad
+   restart arguments, unknown params, wrong JSON types, stale daemon files,
+   closed connections, multiple active debug sessions, and ambiguous fresh
+   debug actions.
+2. Long-running evals, query-driven input, streaming output, independent
+   workers, concurrent one-shot workers, and watch events occurring later than
+   the request that created the watch.
+3. Fresh integer ids are capabilities, not meaning. Specs and tests should
+   reason up to consistent renaming of debug/inspect/watch ids.
 
 ## Carrier Types
 
-```text
-BridgeState =
-  { image
-  , workers       : WorkerName -> Worker
-  , processes     : ProcessId -> Process
-  , inspectors    : InspectorId -> Inspector
-  , watches       : WatchId -> Watch
-  , event_log     : EventLog
-  }
+Names below are semantic carriers, not implementation structs.
 
-Worker =
-  { name
-  , package       : Package
-  , history       : ReplHistory
-  , redefinitions : RedefinitionSet
-  , current       : Maybe ProcessId
-  }
+```haskell
+data Bridge
+data World            -- SBCL image + filesystem + clock + schedule oracle
+data Image            -- opaque SBCL image state
+data MethodRegistry
+data Action
+data RequestId
+data ConnectionId
+data Frame
+data Event
+data Terminal
+data Error
+data Payload
 
-Process =
-    Running EvalProcess
-  | WaitingForQuery QuerySession
-  | InDebugger DebugSession
-  | Completed TerminalOutcome
+data WorkerName
+data Worker
+data WorkerStatus
+  = WorkerIdle
+  | WorkerBusy EvalId
+  | WorkerInDebugger DebugId
+  | WorkerDead
 
-TerminalOutcome =
-    EvalSuccess Values OutputSnapshot ReplStateDelta
-  | EvalFailure ConditionSnapshot OutputSnapshot
-  | Interrupted
-  | ResourceExhausted ResourceLimit
-  | WorkerDied
+data PackageChoice
+  = UseWorkerPackage
+  | UsePackageOnce PackageName
 
-ServerFrame =
-    Event ProcessId EventPayload
-  | Result RequestId ResultPayload
-  | Error RequestId ErrorPayload
+data EvalOptions
+data OutputTrace
+data ReplHistory
+data RedefinitionSet
+data ConditionSnapshot
+data RestartSnapshot
+data FrameSnapshot
+
+data DebugId
+data DebugSession
+data InspectorId
+data Inspector
+data InspectFocus
+data WatchId
+data Watch
+data TraceSpec
 ```
 
-The central observation is:
+Associated semantic structures:
 
-```text
-step : BridgeState x ClientAction -> BridgeState x [ServerFrame]
+```haskell
+type Frames = Seq Frame
+type Workers = FiniteMap WorkerName Worker
+type DebugSessions = FiniteMap DebugId DebugSession
+type Inspectors = FiniteMap InspectorId Inspector
+type Watches = FiniteMap WatchId Watch
+
+data BridgeState =
+  BridgeState
+    { image          :: Image
+    , registry       :: MethodRegistry
+    , workers        :: Workers
+    , debuggers      :: DebugSessions
+    , inspectors     :: Inspectors
+    , watches        :: Watches
+    , shutdown       :: ShutdownState
+    }
+
+data StepResult =
+  StepResult
+    { state' :: BridgeState
+    , world' :: World
+    , frames :: Frames
+    }
 ```
 
-Every RPC, CLI command, continuation, interrupt, query reply, watch tick, and
-debugger action should be explainable as a `step`.
+Implementation-shaped types intentionally excluded from meaning:
+
+- hash tables, mutexes, threads, socket objects, mailboxes, process ids,
+  handler function pointers, JSON alists, counters except as fresh-name supply,
+  and event-log bytes.
+
+## Primitive Observations
+
+The complete primitive observation is an action trace:
+
+```haskell
+step :: BridgeState -> World -> Action -> StepResult
+```
+
+Derived primitive-looking observations are projections through `step`:
+
+```haskell
+methods        :: BridgeState -> MethodRegistry
+currentPackage :: WorkerName -> BridgeState -> PackageName
+workersView    :: BridgeState -> WorkerSummarySet
+debuggersView  :: BridgeState -> DebugSessionSummarySet
+inspectorsView :: BridgeState -> InspectorSummarySet
+watchesView    :: BridgeState -> WatchSummarySet
+```
+
+Public wire observations:
+
+```haskell
+renderFrame  :: Frame -> JsonObject
+decodeRequest :: JsonObject -> DecodeErrorOr Action
+renderCli    :: CliCommand -> Frames -> ExitText
+```
+
+Derived observations:
+
+```haskell
+ping              = projectDaemonSummary . step Ping
+help m            = projectMethodSpec m . methods
+diff w            = redefinitions . worker w
+listDebugSessions = debuggersView
+listWatches       = watchesView
+listWorkers       = workersView
+```
+
+Operational non-semantics:
+
+- precise OS pid, exact elapsed milliseconds, GC timing, log contents, socket
+  path strings, and raw fresh integer values. These may be useful payloads but
+  they do not define bridge equality.
+
+## Candidate Denotations
+
+Candidate A: bag of JSON handlers.
+
+```haskell
+denoteA :: Bridge -> Map MethodName (JsonParams -> JsonResponse)
+```
+
+Pros: matches the simplest v1 implementation and makes `methods` easy.
+
+Cons: cannot explain streamed frames, query continuations, server-owned debug
+sessions, workers, watches, connection close behavior, or restart
+continuations. It makes method schemas documentation rather than constructors.
+
+Rejected.
+
+Candidate B: one linear REPL transcript.
+
+```haskell
+denoteB :: Bridge -> [ClientText] -> [ServerText]
+```
+
+Pros: captures interactive flavor and output order.
+
+Cons: makes named workers, inspectors, watches, and concurrent streams look
+like accidental interleavings. It cannot state that independent workers commute
+up to schedule, or that debug sessions outlive the connection that observed
+them.
+
+Rejected.
+
+Candidate C: raw SBCL image.
+
+```haskell
+denoteC :: Bridge -> Image
+```
+
+Pros: maximal SBCL power.
+
+Cons: not hard to misuse; loses protocol closure, resource identities,
+discovery, output caps, and public frame behavior. It also fails to explain
+schema errors and CLI behavior.
+
+Rejected.
+
+Chosen denotation: a capability-indexed Mealy machine over an opaque SBCL
+world.
+
+```haskell
+denote :: Bridge -> (BridgeState, World, Action) -> StepResult
+denote bridge = step
+```
+
+This is the simplest precise model found so far:
+
+1. `World` parameterizes SBCL, filesystem, clock, and schedule behavior
+   without reimplementing Common Lisp semantics in the bridge algebra.
+2. `BridgeState` contains exactly the persistent public resources an agent can
+   later observe or drive.
+3. `Action` is typed by the method registry; malformed JSON never enters the
+   algebra.
+4. `Frames` preserves ordered observations where order matters, while
+   resource inventories use maps/sets where order does not matter.
+5. Long-running and interactive behavior is represented by state transitions
+   that create addressable capabilities, not by hidden connection state.
+
+Representability restrictions:
+
+- Only actions accepted by `decode` are bridge actions.
+- Fresh ids are representable capabilities. Equality is alpha-equivalence over
+  fresh `DebugId`, `InspectorId`, and `WatchId` names.
+- A `DebugSession` is live only while the original dynamic continuation is
+  parked in the debugger.
+- A `FrameSnapshot` may contain unavailable variables; unavailable is a
+  semantic result, not an implementation failure.
+
+Partiality, errors, strictness, ordering, nondeterminism:
+
+- Request errors are explicit `ProtocolError` terminals and do not mutate
+  bridge state.
+- Lisp errors are explicit eval/debug outcomes and may preserve a live
+  continuation when debug mode is on.
+- Frame order within one connection/request is semantic.
+- Cross-worker/watch interleavings are schedule-parametric; compare two
+  bridges under the same `World` schedule.
+- Output is an ordered monoid capped by a prefix law.
 
 ## Equality
 
-Two bridge states are observationally equal when every sequence of client
-actions produces the same sequence of public frames and leaves equivalent live
-processes, workers, inspectors, watches, and event-log facts.
+Bridge states are equal when all well-typed action streams produce the same
+observable frames and final resource inventories under the same `World`, up to
+consistent renaming of fresh capability ids.
 
-Transport identity is not semantic equality. A Unix socket connection is a
-delivery path, not ownership of a debug/query process.
-
-## Core Laws
-
-Law: `eval/read-package`
-
-```text
-forall worker form.
-  read package used by eval(worker, form) = worker.package
+```haskell
+Law: "semantic equality"
+forall b1 b2.
+  (forall s w actions.
+     run actions (denote b1) s w ==alpha run actions (denote b2) s w)
+  => b1 = b2
 ```
 
-After `(in-package :p)`, the next unqualified symbol must be interned in
-package `P`, not in the package from which the daemon was implemented.
+Frame equality uses:
 
-Law: `eval/history`
+1. exact equality for method names, terminal success/error shape, condition
+   snapshots, output prefixes, worker names, packages, and payload fields;
+2. alpha-equivalence for fresh debug/inspect/watch ids;
+3. schedule-parametric equality for concurrent event interleavings;
+4. exclusion of operational diagnostics such as log byte counts.
 
-```text
-successful eval(form, values) shifts *, **, ***, +, ++, +++, /, //, ///
-as a normal CL REPL would.
+No-leak rule:
+
+```haskell
+Law: "no public distinction after equal denotation"
+forall x y.
+  denote x = denote y
+  => forall publicContext.
+       observe publicContext x ==alpha observe publicContext y
 ```
 
-Law: `package-override-is-scoped`
+Consequences:
 
-```text
-eval(form, package = P) observes P while reading and evaluating form,
-but does not mutate worker.package.
+- A socket connection is a delivery path, not ownership of a debug,
+  query, inspector, or watch resource.
+- A cache hit, thread reuse, method-handler arrangement, or fresh-id counter
+  value may not alter semantic observations except through alpha-renamed
+  capabilities.
+- JSON and CLI renderers may hide implementation detail but may not invent
+  semantic outcomes.
+
+## Actions and Constructor Responsibility
+
+Public constructors are typed actions. JSON params are not constructors until
+`decode` accepts them.
+
+```haskell
+decode :: MethodRegistry -> JsonObject -> ProtocolErrorOr Action
+step   :: BridgeState -> World -> Action -> StepResult
 ```
 
-Law: `condition-live-debugger`
+Action families:
+
+| Family | Constructors | One semantic responsibility |
+| --- | --- | --- |
+| Discovery | `Ping`, `Methods`, `Help method` | observe daemon and registry facts |
+| Lifecycle | `Shutdown`, CLI `Serve`, CLI `Status`, CLI `Stop` | start/observe/stop the service boundary |
+| Worker | `CurrentPackage`, `SetPackage`, `ListWorkers`, `KillWorker`, `Reset`, `Interrupt` | manage worker state and current eval |
+| Eval | `Eval`, `TimeEval`, `ProfileEval` | run one form in a worker with options |
+| Condition/query | `QueryResponse`, `ListDebugSessions`, `DebugEvalInFrame`, `DebugInvokeRestart`, `DebugContinue`, `DebugAbort` | drive live continuations |
+| Inspector | `Inspect`, `InspectInto`, `InspectPop`, `InspectEval`, `InspectMutate`, `InspectPage`, `InspectClose` | navigate or mutate a focused value |
+| Watch | `Watch`, `ListWatches`, `Unwatch`, `Tick` | stream file-change induced loads |
+| Source/image | `Apropos`, `Documentation`, `Arglist`, `CompleteSymbol`, `PackageInfo`, `ClassInfo`, `FunctionInfo`, `FindDefinition`, `Xref`, `Describe`, `DescribeSystem`, `Macroexpand`, `CompileFile`, `LoadFile`, `Disassemble`, `ImageInfo`, `LoadedSystems`, `ListPackages`, `Gc`, `Trace`, `Untrace`, `ListTraced`, `ListRedefinitions` | observe or mutate the SBCL image through standard Lisp capabilities |
+| CLI derived | `Doc`, `WhoCalls`, `WhoReferences`, `WhoSets`, `WhoBinds`, `Workers`, `Diff`, `Debug` | render or compose primitive RPC actions |
+
+Every public method in `src/repl_bridge.lisp` is covered by one row above.
+Every public CLI subcommand in `src/commands.lisp` is either a primitive action
+renderer or a derived action sequence.
+
+Current RPC inventory from the method registry:
 
 ```text
-unhandled condition with debug=true
-  => emits debugger-entered and creates a live DebugSession
+ping, current-package, set-package, eval, interrupt, reset, list-workers,
+kill-worker, describe, list-redefinitions, shutdown, watch, list-watches,
+unwatch, methods, help, query-response, list-debug-sessions,
+debug-invoke-restart, debug-eval-in-frame, debug-continue, debug-abort,
+find-definition, xref, macroexpand, compile-file, apropos, documentation,
+arglist, complete-symbol, package-info, class-info, function-info,
+disassemble, describe-system, image-info, loaded-systems, list-packages, gc,
+trace, untrace, list-traced, time-eval, profile-eval, inspect, inspect-into,
+inspect-pop, inspect-eval, inspect-mutate, inspect-page, inspect-close,
+load-file
 ```
 
-The session remains addressable until a restart, continue, or abort action
-resolves it.
-
-Law: `restart-preserves-continuation`
+Current CLI inventory from the repl-bridge dispatcher:
 
 ```text
-invokeRestart(session, restart, args)
-  resumes the original dynamic continuation at the signaling point.
+serve, eval, interrupt, ping, status, stop, methods, describe, diff,
+image-info, list-packages, loaded-systems, describe-system, package-info,
+current-package, set-package, apropos, complete-symbol, arglist, doc,
+documentation, disassemble, function-info, class-info, find-definition,
+find-definitions, xref, who-calls, who-references, who-sets, who-binds,
+macroexpand, compile-file, load-file, gc, time-eval, profile-eval, trace,
+untrace, list-traced, workers/list-workers, kill-worker, reset, list-watches,
+unwatch, watch, inspect, debug, list-debug-sessions, debug-eval-in-frame,
+debug-invoke-restart, debug-continue, debug-abort
 ```
 
-This is the condition-system law that makes the bridge Lisp-like rather than
-remote `eval`.
+## Denotation Laws
 
-Law: `frame-eval`
+### Decode and dispatch
 
-```text
-debugEval(session, frame, form)
-  = evaluate form in the lexical context of frame
+```haskell
+Law: "decode/closed"
+forall registry json.
+  decode registry json =
+    ProtocolError e
+    or TypedAction a where methodName a in domain registry
 ```
 
-On SBCL this means `sb-di:eval-in-frame`, not a reconstructed `LET` of guessed
-locals. If SBCL reports a source variable as unavailable at the suspended
-program counter, the bridge must surface that fact rather than inventing a
-binding.
-
-Law: `output-prefix`
-
-```text
-terminal.output(channel) = boundedPrefix(concat(streamEvents(channel)))
+```haskell
+Law: "decode/no-mutation"
+forall s w bad.
+  decode (registry s) bad = ProtocolError e
+  => dispatch bad s w = (s, w, [ErrorFrame e])
 ```
 
-Streaming and terminal capture are two observations of the same output trace.
-Large output must be bounded while it is written, not only after evaluation.
-
-Law: `closed-request-algebra`
-
-```text
-decode(json) = Either ProtocolError TypedRequest
+```haskell
+Law: "methods/domain"
+forall s w.
+  frames (step s w Methods) = [Result (methodSpecs (registry s))]
 ```
 
-Handlers consume typed requests. Method schemas are constructors, not just
-documentation.
-
-Law: `connection-not-owner`
-
-```text
-closing connection C may stop frames being delivered to C,
-but it does not destroy an unresolved DebugSession or QuerySession.
+```haskell
+Law: "help/lookup"
+forall s w m.
+  m in domain (registry s)
+  => frames (step s w (Help m)) = [Result (methodSpec m)]
 ```
 
-## Findings Driving This Refactor
+### Worker and package state
 
-1. Package state is semantically wrong. `%eval-one` reads the form before
-   binding `*package*` to the worker package. Persistent package state affects
-   evaluation but not reading, so `(in-package :p)` followed by `(defun foo ...)`
-   interns `FOO` in the wrong package.
+```haskell
+Law: "worker/default-exists-on-observe"
+forall s w.
+  ListWorkers creates or observes a worker named "default"
+```
 
-2. Debug sessions are connection-owned. Continuations are routed through the
-   per-connection in-flight table, so a debug stop cannot be resumed from a
-   later one-shot CLI command. That is unpleasant for agent tooling and
-   violates `connection-not-owner`.
+```haskell
+Law: "set-package/persistent"
+forall s w worker p.
+  packageExists p w
+  => currentPackage worker (state' (step s w (SetPackage worker p))) = p
+```
 
-3. `debug-eval-in-frame` reconstructed a local environment instead of using
-   SBCL's frame evaluator. This is observable: a live argument can be evaluated
-   from the actual frame, while an optimized-away source local should produce a
-   precise frame-eval error instead of a guessed value.
+```haskell
+Law: "eval/read-package"
+forall s w worker form opts.
+  package used to read form =
+    case packageChoice opts of
+      UseWorkerPackage -> currentPackage worker s
+      UsePackageOnce p -> p
+```
 
-4. Output capture is not a true bounded stream. The normal capture path writes
-   into unbounded string streams and truncates after evaluation. The law should
-   bound memory during writes.
+```haskell
+Law: "package-override-scoped"
+forall s w worker p form.
+  currentPackage worker s = p0
+  => currentPackage worker (state' (step s w (Eval worker (UsePackageOnce p) form))) = p0
+```
 
-5. Request schemas are descriptive, not constructive. Unknown fields are
-   ignored and required/typed fields are checked manually in handlers. This
-   makes the public algebra larger and less precise than the implementation.
+```haskell
+Law: "eval/package-persists-without-override"
+forall s w worker form.
+  packageChoice = UseWorkerPackage
+  => currentPackage worker (state' (step s w (Eval worker UseWorkerPackage form)))
+     = postEvalPackage reported by SBCL for that worker
+```
 
-6. Terminal outcomes mix protocol errors, Lisp errors, compatibility fields,
-   warnings, and eval payloads. Internal code should have typed outcomes;
-   JSON compatibility should be a renderer.
+```haskell
+Law: "same-worker-serial"
+forall a b worker.
+  target a = worker and target b = worker
+  => run [a,b] observes a before b
+```
 
-## Implementation Direction
+```haskell
+Law: "different-workers-commute-up-to-schedule"
+forall a b workerA workerB.
+  workerA /= workerB and disjointEffects a b
+  => run [a,b] ==schedule run [b,a]
+```
 
-The bridge should be simplified in this order:
+### Eval and REPL behavior
 
-1. Fix `eval/read-package` and strengthen tests around package state.
-2. Replace guessed frame eval with `sb-di:eval-in-frame` and require the live
-   frame-argument case to pass.
-3. Introduce server-owned process/debug-session identities so debug sessions
-   can survive the connection that discovered them.
-4. Replace output capture with bounded character streams shared by streaming
-   and non-streaming eval.
-5. Introduce request decoders from method specs and remove handler-local
-   ad hoc parsing.
-6. Separate internal terminal outcome types from their JSON rendering.
+`SBCL.eval` is an external oracle:
 
-Each step should move code toward `step : BridgeState x ClientAction ->
-BridgeState x [ServerFrame]` and delete compatibility shims that preserve the
-old bag-of-handlers model.
+```haskell
+sbclEval :: Image -> WorkerContext -> EvalOptions -> Form -> LispOutcome
+```
 
-## Current State
+```haskell
+Law: "eval/delegates-to-sbcl"
+forall s w action.
+  action = Eval worker packageChoice form opts
+  => step s w action =
+       bridgeWrap (sbclEval (image s) (workerContext s worker packageChoice) opts form)
+```
 
-Implemented:
+```haskell
+Law: "eval/history-success"
+forall successful eval with values vs and form f.
+  history' = shiftHistory history f vs
+```
 
-1. `eval/read-package`: forms are now read in the worker package, with
-   per-request package overrides scoped to that eval.
-2. `frame-eval`: stopped frames are captured as live SBCL frame objects and
-   `debug-eval-in-frame` uses `sb-di:eval-in-frame`.
-3. `connection-not-owner`: debugger stops have server-owned session ids. A
-   later connection can list sessions, evaluate in frames, invoke restarts,
-   continue, or abort.
-4. `restart-preserves-continuation`: fresh session-addressed restart actions
-   resume the original eval. Bad restart argument forms report an error without
-   consuming the debug session.
-5. `output-prefix`: streaming and terminal output share a bounded sink, so both
-   observations expose the same prefix and large writes are bounded as they
-   occur.
-6. `closed-request-algebra`: registered method specs now form a decode gate.
-   Unknown params, non-object params, and wrong JSON types fail as protocol
-   errors before handlers run. Transport-wide `token` and dispatch-wide
-   `explain` remain explicit implicit params.
-7. Terminal responses now have an internal `terminal-response` representation;
-   the outer `{id,result/error}` JSON frame is rendered at the wire boundary,
-   and eval-specific markers such as `truncated` / `worker_restarted` live in
-   the eval result rather than as extra terminal-frame fields. Eval payloads
-   remain structured as `eval-result` until their method renderer chooses
-   success or error.
-8. Shutdown now resolves active debug sessions before stopping workers, so a
-   kept debugger stop cannot wedge daemon teardown.
+```haskell
+Law: "eval/redefinition-log"
+forall eval that reads a tracked top-level defining form d.
+  d in redefinitions worker (state')
+```
+
+```haskell
+Law: "output-prefix"
+forall eval.
+  terminalOutput eval = boundedPrefix (concat (streamEvents eval))
+```
+
+```haskell
+Law: "resource-exhaustion-terminal"
+forall eval limit.
+  limitExceeded eval limit
+  => terminal eval = Error resource-exhausted
+     and no later success frame exists for that request id
+```
+
+### Conditions, query, and debugger
+
+```haskell
+Law: "eval/error-no-debug"
+forall unhandled condition c.
+  debug opts = false
+  => terminal = Error eval-error (snapshot c)
+     and no live DebugSession is created
+```
+
+```haskell
+Law: "eval/error-debug"
+forall unhandled condition c.
+  debug opts = true
+  => frames contain Event debugger-entered (snapshot c) debugId
+     and debuggers state' contains debugId
+```
+
+```haskell
+Law: "debug/session-not-connection-owned"
+forall s w debugId connection.
+  close connection may stop delivery to connection
+  but does not remove debugId from debuggers s
+```
+
+```haskell
+Law: "debug-eval-in-frame/non-consuming"
+forall debugId frame form.
+  DebugEvalInFrame debugId frame form
+  returns frame values or frame-eval error
+  and debugId remains live
+```
+
+```haskell
+Law: "debug-restart/resumes-continuation"
+forall debugId restart args.
+  validRestart debugId restart args
+  => DebugInvokeRestart debugId restart args
+     resumes the original dynamic continuation at the signal point
+     and removes debugId when the continuation leaves the debugger
+```
+
+```haskell
+Law: "debug-bad-restart-args-preserve-session"
+forall debugId restart badArgs.
+  argsDoNotReadOrEvaluate badArgs
+  => DebugInvokeRestart debugId restart badArgs returns Error
+     and debugId remains live
+```
+
+```haskell
+Law: "debug-abort/removes-session"
+forall debugId.
+  DebugAbort debugId removes debugId and lets the eval unwind as failure
+```
+
+```haskell
+Law: "query-response/same-id"
+forall evalId value.
+  QueryResponse evalId value is accepted only when evalId has a live query
+  waiting; otherwise it is ProtocolError
+```
+
+### Inspector
+
+An inspector is a zipper over an object graph in the image.
+
+```haskell
+Law: "inspect/open"
+forall form.
+  Inspect form creates fresh inspector id i and focus = valueOf form
+```
+
+```haskell
+Law: "inspect-into-pop"
+forall i part.
+  validPart i part
+  => InspectPop (InspectInto i part) = i
+```
+
+```haskell
+Law: "inspect-page/window"
+forall i offset.
+  InspectPage i offset = boundedWindow offset pageSize (parts (focus i))
+```
+
+```haskell
+Law: "inspect-eval/focus-binding"
+forall i form.
+  InspectEval i form evaluates form with * bound to focus i
+```
+
+```haskell
+Law: "inspect-close/removes"
+forall i.
+  InspectClose i removes i; later inspector actions on i are protocol errors
+```
+
+### Watches
+
+```haskell
+Law: "watch/open"
+forall dir glob mode.
+  directoryExists dir
+  => Watch dir glob mode creates fresh watch id and emits watch-acknowledged
+```
+
+```haskell
+Law: "watch/tick-reload"
+forall watch file.
+  fileMatches watch file and mtimeIncreased file
+  => Tick emits file-reloaded or reload-failed
+     and successful reload mutates image as LoadFile file
+```
+
+```haskell
+Law: "watch/auto-revert"
+forall watch file.
+  autoRevert watch and successful reload file
+  => Tick emits revert-applied for file
+```
+
+```haskell
+Law: "unwatch/idempotent"
+forall id.
+  id not in watches => Unwatch id returns stopped=false and preserves state
+```
+
+### Source, image, and trace operations
+
+Read-only image observations do not mutate image state:
+
+```haskell
+Law: "image-observation/read-only"
+forall op in {Apropos, Documentation, Arglist, CompleteSymbol, PackageInfo,
+              ClassInfo, FunctionInfo, FindDefinition, Xref, Describe,
+              DescribeSystem, Disassemble, ImageInfo, LoadedSystems,
+              ListPackages, ListTraced, ListRedefinitions}.
+  image (state' (step s w op)) = image s
+```
+
+Image-mutating operations delegate to SBCL:
+
+```haskell
+Law: "compile-file/delegates"
+  CompileFile path = bridgeWrap (SBCL.compileFile image path)
+```
+
+```haskell
+Law: "load-file/delegates"
+  LoadFile path = bridgeWrap (SBCL.load image path)
+```
+
+```haskell
+Law: "macroexpand/delegates"
+  Macroexpand form recursive = bridgeWrap (SBCL.macroexpand image form recursive)
+```
+
+```haskell
+Law: "trace/idempotent"
+forall symbols.
+  Trace symbols <> Trace symbols = Trace symbols
+```
+
+```haskell
+Law: "untrace/clears"
+forall symbols.
+  ListTraced after Untrace symbols excludes symbols
+```
+
+```haskell
+Law: "gc/observational"
+  Gc may change operational memory facts but must not change Lisp values,
+  packages, workers, debug sessions, inspectors, watches, or method schemas
+```
+
+### Lifecycle
+
+```haskell
+Law: "shutdown/resolves-owned-resources"
+forall s w.
+  Shutdown interrupts or resolves live eval/debug/watch resources, emits
+  success, and transitions to ShutdownRequested
+```
+
+```haskell
+Law: "status/cleanup-stale"
+  CLI Status and Stop may clean stale daemon files, but stale file cleanup is
+  operational; it is not a bridge-state transition unless a live daemon exists
+```
+
+## Algebraic Structures
+
+1. `Frames` is a monoid under concatenation, with empty trace as identity.
+   It is not commutative.
+2. `OutputTrace` is a monoid per channel. Terminal output is a bounded-prefix
+   homomorphism from the full trace.
+3. `MethodRegistry` is a finite map from method name to typed schema.
+   `decode` is a partial algebra homomorphism from JSON objects into
+   `Action + ProtocolError`.
+4. `RedefinitionSet` is an idempotent semilattice keyed by definition identity.
+5. `Workers`, `DebugSessions`, `Inspectors`, and `Watches` are finite maps.
+   Insertions allocate fresh names; equality is alpha-equivalence over those
+   fresh names.
+6. `ReplHistory` is a fixed-width shift register, not a list monoid.
+7. Worker-targeted actions are lens-like state transitions over
+   `Workers[workerName]`.
+8. CLI commands form a rendering morphism from action traces to
+   `(exit-code, stdout, stderr)`.
+
+## Interface and Protocol Morphism Checks
+
+### JSON-RPC dispatch
+
+```haskell
+Law: "dispatch/decode-step"
+forall json s w.
+  decode (registry s) json = TypedAction a
+  => dispatch json s w = step s w a
+```
+
+Failure pressure: if unknown params are ignored, `decode` is not closed and
+`methods/help` are not the source of truth. Repair: method specs are
+constructive schemas, not descriptive docs.
+
+### Methods/help discovery
+
+```haskell
+Law: "help-methods-morphism"
+forall m.
+  Help m = lookup m Methods
+```
+
+Failure pressure: hand-written docs can drift from dispatch. Repair:
+`methods` and `help` are projections of the same registry used by `decode`.
+
+### CLI rendering
+
+```haskell
+Law: "cli/render-morphism"
+forall command action s w.
+  desugarCli command = action
+  => runCli command s w = renderCli command (frames (step s w action))
+```
+
+Derived aliases:
+
+```haskell
+Doc symbol args          = Documentation symbol args
+Workers                  = ListWorkers
+Diff worker              = ListRedefinitions worker
+WhoCalls symbol          = Xref symbol Calls
+WhoReferences symbol     = Xref symbol References
+WhoSets symbol           = Xref symbol Sets
+WhoBinds symbol          = Xref symbol Binds
+Debug form selectors     = Eval form debug=true followed by selected
+                           debug continuation and cleanup
+```
+
+Failure pressure: a CLI wrapper that observes or mutates extra state is a
+separate action, not a renderer. Repair: make it explicit or derive it from
+primitive actions.
+
+### Worker product
+
+```haskell
+Law: "worker-lens-morphism"
+forall worker action.
+  target action = worker
+  => step action over BridgeState =
+       over workers[worker] (workerStep action)
+```
+
+Failure pressure: global package state would make named workers misleading.
+Repair: package, history, and redefinition log live in `Worker`.
+
+### Streaming/output
+
+```haskell
+Law: "terminal-output-is-stream-projection"
+forall eval.
+  terminal.output = boundedPrefix (foldMap eventChunk stdoutEvents)
+```
+
+Failure pressure: buffering unbounded output and truncating after eval makes
+memory behavior non-semantic. Repair: bounded sink is the model.
+
+### Debug same-id vs session-id
+
+```haskell
+Law: "debug-addressing-morphism"
+forall action debugId.
+  sameIdContinuation action debugId == freshSessionRequest action debugId
+  where both name the same live DebugSession
+```
+
+Failure pressure: connection-owned continuation tables make fresh session
+requests impossible. Repair: debug sessions are server-owned resources.
+
+### Inspector zipper
+
+```haskell
+Law: "inspector-zipper-morphism"
+  InspectInto and InspectPop preserve the usual zipper focus/path laws;
+  InspectEval is evaluation in the denoted focus context.
+```
+
+Failure pressure: one-shot inspect that closes immediately cannot express
+held traversal. Repair: single-shot CLI is derived from open/traverse/close;
+RPC inspector sessions remain first-class.
+
+### Rejected interfaces
+
+| Interface | Smallest counterexample | Failure | Response |
+| --- | --- | --- | --- |
+| Commutative set of frames | `(format t "a")` then `(format t "b")` | `ab` and `ba` differ | use ordered `Seq Frame` |
+| Stateless request handler | debug eval enters debugger, client reconnects | no place to store continuation | use `DebugSessions` map |
+| Raw JSON byte equality | two equivalent runs allocate debug ids 1 and 2 | raw bytes differ but capability behavior is same | compare up to fresh-id alpha-equivalence |
+| Public monad over actions | `Watch` may remain live and emit later frames | bind would hide scheduling and liveness | expose transition system, not monad API |
+| Connection owns debug session | close discovery connection before restart | restart cannot resume | debug sessions are server-owned |
+
+## Pressure Iterations
+
+Iteration 1: bag of handlers.
+
+- Candidate tried: `Map MethodName Handler`.
+- Evidence/law pressure: debugger continuations, query responses, watches, and
+  inspectors require live resources; `connection-not-owner` fails.
+- Simplification made: replace handlers with typed `Action` over
+  `BridgeState`.
+- Remaining weakness: state machine could still be too implementation-shaped.
+- Next pressure test: named workers and CLI wrappers.
+
+Iteration 2: one transcript.
+
+- Candidate tried: linear REPL transcript.
+- Evidence/law pressure: independent named workers, watch streams, and
+  inspector sessions are not one sequence of REPL input/output.
+- Simplification made: model bridge as finite maps of addressable resources
+  plus ordered per-action frames.
+- Remaining weakness: arbitrary SBCL effects would make laws huge.
+- Next pressure test: delegate Lisp semantics to an opaque `World`.
+
+Iteration 3: raw SBCL image.
+
+- Candidate tried: bridge denotes only the hosted image.
+- Evidence/law pressure: protocol errors, method discovery, output caps,
+  sessions, and CLI behavior are not image facts.
+- Simplification made: `Image` is one field in `BridgeState`, and SBCL is an
+  oracle used by eval/source operations.
+- Remaining weakness: fresh ids and scheduling may leak.
+- Next pressure test: equality.
+
+Iteration 4: exact trace equality.
+
+- Candidate tried: compare JSON frames byte-for-byte.
+- Evidence/law pressure: capability ids are observable integers but should not
+  define user reasoning; independent scheduling can interleave differently.
+- Simplification made: frame equality is alpha-equivalence for fresh
+  capabilities and schedule-parametric for independent streams.
+- Remaining weakness: operational diagnostics such as pid/time remain noisy.
+- Next pressure test: classify them as payload observations, not equality.
+
+Iteration 5: complete observation set.
+
+- Candidate tried: `step` plus queryable resource inventories.
+- Evidence/law pressure: "no invisible state" requires every persistent
+  resource to be discoverable, but logs/caches/locks should not become meaning.
+- Simplification made: public resources are semantic; implementation
+  diagnostics are operational non-semantics unless surfaced by a typed method.
+- Remaining weakness: none that changes denotation for the current surface.
+- Next pressure test: property laws over generated action sequences.
+
+## Property-Test Plan
+
+Generate only well-typed actions through the method registry, plus malformed
+JSON for decoder tests.
+
+1. Decode closure: unknown method, unknown param, missing required param, and
+   wrong type all produce `ProtocolError` and preserve state.
+2. Method registry: every registered method appears in `methods`; `help m`
+   equals lookup from `methods`.
+3. Package laws: `set-package` persists; per-eval package override is scoped;
+   reading after `(in-package ...)` uses the intended package.
+4. Worker laws: actions for disjoint named workers preserve each other's
+   package/history/redefinition observations.
+5. Output law: streamed chunks concatenate to the terminal bounded prefix.
+6. Debug laws: `debug` creates a discoverable session; frame eval does not
+   consume it; bad restart args preserve it; restart/continue/abort resolve it.
+7. Connection law: closing the discovery connection does not remove a kept
+   debug session.
+8. Inspector laws: open/into/pop/page/eval/close satisfy zipper behavior on
+   lists, vectors, hash tables, and objects with bounded rendering.
+9. Watch laws: watch acknowledgement creates a discoverable watch; unwatch is
+   idempotent; file modification emits reload or failure; auto-revert emits
+   revert-applied after successful load.
+10. CLI morphism: CLI aliases (`doc`, `workers`, `diff`, `who-calls`, debug
+    single-shot) render the same underlying RPC/action results.
+11. Lifecycle: shutdown resolves kept sessions and watches before worker
+    teardown.
+
+Existing evidence lives mostly in `test/repl-bridge-*-test.lisp`; future
+properties should be phrased against these laws rather than private structs.
+
+## Open Semantic Decisions
+
+None of these block the algebra gate:
+
+1. Exact SBCL semantics remain externalized as `World`. This is deliberate:
+   the bridge algebra specifies orchestration and observation, not Common Lisp.
+2. Exact elapsed time, pid, and GC counters are diagnostic payloads. They may
+   vary without changing bridge equality.
+3. The event log is diagnostic unless a future RPC exposes it as a typed
+   observation. If that happens, add log laws.
+
+## Quality Gate
+
+Score scale: 0 absent, 1 informal, 2 common cases only, 3 precise and
+law-backed, 4 precise/simple/reusable/morphism-checked.
+
+| Criterion | Score | Evidence |
+| --- | --- | --- |
+| Denotational fit | 4 | explicit `step` model explains eval, debug, inspector, watches, discovery, CLI |
+| Simplicity | 3 | SBCL effects are parameterized; resources are finite maps; frames are a sequence |
+| Compositionality | 3 | every public operation maps to a typed action family and step law |
+| Semantic equality and abstraction safety | 3 | equality is complete observation up to fresh-id alpha and schedule |
+| Closure | 3 | `decode` is the constructor gate; malformed JSON is outside `Action` |
+| Power | 4 | covers the full current RPC/CLI surface and live SBCL affordances |
+| Parsimony | 3 | action families separate worker, eval, debug, inspect, watch, source, lifecycle |
+| Orthogonality | 3 | workers/debuggers/inspectors/watches are independent sub-algebras |
+| Law quality | 3 | laws cover observations, interaction, partiality, and resource lifetime |
+| Interface morphisms | 3 | dispatch, methods/help, CLI, worker lens, streaming, debug addressing checked |
+| Generality | 3 | passive payloads parameterized; image/world opaque |
+| Implementation independence | 4 | no law depends on threads, sockets, hash tables, or JSON alist representation |
+
+Gate result: pass for specification. Implementation remains out of scope until
+a user explicitly asks for it.
