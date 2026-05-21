@@ -182,6 +182,29 @@
                               "Expected components to be sorted by name, got:~%~A"
                               stdout))))
 
+           ;; Trusted registry metadata failures are not "license absent".
+           (let ((original-lock (uiop:read-file-string lock-path)))
+             (unwind-protect
+                  (progn
+                    (let* ((lock (clpm.project:read-lock-file lock-path))
+                           (registry (first (clpm.project:lockfile-registries lock))))
+                      (setf (clpm.project:locked-registry-trust registry)
+                            "ed25519:missing")
+                      (clpm.project:write-lock-file lock lock-path))
+                    (uiop:with-current-directory (proj-root)
+                      (multiple-value-bind (code stdout stderr)
+                          (run-cli-captured '("deps" "sbom" "--format" "cyclonedx-json"))
+                        (assert-true (not (zerop code))
+                                     "Expected SBOM to fail on trusted registry load failure")
+                        (assert-true (string= "" stdout)
+                                     "Expected no SBOM stdout on trusted registry failure, got:~%~A"
+                                     stdout)
+                        (assert-contains stderr "Failed to load registry main"))))
+               (with-open-file (s lock-path :direction :output
+                                      :if-exists :supersede
+                                      :external-format :utf-8)
+                 (write-string original-lock s))))
+
            ;; Output file mode.
            (let ((out-json (merge-pathnames "sbom.json" proj-root)))
              (uiop:with-current-directory (proj-root)

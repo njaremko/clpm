@@ -5165,8 +5165,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
       (flet ((find-license (pkg ver)
                (block found
                  (dolist (reg registries)
-                   (let ((meta (ignore-errors
-                                (clpm.registry:get-release-metadata reg pkg ver))))
+                   (let ((meta (clpm.registry:get-release-metadata reg pkg ver)))
                      (when meta
                        (let ((license (clpm.registry:release-metadata-license meta)))
                          (when (and (stringp license) (plusp (length license)))
@@ -5434,11 +5433,16 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
                                                             :kind kind)
                               registries)
                       (error (c)
-                        (declare (ignore c))
-                        nil)))))))
+                        (log-error "Failed to load registry ~A: ~A" name c)
+                        (return-from cmd-sbom 1))))))))
           (setf registries (nreverse registries))
 
-          (let* ((components (%sbom-collect-components lock registries))
+          (let* ((components
+                   (handler-case
+                       (%sbom-collect-components lock registries)
+                     (error (c)
+                       (log-error "Failed to read SBOM registry metadata: ~A" c)
+                       (return-from cmd-sbom 1))))
                  (project-name (clpm.project:lockfile-project-name lock))
                  (generated-at (clpm.project:lockfile-generated-at lock)))
             (labels ((write-to-stream (stream)

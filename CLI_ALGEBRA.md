@@ -2168,8 +2168,33 @@ but output kind and machine-readable shape are semantic.
   - If any configured registry refresh fails, `deps update` fails before solve
     and does not rewrite `clpm.lock`.
 - Remaining discomfort:
-  - None for registry refresh failure propagation. SBOM enrichment still has
-    a separate metadata-failure erasure hazard.
+  - None for registry refresh failure propagation. The SBOM
+    metadata-failure erasure hazard is closed by Iteration 70.
+
+### Iteration 70: SBOM Metadata Failure Is Not Absence
+
+- Commands deleted:
+  - The accidental SBOM path that swallowed trusted registry load or release
+    metadata verification failures and emitted a partial machine document as
+    though licenses were merely absent.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - License enrichment is derived from verified registry metadata. Verification
+    failure is an `Outcome`, not a nullable license value.
+- Commands that survived and why:
+  - `deps sbom --format ...` survives as a machine-output observation of the
+    lockfile plus verified registry metadata.
+- Laws/protocol invariants added:
+  - `metadataMissing(package, version)` may render an SBOM component without a
+    license.
+  - `metadataLoadFailed(registry)` and
+    `metadataVerificationFailed(registry, package, version)` fail the SBOM
+    command before any SBOM is written.
+  - Machine SBOM stdout is either one complete document or empty on command
+    failure.
+- Remaining discomfort:
+  - None for trusted registry metadata erasure.
 
 ## Constructors
 
@@ -2619,6 +2644,8 @@ Failed-counterexample regressions:
   into the source store, and is not included in publish tarballs.
 - `deps update` fails before solving and leaves `clpm.lock` unchanged when any
   configured registry cannot refresh.
+- `deps sbom` fails with empty machine stdout when trusted registry metadata
+  cannot be loaded or verified.
 - `clpm --insecure help` is rejected; `--insecure` is not an inert
   pre-command global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes
