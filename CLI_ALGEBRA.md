@@ -1572,9 +1572,37 @@ but output kind and machine-readable shape are semantic.
   - `parse(command ++ ["--version"])` is delegated to the command parser, not
     intercepted as root `Version`.
 - Remaining discomfort:
-  - Non-terminal global options are still accepted after the command token and
-    then rejected or interpreted by scope validation. That is the next option
-    placement attack.
+  - Resolved by Iteration 45.
+
+### Iteration 45: Make Global Options Pre-Command Only
+
+- Commands deleted:
+  - `clpm help -v` as a silent verbose root-help observation.
+  - `clpm deps sync --offline`, `clpm deps sync --jobs 4`, and
+    `clpm run --lisp sbcl` as root-option forms after the command token.
+  - `clpm repl --insecure` and `clpm repl --offline` as post-command global
+    flags that reach option-scope validation.
+- Commands merged:
+  - None. This is a parser ownership law, not a new command surface.
+- Commands derived instead of exposed:
+  - `COMMAND ... --help` remains the only post-command root-derived syntax,
+    and it is terminal selector sugar for `clpm help COMMAND ...`.
+- Commands that survived and why:
+  - Pre-command global options survive because they modify the invocation
+    context before the resource constructor is selected.
+  - Command-local flags survive inside their owning command parsers.
+- Laws/protocol invariants added:
+  - `parse(globalOptions ++ [command] ++ args)` may produce root options.
+  - `parse([command] ++ argsWithGlobalLookingToken)` delegates every token in
+    `argsWithGlobalLookingToken` to the command parser except terminal
+    `--help`.
+  - `globalOptionPosition(opt, argv) = PrefixOnly` for every non-terminal
+    global option.
+  - `--help` after a command is resource-local selector syntax and must be the
+    final token.
+- Remaining discomfort:
+  - None for global option placement. The next broad attack is documenting the
+    prefix-only rule consistently across command help and examples.
 
 ## Constructors
 
@@ -1997,13 +2025,16 @@ Failed-counterexample regressions:
 - `clpm --version --json`, `clpm --help deps`, and
   `clpm deps --version` are rejected; terminal root observations do not mask
   residual arguments or command-local tokens.
-- `clpm --insecure help` and `clpm repl --insecure` are rejected;
-  `--insecure` is not an inert global decoration.
+- `clpm help -v`, `clpm repl --insecure`, `clpm deps sync --offline`,
+  `clpm deps sync --jobs 4`, and `clpm run --lisp sbcl` are rejected by the
+  owning command parser; global options cannot be placed after the command
+  token.
+- `clpm --insecure help` is rejected; `--insecure` is not an inert
+  pre-command global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes
   through `clpm repl eval FORM`.
-- `clpm --offline help`, `clpm repl --offline`, and
-  `clpm --offline deps sync --to lock` are rejected; `--offline` is only for
-  artifact/cache operations.
+- `clpm --offline help` and `clpm --offline deps sync --to lock` are
+  rejected; `--offline` is only for artifact/cache operations.
 - `clpm --jobs 4 help`, `clpm -j 4 repl`, and
   `clpm --jobs 2 deps sync --to lock` are rejected; `--jobs` is only for
   parallel dependency realization.

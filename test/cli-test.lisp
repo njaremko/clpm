@@ -84,6 +84,23 @@
     (fail "Expected command-local --version to reach deps parser, got: ~A" err)))
 (format t "  Terminal root options PASSED~%")
 
+(format t "Testing global options must precede the command token...~%")
+(dolist (case '((("help" "-v") "Unknown command")
+                (("repl" "--insecure") "Unknown subcommand")
+                (("repl" "--offline") "Unknown subcommand")
+                (("deps" "sync" "--offline") "Unknown option: --offline")
+                (("deps" "sync" "--jobs" "4") "Unknown option: --jobs")
+                (("run" "--lisp" "sbcl") "Unknown run operation: --lisp")))
+  (destructuring-bind (args expected) case
+    (multiple-value-bind (code _out err)
+        (run-cli-captured args)
+      (declare (ignore _out))
+      (assert-eql 1 code)
+      (unless (search expected err)
+        (fail "Expected post-command global option to stay command-local (~S), got: ~A"
+              expected err)))))
+(format t "  Global option placement PASSED~%")
+
 (format t "Testing unknown command...~%")
 (assert-eql 1 (clpm:run-cli '("unknown-command")))
 (format t "  Unknown command PASSED~%")
@@ -130,8 +147,7 @@
 (format t "Testing insecure option scope...~%")
 (dolist (args '(("--insecure" "help")
                 ("--insecure" "--help")
-                ("--insecure" "--version")
-                ("repl" "--insecure")))
+                ("--insecure" "--version")))
   (multiple-value-bind (code _out err)
       (run-cli-captured args)
     (declare (ignore _out))
@@ -142,7 +158,6 @@
 
 (format t "Testing offline option scope...~%")
 (dolist (args '(("--offline" "help")
-                ("repl" "--offline")
                 ("--offline" "deps" "sync" "--to" "lock")))
   (multiple-value-bind (code _out err)
       (run-cli-captured args)

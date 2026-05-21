@@ -77,9 +77,11 @@ Returns (values command command-args options)."
            (setf end-of-options t)
            (push arg command-args))
           ;; Global options
-          ((or (string= arg "-v") (string= arg "--verbose"))
+          ((and (null command)
+                (or (string= arg "-v") (string= arg "--verbose")))
            (push :verbose options))
-          ((or (string= arg "-j") (string= arg "--jobs"))
+          ((and (null command)
+                (or (string= arg "-j") (string= arg "--jobs")))
            (incf i)
            (when (>= i (length args))
              (clpm.errors:signal-error 'clpm.errors:clpm-user-error
@@ -90,7 +92,8 @@ Returns (values command command-args options)."
                (clpm.errors:signal-error 'clpm.errors:clpm-user-error
                                          "Invalid value for --jobs: ~A" raw))
              (push (cons :jobs n) options)))
-          ((string= arg "--lisp")
+          ((and (null command)
+                (string= arg "--lisp"))
            (incf i)
            (when (>= i (length args))
              (clpm.errors:signal-error 'clpm.errors:clpm-user-error
@@ -123,11 +126,14 @@ Returns (values command command-args options)."
                (clpm.errors:signal-error 'clpm.errors:clpm-user-error
                                          "Invalid value for --package: ~S" raw))
              (push (cons :package raw) options)))
-          ((string= arg "--offline")
+          ((and (null command)
+                (string= arg "--offline"))
            (push :offline options))
-          ((string= arg "--insecure")
+          ((and (null command)
+                (string= arg "--insecure"))
            (push :insecure options))
-          ((string= arg "--with-optional")
+          ((and (null command)
+                (string= arg "--with-optional"))
            (incf i)
            (when (>= i (length args))
              (clpm.errors:signal-error 'clpm.errors:clpm-user-error
@@ -137,9 +143,11 @@ Returns (values command command-args options)."
                (clpm.errors:signal-error 'clpm.errors:clpm-user-error
                                          "Invalid value for --with-optional: ~S" raw))
              (push (cons :with-optional raw) options)))
-          ((string= arg "--with-all-optional")
+          ((and (null command)
+                (string= arg "--with-all-optional"))
            (push (cons :with-optional :all) options))
-          ((string= arg "--fetch-retries")
+          ((and (null command)
+                (string= arg "--fetch-retries"))
            (incf i)
            (when (>= i (length args))
              (clpm.errors:signal-error 'clpm.errors:clpm-user-error
@@ -150,7 +158,8 @@ Returns (values command command-args options)."
                (clpm.errors:signal-error 'clpm.errors:clpm-user-error
                                          "Invalid value for --fetch-retries: ~A" raw))
              (push (cons :fetch-retries n) options)))
-          ((string= arg "--fetch-timeout")
+          ((and (null command)
+                (string= arg "--fetch-timeout"))
            (incf i)
            (when (>= i (length args))
              (clpm.errors:signal-error 'clpm.errors:clpm-user-error
