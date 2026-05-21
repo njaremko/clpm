@@ -225,6 +225,16 @@
                               stdout))
                (format t "  eval OK~%")
 
+               (format t "Test: eval machine output mode is not debug output~%")
+               (multiple-value-bind (rc _stdout stderr)
+                   (run-cli-captured '("repl" "eval"
+                                       "(error \"json debug ambiguity\")"
+                                       "--debug" "--json"))
+                 (declare (ignore _stdout))
+                 (assert-eql 1 rc)
+                 (assert-contains stderr "--debug cannot be combined with --json"))
+               (format t "  eval output mode OK~%")
+
                (format t "Test: eval --debug handles debugger continuations~%")
                (multiple-value-bind (rc stdout stderr)
                    (run-cli-captured '("repl" "eval"

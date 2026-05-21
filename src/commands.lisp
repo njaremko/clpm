@@ -2286,10 +2286,13 @@ JSON object `{type, restart, args}'. Returns NIL on a malformed spec."
 (defun %bridge-eval (args)
   "Handle `clpm repl eval FORM [--package PKG] [--worker W]
                                  [--handler TYPE=RESTART[:ARG,...]]...
-                                 [--debug] [--restart NAME] [--frame N]
+                                 [--no-autostart] [--json]' or
+          `clpm repl eval FORM [--package PKG] [--worker W]
+                                 [--handler TYPE=RESTART[:ARG,...]]...
+                                 --debug [--restart NAME] [--frame N]
                                  [--frame-eval FORM] [--keep]
                                  [--break-on TYPE] [--timeout-ms N]
-                                 [--no-autostart] [--json]'.
+                                 [--no-autostart]'.
 
 Default rendering is human-readable; pass `--json' for the raw JSON line.
 
@@ -2387,7 +2390,11 @@ server-owned session for later `call debug-* ...' requests."
            (log-error "Unknown eval option: ~A" arg)
            (return-from %bridge-eval 1)))))
     (unless form
-      (log-error "Usage: clpm repl eval FORM [--package PKG] [--worker W] [--handler T=R[:A,...]]... [--debug] [--json]")
+      (log-error "Usage: clpm repl eval FORM [--package PKG] [--worker W] [--handler T=R[:A,...]]... [--no-autostart] [--json]")
+      (log-error "       clpm repl eval FORM [--package PKG] [--worker W] [--handler T=R[:A,...]]... --debug [debug-options] [--no-autostart]")
+      (return-from %bridge-eval 1))
+    (when (and debug json)
+      (log-error "--debug cannot be combined with --json")
       (return-from %bridge-eval 1))
     (when (and restart-args (null restart))
       (log-error "--arg requires --restart")
@@ -3072,7 +3079,8 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
     (return-from %bridge-help 1))
   (format t "Usage:~%")
   (format t "  clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]~%")
-  (format t "  clpm repl eval FORM [--package P] [--worker W] [--debug] [--json]~%")
+  (format t "  clpm repl eval FORM [--package P] [--worker W] [--no-autostart] [--json]~%")
+  (format t "  clpm repl eval FORM [--package P] [--worker W] [--no-autostart] --debug [debug-options]~%")
   (format t "  clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...~%~%")
   (format t "Use `clpm repl call methods` to list callable daemon RPCs.~%")
   (format t "Use `clpm repl call help --method gc` for a callable method schema.~%")
@@ -5649,7 +5657,8 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     ""
     "```sh"
     "clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]"
-    "clpm repl eval FORM [--package P] [--worker W] [--debug] [--json]"
+    "clpm repl eval FORM [--package P] [--worker W] [--no-autostart] [--json]"
+    "clpm repl eval FORM [--package P] [--worker W] [--no-autostart] --debug [debug-options]"
     "clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]..."
     "```"
     ""
@@ -6072,14 +6081,16 @@ sub-subcommand=\"set\")."
             (p "  --stop     Ask the daemon to shut down cleanly.")
             (p "")
             (p "Example:")
-            (p "  clpm repl daemon --detach")
+           (p "  clpm repl daemon --detach")
             0)
            ((and sub (string= sub "eval"))
-            (p "Usage: clpm repl eval <form> [--package <name>] [--worker <name>] [--debug] [--no-autostart] [--json]")
+            (p "Usage: clpm repl eval <form> [--package <name>] [--worker <name>] [--no-autostart] [--json]")
+            (p "       clpm repl eval <form> [--package <name>] [--worker <name>] [--no-autostart] --debug [debug-options]")
             (p "")
             (p "Evaluate one Lisp form in the daemon. With no daemon running and")
             (p "without --no-autostart, the bridge starts one in the background")
-            (p "first. Human output is the default; --json emits raw JSON.")
+            (p "first. Human output is the default; --json emits one raw eval")
+            (p "response. Debug mode is a separate human/debug-session path.")
             (p "")
            (p "Options:")
            (p "  --package <name>  Override *package* for this call only")
@@ -6124,7 +6135,8 @@ sub-subcommand=\"set\")."
            (t
             (p "Usage:")
             (p "  clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]")
-            (p "  clpm repl eval <form> [--package <pkg>] [--worker <name>] [--debug] [--json]")
+            (p "  clpm repl eval <form> [--package <pkg>] [--worker <name>] [--no-autostart] [--json]")
+            (p "  clpm repl eval <form> [--package <pkg>] [--worker <name>] [--no-autostart] --debug [debug-options]")
             (p "  clpm repl call <method> [--params-json <json>] [--PARAM <value>]...")
             (p "")
             (p "Drive a persistent project-scoped Lisp daemon. `call methods`")

@@ -302,11 +302,15 @@
   (assert-eql 0 code)
   (assert-contains stdout "Usage: clpm repl eval")
   (assert-contains stdout "[--json]")
+  (assert-contains stdout "--debug [debug-options]")
   (assert-contains stdout "--package")
   (assert-contains stdout "  --json")
   (assert-contains stdout "--break-on")
   (assert-contains stdout "--timeout-ms")
-  (assert-contains stdout "--no-autostart"))
+  (assert-contains stdout "--no-autostart")
+  (assert-not-contains stdout "[--debug] [--no-autostart] [--json]"
+                       "repl eval help still complects debug and JSON modes:~%~A"
+                       stdout))
 
 ;; repl call: focused page.
 (multiple-value-bind (code stdout stderr)
@@ -322,7 +326,8 @@
   (declare (ignore stderr))
   (assert-eql 0 code)
   (assert-contains stdout "clpm repl eval <form>")
-  (assert-contains stdout "[--json]"))
+  (assert-contains stdout "[--json]")
+  (assert-contains stdout "--debug [debug-options]"))
 
 (format t "  Per-subcommand help PASSED~%")
 

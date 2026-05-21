@@ -299,7 +299,8 @@ clpm [options] store clean [--dist] [--store]
 clpm [options] store gc [--dry-run]
 
 clpm [options] repl daemon [--detach] [--no-load] [--status [--json]] [--stop]
-clpm [options] repl eval FORM [--package P] [--worker W] [--debug] [--no-autostart] ...
+clpm [options] repl eval FORM [--package P] [--worker W] [--no-autostart] [--json]
+clpm [options] repl eval FORM [--package P] [--worker W] [--no-autostart] --debug [debug-options]
 clpm [options] repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
 
@@ -2590,6 +2591,7 @@ Law: "eval has no default-output alias"
   parse ["repl", "eval", form, "--pretty"] = Error
   parse ["repl", "eval", form] = Right (repl (eval form Human))
   parse ["repl", "eval", form, "--json"] = Right (repl (eval form Json))
+  parse ["repl", "eval", form, "--debug", "--json"] = Error
 
 Law: "run entrypoint args require an explicit boundary"
   parse ["run"] = Right (run (EntryPoint []))
@@ -2895,6 +2897,8 @@ Failed-counterexample regressions:
   VCS commands.
 - `clpm repl eval FORM --pretty` is rejected; human output is the default and
   has no flag alias.
+- `clpm repl eval FORM --debug --json` is rejected; JSON eval denotes one raw
+  eval response, not a debugger event stream plus terminal response.
 - `clpm run bare args` is rejected; entrypoint arguments require
   `clpm run -- bare args`.
 - A daemon that evaluates `10` in worker `alpha` and `20` in worker `beta`
