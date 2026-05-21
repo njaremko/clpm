@@ -1624,6 +1624,31 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None for prefix-only option documentation.
 
+### Iteration 47: Document Repl Eval Debug Selectors
+
+- Commands deleted:
+  - No command tokens. The deleted behavior is hidden accepted syntax on
+    `clpm help repl eval`.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - None.
+- Commands that survived and why:
+  - `repl eval FORM --debug --break-on TYPE` survives because it changes which
+    conditions enter the continuation-aware debugger.
+  - `repl eval FORM --debug --timeout-ms N` survives because it bounds one eval
+    request and reports resource exhaustion instead of leaving a runaway image
+    task unbounded.
+- Laws/protocol invariants added:
+  - Every accepted `repl eval` debug selector with user-facing denotation is
+    named by `clpm help repl eval`.
+  - Hidden eval flags are parser bugs unless they are transport-private and
+    rejected before command dispatch.
+- Remaining discomfort:
+  - The eval debug selector set still uses loose local variables rather than a
+    closed continuation-action type. That is an implementation-shape attack,
+    not a public help mismatch.
+
 ## Constructors
 
 Terminal constructors:
@@ -2051,6 +2076,8 @@ Failed-counterexample regressions:
   token.
 - Root help, README, and generated `clpm skill` output state that scoped
   options must appear before the command token.
+- `clpm help repl eval` lists accepted debug selectors including
+  `--break-on` and `--timeout-ms`.
 - `clpm --insecure help` is rejected; `--insecure` is not an inert
   pre-command global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes

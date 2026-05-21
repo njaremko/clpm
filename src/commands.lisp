@@ -2218,6 +2218,7 @@ JSON object `{type, restart, args}'. Returns NIL on a malformed spec."
                                  [--handler TYPE=RESTART[:ARG,...]]...
                                  [--debug] [--restart NAME] [--frame N]
                                  [--frame-eval FORM] [--keep]
+                                 [--break-on TYPE] [--timeout-ms N]
                                  [--no-autostart] [--json]'.
 
 Default rendering is human-readable; pass `--json' for the raw JSON line.
@@ -5949,6 +5950,9 @@ sub-subcommand=\"set\")."
             (p "  --frame <n> --frame-eval <form>")
             (p "                    Evaluate in a debugger frame, then abort.")
             (p "  --keep            Leave the debugger session for call debug-*.")
+            (p "  --break-on <type> Break on signals of this condition type; use none")
+            (p "                    to disable the daemon's default break-on setting.")
+            (p "  --timeout-ms N    Abort the eval if real time exceeds N milliseconds.")
             (p "  --no-autostart    Fail with rc=2 if no daemon is running.")
             (p "")
             (p "Example:")

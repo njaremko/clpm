@@ -249,13 +249,15 @@
   (assert-true (not (search "clpm repl eval" stdout))
                "repl daemon help leaked the umbrella usage:~%~A" stdout))
 
-;; repl eval: focused page, mentions --package and --no-autostart.
+;; repl eval: focused page, mentions accepted debug selectors.
 (multiple-value-bind (code stdout stderr)
     (run-cli-captured '("help" "repl" "eval"))
   (declare (ignore stderr))
   (assert-eql 0 code)
   (assert-contains stdout "Usage: clpm repl eval")
   (assert-contains stdout "--package")
+  (assert-contains stdout "--break-on")
+  (assert-contains stdout "--timeout-ms")
   (assert-contains stdout "--no-autostart"))
 
 ;; repl call: focused page.
