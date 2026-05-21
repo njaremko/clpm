@@ -162,6 +162,10 @@ Returns (values command command-args options)."
                                          "Invalid value for --fetch-timeout: ~A" raw))
              (push (cons :fetch-timeout n) options)))
           ((or (string= arg "-h") (string= arg "--help"))
+           (when (< (1+ i) (length args))
+             (clpm.errors:signal-error
+              'clpm.errors:clpm-user-error
+              "Unexpected argument after ~A: ~A" arg (nth (1+ i) args)))
            (if command
                (return-from parse-args
                  (values :help
@@ -169,7 +173,11 @@ Returns (values command command-args options)."
                                (nreverse command-args))
                          options))
                (return-from parse-args (values :help nil options))))
-          ((string= arg "--version")
+          ((and (null command) (string= arg "--version"))
+           (when (< (1+ i) (length args))
+             (clpm.errors:signal-error
+              'clpm.errors:clpm-user-error
+              "Unexpected argument after --version: ~A" (nth (1+ i) args)))
            (return-from parse-args (values :version nil options)))
           ((and (null command)
                 (plusp (length arg))

@@ -1548,6 +1548,34 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None for pre-command option closure.
 
+### Iteration 44: Make Terminal Root Options Terminal
+
+- Commands deleted:
+  - `clpm --version EXTRA...` as a silent alias for `clpm --version`.
+  - `clpm --help SELECTOR...` as a silent alias for root help.
+  - `clpm COMMAND --version` as a process-wide version escape after a command
+    token has already been selected.
+- Commands merged:
+  - Selector help remains `clpm help SELECTOR...`.
+  - Resource-local `COMMAND ... --help` remains derived syntax for the exact
+    selector before `--help`; trailing tokens after `--help` have no meaning.
+- Commands derived instead of exposed:
+  - None. Terminal root options are observations, not constructors that accept
+    residual argv.
+- Commands that survived and why:
+  - `clpm --version` survives as the root version observation.
+  - `clpm --help` and `clpm -h` survive as exact aliases of bare help.
+- Laws/protocol invariants added:
+  - `parse(["--version"]) = Version`.
+  - `xs /= [] => parse(["--version"] ++ xs) = Error`.
+  - `xs /= [] => parse(["--help"] ++ xs) = Error`.
+  - `parse(command ++ ["--version"])` is delegated to the command parser, not
+    intercepted as root `Version`.
+- Remaining discomfort:
+  - Non-terminal global options are still accepted after the command token and
+    then rejected or interpreted by scope validation. That is the next option
+    placement attack.
+
 ## Constructors
 
 Terminal constructors:
@@ -1966,6 +1994,9 @@ Failed-counterexample regressions:
   mode.
 - `clpm --json` is rejected; an unknown pre-command flag cannot silently denote
   bare help.
+- `clpm --version --json`, `clpm --help deps`, and
+  `clpm deps --version` are rejected; terminal root observations do not mask
+  residual arguments or command-local tokens.
 - `clpm --insecure help` and `clpm repl --insecure` are rejected;
   `--insecure` is not an inert global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes
