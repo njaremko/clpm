@@ -2592,6 +2592,32 @@ but output kind and machine-readable shape are semantic.
     function. That is acceptable because the project manifest has exactly that
     closed script-kind sum; another split would only move the case analysis.
 
+### Iteration 83: README Command Table Must Be a Schema Projection
+
+- Commands deleted:
+  - README umbrella rows such as `project workspace <init|add|remove|list> ...`,
+    `registry <add|list|update|trust|init|key|publish> ...`, and
+    `repl <daemon|eval|call> ...`.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - The README table is derived documentation for the same closed leaf set as
+    `clpm help`; it is not a place to introduce shorthand constructors.
+- Commands that survived and why:
+  - Each workspace, registry, registry trust, registry key, registry publish,
+    and repl leaf survives with its own row because each has a distinct arity,
+    effect boundary, or output contract.
+- Laws/protocol invariants added:
+  - Public documentation must not describe an invocation language larger than
+    the parser and focused help pages accept.
+  - Placeholder abbreviations such as `...` are only valid for true variadic
+    payloads (`<args...>`, `<cmd...>`, repeated dependency systems), not for
+    hidden subcommand grammars.
+- Remaining discomfort:
+  - README is still hand-maintained Markdown. The regression test now pins the
+    highest-risk umbrella rows; a generator from the help schema would be a
+    cleaner long-term proof.
+
 ## Constructors
 
 Terminal constructors:

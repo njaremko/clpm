@@ -251,25 +251,45 @@ explicit resource operations.
 | `clpm project new <name> --bin\|--lib [--dir <path>]` | Create a project scaffold |
 | `clpm project new <name> --bin\|--lib --member-of <workspace-dir>` | Create and register a workspace member |
 | `clpm project init [name]` | Initialize new project |
-| `clpm project workspace <init\|add\|remove\|list> ...` | Workspace management |
+| `clpm project workspace init [--dir <path>]` | Initialize a workspace file |
+| `clpm project workspace add <member> [--dir <path>]` | Add a workspace member |
+| `clpm project workspace remove <member> [--dir <path>]` | Remove a workspace member |
+| `clpm project workspace list [--dir <path>]` | List workspace members |
 | `clpm project package` | Build a distributable executable |
 | `clpm deps add [--dev\|--test] [--any\|--caret] ... <system>...` | Add one or more dependencies |
 | `clpm deps remove [--dev\|--test] <system>` | Remove a dependency |
 | `clpm deps sync [--to lock\|source\|build\|active]` | Resolve, fetch, build, and activate by stage |
-| `clpm deps update [sys...]` | Update dependencies |
+| `clpm deps update [system ...]` | Update dependencies |
 | `clpm deps search <query> [--limit N] [--json]` | Search configured registries |
 | `clpm deps info <system> [--json] [--all]` | Show system details |
 | `clpm [-p <member>] deps tree [--depth N]` | Show dependency tree |
 | `clpm [-p <member>] deps why <system>` | Explain why a system is included |
 | `clpm deps audit [--json]` | Provenance report |
 | `clpm deps sbom --format <cyclonedx-json\|cyclonedx-xml\|spdx-json> [--out <path>]` | SBOM export |
-| `clpm registry <add\|list\|update\|trust\|init\|key\|publish> ...` | Manage registries, keys, trust, and publishing |
+| `clpm registry add --name <name> --url <git-url> --trust ed25519:<key-id>` | Add a signed git registry |
+| `clpm registry add --quicklisp --url <distinfo-url> [--name <name>] [--trust tofu\|sha256:<64-hex-digest>]` | Add a Quicklisp registry |
+| `clpm registry list` | List configured registries |
+| `clpm registry update [name ...]` | Update registry snapshots |
+| `clpm registry trust list` | List registry trust settings |
+| `clpm registry trust set <name> <trust>` | Set a registry trust string |
+| `clpm registry trust refresh <name>` | Refresh Quicklisp trust pins |
+| `clpm registry init --dir <path> --key-id <id> --keys-dir <dir>` | Initialize a publishable registry |
+| `clpm registry key generate --out <dir> --id <id>` | Generate a registry signing key |
+| `clpm registry key list [--keys-dir <dir>]` | List available registry public keys |
+| `clpm registry key import --pub <path> [--id <id>] [--keys-dir <dir>]` | Import a registry public key |
+| `clpm registry key verify --pub <path> --file <path> --sig <path>` | Verify a signed registry file |
+| `clpm registry publish --registry <dir> --key-id <id> --keys-dir <dir> --tarball-url <url> [--tarball-out <path>] [--project <dir>]` | Publish project release metadata |
 | `clpm run [-- <args...>]` | Run the project entrypoint |
 | `clpm run exec -- <cmd...>` | Run a command in the project env |
 | `clpm run test` | Run project tests |
 | `clpm run script <name> [-- <args...>]` | Run a project script |
 | `clpm run scripts` | List project scripts |
-| `clpm repl <daemon\|eval\|call> ...` | Persistent project REPL/debug protocol |
+| `clpm repl daemon [--detach] [--no-load]` | Start a project REPL daemon |
+| `clpm repl daemon --status [--json]` | Inspect the project REPL daemon |
+| `clpm repl daemon --stop` | Stop the project REPL daemon |
+| `clpm repl eval <form> [--json]` | Evaluate a form in the project REPL |
+| `clpm repl eval <form> --debug [debug-options]` | Evaluate through the debugger path |
+| `clpm repl call <method> [--params-json JSON] [--PARAM VALUE]...` | Call a public REPL RPC method |
 | `clpm store clean [--dist] [--store]` | Remove project-local outputs |
 | `clpm store gc [--dry-run]` | Garbage collect store |
 
