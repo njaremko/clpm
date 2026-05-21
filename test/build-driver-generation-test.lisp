@@ -35,6 +35,32 @@
 (defun read-file-string (path)
   (uiop:read-file-string path))
 
+(defun make-locked-system (system-id release-ref)
+  (let* ((tree-sha256 (format nil "~A-tree" release-ref))
+         (src (clpm.project:make-locked-source
+               :kind :path
+               :path (format nil "/dev/null/~A" system-id)
+               :sha256 tree-sha256))
+         (rel (clpm.project:make-locked-release
+               :name release-ref
+               :version "0.1.0"
+               :source src
+               :artifact-sha256 nil
+               :tree-sha256 tree-sha256)))
+    (clpm.project:make-locked-system
+     :id system-id
+     :release rel
+     :deps nil)))
+
+(defun lockfile-for-systems (&rest systems)
+  (clpm.project:make-lockfile
+   :format 1
+   :generated-at (clpm.project:rfc3339-timestamp)
+   :project-name "proj"
+   :clpm-version "0.1.0"
+   :registries nil
+   :resolved systems))
+
 (defun write-exe (path lines)
   (ensure-directories-exist path)
   (with-open-file (s path :direction :output :if-exists :supersede :external-format :utf-8)
@@ -153,6 +179,102 @@
                     (assert-true (eq seen-kind :ecl) "Expected lisp-kind :ecl, got ~S" seen-kind)
                     (assert-true (string= seen-version "ECL 7.7.7")
                                  "Expected lisp-version ~S, got ~S" "ECL 7.7.7" seen-version))
+               (setf (symbol-function 'clpm.build:build-release) orig)))
+
+           ;; 4) Release-level build tasks depend on every system in the release.
+           ;;
+           ;; This catches releases like Eclector, where `eclector` and
+           ;; `eclector-concrete-syntax-tree` come from one release but only
+           ;; `eclector` directly depends on `closer-mop`.
+           (let* ((src-path (merge-pathnames "eclector-release/" tmp))
+                  (dep-path (merge-pathnames "closer-mop/" tmp))
+                  (resolution
+                    (clpm.solver::make-resolution
+                     :systems (list (list :system "eclector-concrete-syntax-tree"
+                                          :name "eclector"
+                                          :version "0.1.0"
+                                          :release-ref "eclector@0.1.0")
+                                    (list :system "eclector"
+                                          :name "eclector"
+                                          :version "0.1.0"
+                                          :release-ref "eclector@0.1.0")
+                                    (list :system "closer-mop"
+                                          :name "closer-mop"
+                                          :version "0.1.0"
+                                          :release-ref "closer-mop@0.1.0"))
+                     :graph (list (cons "eclector-concrete-syntax-tree"
+                                        (list "eclector"))
+                                  (cons "eclector" (list "closer-mop"))
+                                  (cons "closer-mop" nil))))
+                  (lock (lockfile-for-systems
+                         (make-locked-system "eclector-concrete-syntax-tree"
+                                             "eclector@0.1.0")
+                         (make-locked-system "eclector" "eclector@0.1.0")
+                         (make-locked-system "closer-mop" "closer-mop@0.1.0")))
+                  (source-paths (list (cons "eclector-concrete-syntax-tree"
+                                            src-path)
+                                      (cons "eclector" src-path)
+                                      (cons "closer-mop" dep-path)))
+                  (plan (clpm.build::create-build-plan resolution
+                                                       lock
+                                                       source-paths))
+                  (task (gethash "eclector@0.1.0"
+                                 (clpm.build::build-plan-task-map plan))))
+             (assert-true task "Expected eclector build task to exist")
+             (assert-true (member "closer-mop@0.1.0"
+                                  (clpm.build::build-task-depends-on task)
+                                  :test #'string=)
+                          "Expected eclector release task to depend on closer-mop, got ~S"
+                          (clpm.build::build-task-depends-on task)))
+
+           ;; 5) Build drivers receive transitive dependency source dirs.
+           (let* ((orig (symbol-function 'clpm.build:build-release))
+                  (root-path (merge-pathnames "root/" tmp))
+                  (direct-path (merge-pathnames "direct/" tmp))
+                  (transitive-path (merge-pathnames "transitive/" tmp))
+                  (root-dep-dirs nil)
+                  (resolution
+                    (clpm.solver::make-resolution
+                     :systems (list (list :system "root"
+                                          :name "root"
+                                          :version "0.1.0"
+                                          :release-ref "root@0.1.0")
+                                    (list :system "direct"
+                                          :name "direct"
+                                          :version "0.1.0"
+                                          :release-ref "direct@0.1.0")
+                                    (list :system "transitive"
+                                          :name "transitive"
+                                          :version "0.1.0"
+                                          :release-ref "transitive@0.1.0"))
+                     :graph (list (cons "root" (list "direct"))
+                                  (cons "direct" (list "transitive"))
+                                  (cons "transitive" nil))))
+                  (lock (lockfile-for-systems
+                         (make-locked-system "root" "root@0.1.0")
+                         (make-locked-system "direct" "direct@0.1.0")
+                         (make-locked-system "transitive" "transitive@0.1.0")))
+                  (source-paths (list (cons "root" root-path)
+                                      (cons "direct" direct-path)
+                                      (cons "transitive" transitive-path))))
+             (unwind-protect
+                  (progn
+                    (setf (symbol-function 'clpm.build:build-release)
+                          (lambda (_source-path systems _tree-sha256 dep-source-dirs
+                                   &key compile-options lisp-kind lisp-version)
+                            (declare (ignore _source-path _tree-sha256 compile-options lisp-kind lisp-version))
+                            (when (member "root" systems :test #'string=)
+                              (setf root-dep-dirs dep-source-dirs))
+                            (format nil "build-~A" (first systems))))
+                    (clpm.build:build-all resolution lock source-paths
+                                          :jobs 1
+                                          :compile-options nil)
+                    (assert-true (member direct-path root-dep-dirs :test #'equal)
+                                 "Expected root build deps to include direct path, got ~S"
+                                 root-dep-dirs)
+                    (assert-true (member transitive-path root-dep-dirs :test #'equal)
+                                 "Expected root build deps to include transitive path, got ~S"
+                                 root-dep-dirs))
                (setf (symbol-function 'clpm.build:build-release) orig))))
       (if old-path
           (sb-posix:setenv "PATH" old-path 1)

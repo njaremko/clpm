@@ -67,8 +67,8 @@ SOURCE-PATHS is alist of (system-id . source-path)."
         (pushnew system-id (build-task-systems task) :test #'string=)))
     ;; Set up dependencies
     (dolist (task (build-plan-tasks plan))
-      (let ((system-id (build-task-system-id task)))
-        ;; Find dependencies from resolution graph
+      (dolist (system-id (build-task-systems task))
+        ;; Find dependencies from resolution graph.
         (let ((deps (cdr (assoc system-id
                                 (clpm.solver:resolution-graph resolution)
                                 :test #'string=))))
@@ -83,7 +83,9 @@ SOURCE-PATHS is alist of (system-id . source-path)."
     ;; Deterministic system build ordering within a release.
     (dolist (task (build-plan-tasks plan))
       (setf (build-task-systems task)
-            (sort (copy-list (build-task-systems task)) #'string<)))
+            (sort (copy-list (build-task-systems task)) #'string<)
+            (build-task-depends-on task)
+            (sort (copy-list (build-task-depends-on task)) #'string<)))
     ;; Compute topological order
     (setf (build-plan-order plan) (topological-sort-plan plan))
     plan))
@@ -119,14 +121,24 @@ Returns list of (system-id . build-id) pairs."
          (built-sources (make-hash-table :test 'equal)))  ; tree-sha256 -> build-id
 
     (labels ((collect-dep-source-dirs (task)
-               (let ((dep-source-dirs '()))
-                 (dolist (dep-id (build-task-depends-on task))
-                   (let ((dep-task (gethash dep-id (build-plan-task-map plan))))
-                     (when (and dep-task (build-task-source-path dep-task))
-                       (pushnew (build-task-source-path dep-task)
-                                dep-source-dirs
-                                :test #'equal))))
-                 dep-source-dirs))
+               (let ((seen (make-hash-table :test 'equal))
+                     (dep-source-dirs '()))
+                 (labels ((visit (dep-id)
+                            (unless (gethash dep-id seen)
+                              (setf (gethash dep-id seen) t)
+                              (let ((dep-task (gethash dep-id
+                                                       (build-plan-task-map plan))))
+                                (when dep-task
+                                  (when (build-task-source-path dep-task)
+                                    (pushnew (build-task-source-path dep-task)
+                                             dep-source-dirs
+                                             :test #'equal))
+                                  (dolist (child-dep-id
+                                           (build-task-depends-on dep-task))
+                                    (visit child-dep-id)))))))
+                   (dolist (dep-id (build-task-depends-on task))
+                     (visit dep-id)))
+                 (sort dep-source-dirs #'string< :key #'namestring)))
              (record-result (system-id build-id)
                (push (cons system-id build-id) results)))
 
