@@ -270,7 +270,28 @@ Returns (values base-url stop-fn)."
                (assert-eql 0 code)
                (assert-true (search "\"system\"" stdout) "Expected JSON output to include system key")
                (assert-true (search "\"registry\"" stdout) "Expected JSON output to include registry key")
-               (assert-true (search "\"release\"" stdout) "Expected JSON output to include release key")))
+               (assert-true (search "\"release\"" stdout) "Expected JSON output to include release key")
+               (clpm.io.json:read-json-from-string stdout))
+
+             ;; Machine stdout is exactly the result value. Diagnostics from
+             ;; trust bypasses go to stderr, not before the JSON text.
+             (write-sexp
+              (merge-pathnames "config/config.sxp" clpm-home)
+              `(:config
+                :format 1
+                :registries ((:git :url "file:///unused" :name "git-test"
+                              :trust "ed25519:test"))
+                :defaults nil))
+             (multiple-value-bind (code stdout stderr)
+                 (run-cli-captured '("--insecure" "deps" "search" "ql-" "--json"))
+               (assert-eql 0 code)
+               (clpm.io.json:read-json-from-string stdout)
+               (assert-true (search "\"system\"" stdout)
+                            "Expected JSON stdout, got: ~A" stdout)
+               (assert-true (not (search "WARNING:" stdout))
+                            "Diagnostics leaked into JSON stdout: ~A" stdout)
+               (assert-true (search "WARNING: --insecure" stderr)
+                            "Expected insecure warning on stderr, got: ~A" stderr)))
         (progn
           (funcall stop-server)
           (if old-home

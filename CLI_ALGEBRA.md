@@ -2048,6 +2048,26 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None.
 
+### Iteration 65: Machine Output Is Not a Diagnostic Channel
+
+- Commands deleted:
+  - The accidental stdout prefix where `--insecure` registry warnings appeared
+    before `deps search --json` results.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Diagnostics are process observations on stderr, not members of the JSON
+    result value.
+- Commands that survived and why:
+  - `deps search --json` survives as exactly one JSON value on stdout.
+  - `--insecure` survives only as an explicit trust-bypass flag with a stderr
+    warning.
+- Laws/protocol invariants added:
+  - Machine stdout is parseable as exactly one encoded result value.
+  - Trust warnings go to stderr and never prefix JSON stdout.
+- Remaining discomfort:
+  - None.
+
 ## Constructors
 
 Terminal constructors:

@@ -45,6 +45,7 @@
   (:export #:*verbose*
            #:log-info
            #:log-verbose
+           #:log-warning
            #:log-error))
 
 (defpackage #:clpm.io.json

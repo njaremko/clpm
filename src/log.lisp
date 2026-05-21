@@ -18,6 +18,10 @@
   (when *verbose*
     (format t "~&  ~?~%" format-string args)))
 
+(defun log-warning (format-string &rest args)
+  "Print a warning message to *error-output*."
+  (format *error-output* "~&WARNING: ~?~%" format-string args))
+
 (defun log-error (format-string &rest args)
   "Print an error message to *error-output*."
   (format *error-output* "~&error: ~?~%" format-string args))
