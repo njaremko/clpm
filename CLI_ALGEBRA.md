@@ -1252,9 +1252,33 @@ but output kind and machine-readable shape are semantic.
   - `repl call` excludes continuation reply frames that have meaning only
     inside an active request.
 - Remaining discomfort:
-  - `methods` still observes the wire protocol registry, not the smaller
-    shell-callable subset. That may deserve a later exposure field instead of
-    another ad hoc filter.
+  - Discovery still needs a separate pass to stop advertising protocol-only
+    methods. Iteration 33 closes that leak.
+
+### Iteration 33: Close REPL Discovery Over Protocol Internals
+
+- Commands deleted:
+  - `repl call methods` no longer reports `shutdown` or `query-response`.
+  - `repl call help --method shutdown`.
+  - `repl call help --method query-response`.
+- Commands merged:
+  - Shutdown documentation belongs to `help repl daemon`.
+  - Query-response remains documented only as protocol behavior in lower-level
+    bridge docs and tests, not as a public `call` method.
+- Commands derived instead of exposed:
+  - Raw protocol clients can still use `shutdown` and `query-response` where
+    required. They are registered for dispatch/schema validation, but not
+    projected through public discovery.
+- Commands that survived and why:
+  - `help --method eval` survives because `eval` is the internal RPC behind
+    the public `repl eval` constructor and agents need its parameter schema.
+- Laws/protocol invariants added:
+  - `methods = discoverable(methodRegistry)`, not `methodRegistry`.
+  - `method in protocolInternal => help(method) = Failed unknown-method`.
+- Remaining discomfort:
+  - `eval` is schema-visible but not directly callable through `repl call`.
+    This is intentional while `repl eval` remains the single evaluation
+    constructor.
 
 ## Constructors
 

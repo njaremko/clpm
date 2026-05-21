@@ -59,9 +59,9 @@
       (ignore-errors (delete-file sock)))))
 
 ;;; ----------------------------------------------------------------------------
-;;; `methods' lists every RPC the dispatcher recognizes.
+;;; `methods' lists the public discovery surface, not protocol-only frames.
 
-(format t "Test: `methods' RPC enumerates the registry~%")
+(format t "Test: `methods' RPC enumerates public methods~%")
 (with-daemon
   (lambda (sock)
     (let* ((resp (clpm.repl:send-request sock "methods"))
@@ -72,10 +72,13 @@
                          collect (lookup m "name"))))
         (dolist (expected '("ping" "current-package" "set-package" "eval"
                             "interrupt" "reset" "describe"
-                            "list-redefinitions" "shutdown"
-                            "methods" "help" "query-response"))
+                            "list-redefinitions" "methods" "help"))
           (assert-true (member expected names :test #'string=)
-                       "missing method ~A; got ~S" expected names))))))
+                       "missing method ~A; got ~S" expected names))
+        (dolist (internal '("shutdown" "query-response"))
+          (assert-true (not (member internal names :test #'string=))
+                       "protocol-only method ~A leaked into methods: ~S"
+                       internal names))))))
 (format t "  enumeration OK~%")
 
 ;;; ----------------------------------------------------------------------------
@@ -99,6 +102,16 @@
         (assert-true (find "form" params
                            :test (lambda (s p) (string= s (lookup p "name"))))
                      "no `form' param in eval spec: ~S" params)))))
+(with-daemon
+  (lambda (sock)
+    (dolist (internal '("shutdown" "query-response"))
+      (let* ((resp (clpm.repl:send-request
+                    sock "help"
+                    :params (list :object (list (cons "method" internal)))))
+             (err (lookup resp "error")))
+        (assert-true err "help for ~A should fail: ~S" internal resp)
+        (assert-true (search "unknown method" (lookup err "message"))
+                     "wrong help error for ~A: ~S" internal err)))))
 (format t "  help spec OK~%")
 
 ;;; ----------------------------------------------------------------------------

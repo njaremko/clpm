@@ -2088,6 +2088,14 @@ NIL means the handler has already emitted its terminal frame."
 (defun %lookup-method (name)
   (cdr (assoc name +method-registry+ :test #'string=)))
 
+(defparameter +protocol-internal-methods+ '("shutdown" "query-response")
+  "Registered wire messages that are not part of method discovery.")
+
+(defun %discoverable-method-spec-p (spec)
+  (not (member (method-spec-name spec)
+               +protocol-internal-methods+
+               :test #'string=)))
+
 (defun %method-spec-as-json (spec)
   (%json-object
    "name" (method-spec-name spec)
@@ -2895,10 +2903,10 @@ version (because the file was just LOADed)."
 (%register-method
  (make-method-spec
   :name "methods"
-  :summary "List every registered RPC with its parameter schema and one-line summary."
+  :summary "List public RPC methods with their parameter schemas and summaries."
   :doc "Returns `{methods: [<method-spec>, ...]}'. The list is generated
-from the same registry the dispatcher consults, so it cannot drift from
-the implementation."
+from the same registry the dispatcher consults, minus protocol-internal
+continuation and lifecycle frames."
   :params nil
   :handler
   (lambda (server params id ctx)
@@ -2909,7 +2917,9 @@ the implementation."
       "methods"
       (%json-array
        (loop for entry in +method-registry+
-             collect (%method-spec-as-json (cdr entry)))))))))
+             for spec = (cdr entry)
+             when (%discoverable-method-spec-p spec)
+               collect (%method-spec-as-json spec))))))))
 
 (%register-method
  (make-method-spec
@@ -2927,7 +2937,8 @@ the implementation."
       (cond
         ((not (stringp name))
          (%error-response id "protocol-error" "missing `method' param"))
-        ((null spec)
+        ((or (null spec)
+             (not (%discoverable-method-spec-p spec)))
          (%error-response id "protocol-error"
                           (format nil "unknown method: ~A" name)))
         (t
@@ -2935,8 +2946,9 @@ the implementation."
           (%json-object "method" (%method-spec-as-json spec)))))))))
 
 ;;; query-response is a continuation message routed inline by
-;;; %route-query-response, not dispatched as a normal RPC. We still register
-;;; it here so `methods' / `help' can document the protocol.
+;;; %route-query-response, not dispatched as a normal RPC. It remains
+;;; registered for schema validation but is intentionally absent from
+;;; public `methods' / `help' discovery.
 (%register-method
  (make-method-spec
   :name "query-response"
