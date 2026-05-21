@@ -31,11 +31,34 @@
     (merge-pathnames (format nil "artifacts/sha256/~A" artifact-sha256)
                      (clpm.platform:store-dir))))
 
+(defun %artifact-lock-path (artifact-sha256)
+  (let ((artifact-sha256 (%sha256-hex-digest artifact-sha256 "artifact identity")))
+    (merge-pathnames (format nil "artifacts/sha256/.~A.lock" artifact-sha256)
+                     (clpm.platform:store-dir))))
+
+(defun %artifact-temp-path (artifact-sha256)
+  (let ((artifact-sha256 (%sha256-hex-digest artifact-sha256 "artifact identity")))
+    (merge-pathnames (format nil "artifacts/sha256/.~A.~D.tmp"
+                             artifact-sha256
+                             (random (expt 2 32)))
+                     (clpm.platform:store-dir))))
+
 (defun build-path (build-id)
   "Return path for build with given ID."
   (let ((build-id (%sha256-hex-digest build-id "build identity")))
     (merge-pathnames (format nil "builds/~A/" build-id)
                      (clpm.platform:store-dir))))
+
+(defun %source-lock-path (tree-sha256)
+  (let ((tree-sha256 (%sha256-hex-digest tree-sha256 "source tree identity")))
+    (merge-pathnames (format nil "sources/sha256/.~A.lock" tree-sha256)
+                     (clpm.platform:store-dir))))
+
+(defun %source-src-path (source-root)
+  (merge-pathnames "src/" source-root))
+
+(defun %source-meta-path (source-root)
+  (merge-pathnames "meta.sxp" source-root))
 
 (defun tmp-path ()
   "Return temp directory path."
@@ -44,13 +67,37 @@
 
 ;;; Existence checks
 
+(defun %artifact-complete-p (artifact-sha256 path)
+  (and (uiop:file-exists-p path)
+       (handler-case
+           (string= (%sha256-hex-digest artifact-sha256 "artifact identity")
+                    (clpm.crypto.sha256:bytes-to-hex
+                     (clpm.crypto.sha256:sha256-file path)))
+         (error () nil))))
+
+(defun %source-meta-complete-p (tree-sha256 meta-path)
+  (and (uiop:file-exists-p meta-path)
+       (handler-case
+           (let ((form (clpm.io.sexp:read-safe-sexp-from-file meta-path)))
+             (and (consp form)
+                  (eq (car form) :source)
+                  (string= tree-sha256 (getf (cdr form) :tree-sha256))))
+         (error () nil))))
+
+(defun %source-complete-p (tree-sha256 path)
+  (let ((tree-sha256 (%sha256-hex-digest tree-sha256 "source tree identity")))
+    (and (uiop:directory-exists-p path)
+         (uiop:directory-exists-p (%source-src-path path))
+         (%source-meta-complete-p tree-sha256 (%source-meta-path path)))))
+
 (defun source-exists-p (tree-sha256)
   "Check if source tree exists in store."
-  (uiop:directory-exists-p (source-path tree-sha256)))
+  (%source-complete-p tree-sha256 (source-path tree-sha256)))
 
 (defun artifact-exists-p (artifact-sha256)
   "Check if artifact exists in store."
-  (uiop:file-exists-p (artifact-path artifact-sha256)))
+  (let ((artifact-sha256 (%sha256-hex-digest artifact-sha256 "artifact identity")))
+    (%artifact-complete-p artifact-sha256 (artifact-path artifact-sha256))))
 
 (defun build-exists-p (build-id)
   "Check if build exists in store."
@@ -59,6 +106,51 @@
          (uiop:file-exists-p (merge-pathnames "manifest.sxp" path)))))
 
 ;;; Store artifacts
+
+(defun %rename-file-exact (tmp-path dest-path)
+  #+(and sbcl unix)
+  (sb-posix:rename (namestring tmp-path) (namestring dest-path))
+  #-(and sbcl unix)
+  (error 'clpm.errors:clpm-user-error
+         :message "Atomic store publication requires SBCL on Unix")
+  dest-path)
+
+(defun %store-artifact-bytes (bytes artifact-sha256 dest-path)
+  (let ((tmp-path (%artifact-temp-path artifact-sha256)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist tmp-path)
+           (with-open-file (s tmp-path :direction :output
+                                       :element-type '(unsigned-byte 8)
+                                       :if-exists :supersede)
+             (write-sequence bytes s))
+           (%rename-file-exact tmp-path dest-path))
+      (when (uiop:file-exists-p tmp-path)
+        (ignore-errors (delete-file tmp-path))))))
+
+(defun %store-artifact-file (path artifact-sha256 dest-path)
+  (let ((tmp-path (%artifact-temp-path artifact-sha256)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist tmp-path)
+           (uiop:copy-file path tmp-path)
+           (let ((copied-hash
+                   (clpm.crypto.sha256:bytes-to-hex
+                    (clpm.crypto.sha256:sha256-file tmp-path))))
+             (unless (string-equal copied-hash artifact-sha256)
+               (error 'clpm.errors:clpm-hash-mismatch-error
+                      :expected artifact-sha256
+                      :actual copied-hash
+                      :artifact "artifact copy")))
+           (%rename-file-exact tmp-path dest-path))
+      (when (uiop:file-exists-p tmp-path)
+        (ignore-errors (delete-file tmp-path))))))
+
+(defun %ensure-artifact (artifact-sha256 dest-path writer)
+  (clpm.platform:with-file-lock ((%artifact-lock-path artifact-sha256))
+    (unless (%artifact-complete-p artifact-sha256 dest-path)
+      (funcall writer))
+    dest-path))
 
 (defun store-artifact (data expected-sha256)
   "Store artifact data in content-addressed store.
@@ -77,14 +169,11 @@ Signals error if hash doesn't match."
                 :expected expected-sha256
                 :actual actual-hash
                 :artifact "artifact"))
-       ;; Store if not already present
-       (unless (uiop:file-exists-p dest-path)
-         (ensure-directories-exist dest-path)
-         (with-open-file (s dest-path :direction :output
-                                      :element-type '(unsigned-byte 8)
-                                      :if-exists :supersede)
-           (write-sequence source-bytes s)))
-       dest-path))
+       (%ensure-artifact
+        actual-hash
+        dest-path
+        (lambda ()
+          (%store-artifact-bytes source-bytes actual-hash dest-path)))))
     ((or pathname string)
      (let* ((actual-hash (clpm.crypto.sha256:bytes-to-hex
                           (clpm.crypto.sha256:sha256-file data)))
@@ -95,11 +184,25 @@ Signals error if hash doesn't match."
                 :expected expected-sha256
                 :actual actual-hash
                 :artifact "artifact"))
-       ;; Store if not already present (streaming copy).
-       (unless (uiop:file-exists-p dest-path)
-         (ensure-directories-exist dest-path)
-         (uiop:copy-file data dest-path))
-       dest-path))))
+       (%ensure-artifact
+        actual-hash
+        dest-path
+        (lambda ()
+          (%store-artifact-file data actual-hash dest-path)))))))
+
+(defun %write-source-meta (dest-path tree-sha256)
+  (let ((meta-path (%source-meta-path dest-path))
+        (tmp-path (merge-pathnames "meta.sxp.tmp" dest-path)))
+    (unwind-protect
+         (progn
+           (clpm.io.sexp:write-canonical-sexp-to-file
+            `(:source
+              :tree-sha256 ,tree-sha256
+              :stored-at ,(get-universal-time))
+            tmp-path)
+           (%rename-file-exact tmp-path meta-path))
+      (when (uiop:file-exists-p tmp-path)
+        (ignore-errors (delete-file tmp-path))))))
 
 (defun store-source (source-dir expected-tree-sha256)
   "Store source directory in content-addressed store.
@@ -116,19 +219,20 @@ Signals error if tree hash doesn't match."
                :expected expected-tree-sha256
                :actual actual-hash
                :artifact "source tree")))
-    ;; Store if not already present
-    (unless (uiop:directory-exists-p dest-path)
-      (ensure-directories-exist dest-path)
-      (let ((src-dir (merge-pathnames "src/" dest-path)))
-        (ensure-directories-exist src-dir)
-        (copy-directory-tree source-dir src-dir)
-        ;; Write metadata
-        (with-open-file (s (merge-pathnames "meta.sxp" dest-path)
-                           :direction :output
-                           :if-exists :supersede)
-          (format s "(source~%  :tree-sha256 ~S~%  :stored-at ~S)~%"
-                  actual-hash
-                  (get-universal-time)))))
+    (clpm.platform:with-file-lock ((%source-lock-path actual-hash))
+      (unless (%source-complete-p actual-hash dest-path)
+        (when (uiop:directory-exists-p dest-path)
+          (uiop:delete-directory-tree dest-path :validate t))
+        (handler-case
+            (let ((src-dir (%source-src-path dest-path)))
+              (ensure-directories-exist src-dir)
+              (copy-directory-tree source-dir src-dir)
+              (%write-source-meta dest-path actual-hash))
+          (error (c)
+            (when (uiop:directory-exists-p dest-path)
+              (ignore-errors
+               (uiop:delete-directory-tree dest-path :validate t)))
+            (error c)))))
     (values dest-path actual-hash)))
 
 (defun copy-directory-tree (source dest)
@@ -148,9 +252,9 @@ Signals error if tree hash doesn't match."
 (defun get-source-path (tree-sha256)
   "Get path to source directory for given tree hash.
 Returns nil if not in store."
-  (let ((path (merge-pathnames "src/" (source-path tree-sha256))))
-    (when (uiop:directory-exists-p path)
-      path)))
+  (let ((root (source-path tree-sha256)))
+    (when (%source-complete-p tree-sha256 root)
+      (%source-src-path root))))
 
 (defun get-artifact-path (artifact-sha256)
   "Get path to artifact file for given hash.

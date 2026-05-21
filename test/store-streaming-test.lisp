@@ -34,6 +34,14 @@
     (clpm.errors:clpm-user-error ()
       t)))
 
+(defun assert-error (thunk fmt &rest args)
+  (handler-case
+      (progn
+        (funcall thunk)
+        (apply #'fail fmt args))
+    (error ()
+      t)))
+
 (format t "Testing streaming store-artifact...~%")
 
 (clpm.store:with-temp-dir (tmp)
@@ -98,5 +106,96 @@
                                    :if-does-not-exist :ignore)))))
 
 (format t "  Store identity validation PASSED~%")
+
+(format t "Testing artifact entries are verified before reuse...~%")
+
+(clpm.store:with-temp-dir (tmp)
+  (let* ((source (merge-pathnames "artifact.bin" tmp))
+         (correct "correct artifact contents")
+         (wrong "wrong artifact contents"))
+    (with-open-file (s source :direction :output
+                             :if-exists :supersede
+                             :external-format :utf-8)
+      (write-string correct s))
+    (let* ((sha256 (clpm.crypto.sha256:bytes-to-hex
+                    (clpm.crypto.sha256:sha256-file source)))
+           (dest (clpm.store::artifact-path sha256)))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist dest)
+             (with-open-file (s dest :direction :output
+                                :if-exists :supersede
+                                :external-format :utf-8)
+               (write-string wrong s))
+             (assert-true (not (clpm.store:artifact-exists-p sha256))
+                          "Corrupt artifact entry was treated as existing")
+             (let ((stored (clpm.store:store-artifact source sha256)))
+               (assert-true (equal stored dest)
+                            "Stored artifact path mismatch")
+               (assert-true (clpm.store:artifact-exists-p sha256)
+                            "Repaired artifact entry was not complete")))
+        (when (uiop:file-exists-p dest)
+          (ignore-errors (delete-file dest)))))))
+
+(format t "  Artifact entry verification PASSED~%")
+
+(format t "Testing store-source rejects partial source entries...~%")
+
+(clpm.store:with-temp-dir (tmp)
+  (let* ((source (merge-pathnames "source/" tmp))
+         (system-file (merge-pathnames "partial.asd" source)))
+    (ensure-directories-exist system-file)
+    (with-open-file (s system-file :direction :output
+                                   :if-exists :supersede
+                                   :external-format :utf-8)
+      (write-string "(asdf:defsystem #:partial)" s))
+    (let* ((tree-sha256 (clpm.crypto.sha256:bytes-to-hex
+                         (clpm.crypto.sha256:sha256-tree source)))
+           (dest (clpm.store::source-path tree-sha256))
+           (original-copy (symbol-function 'clpm.store::copy-directory-tree)))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'clpm.store::copy-directory-tree)
+                   (lambda (_source _dest)
+                     (declare (ignore _source _dest))
+                     (error "simulated copy failure")))
+             (assert-error
+              (lambda ()
+                (clpm.store:store-source source tree-sha256))
+              "Expected simulated source copy failure")
+             (assert-true (not (clpm.store:source-exists-p tree-sha256))
+                          "Partial source entry was treated as existing")
+             (setf (symbol-function 'clpm.store::copy-directory-tree)
+                   original-copy)
+             (multiple-value-bind (stored actual)
+                 (clpm.store:store-source source tree-sha256)
+               (assert-true (string= actual tree-sha256)
+                            "Stored source hash mismatch")
+               (assert-true (equal (uiop:ensure-directory-pathname stored)
+                                   (uiop:ensure-directory-pathname dest))
+                            "Stored source path mismatch")
+               (assert-true (clpm.store:source-exists-p tree-sha256)
+                            "Repaired source entry was not complete")
+               (assert-true (uiop:file-exists-p
+                             (merge-pathnames "src/partial.asd" stored))
+                            "Repaired source entry missing copied source"))
+             (with-open-file (s (merge-pathnames "meta.sxp" dest)
+                                :direction :output
+                                :if-exists :supersede
+                                :external-format :utf-8)
+               (write-string "(:source :tree-sha256 \"0000000000000000000000000000000000000000000000000000000000000000\")"
+                             s))
+             (assert-true (not (clpm.store:source-exists-p tree-sha256))
+                          "Wrong source metadata was treated as complete")
+             (clpm.store:store-source source tree-sha256)
+             (assert-true (clpm.store:source-exists-p tree-sha256)
+                          "Source entry with wrong metadata was not repaired"))
+        (setf (symbol-function 'clpm.store::copy-directory-tree)
+              original-copy)
+        (when (uiop:directory-exists-p dest)
+          (ignore-errors
+           (uiop:delete-directory-tree dest :validate t)))))))
+
+(format t "  Partial source entry rejection PASSED~%")
 (format t "~%Store streaming tests PASSED!~%")
 (sb-ext:exit :code 0)

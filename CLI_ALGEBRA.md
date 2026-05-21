@@ -2094,6 +2094,36 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None.
 
+### Iteration 67: Store Existence Means Complete Digest Object
+
+- Commands deleted:
+  - The accidental store state where a path at a digest location counted as a
+    stored object even when the copy failed halfway or the artifact bytes did
+    not hash to the path's digest.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Store paths are implementation indexes derived from digest identities; the
+    path alone is not an observation.
+- Commands that survived and why:
+  - `store gc` and dependency realization survive unchanged; they now observe
+    only complete store entries.
+  - `source-exists-p`, `artifact-exists-p`, `get-source-path`, and
+    `get-artifact-path` survive as implementation observations over completed
+    digest objects.
+- Laws/protocol invariants added:
+  - `artifactExists sha` requires an artifact file whose SHA-256 is `sha`.
+  - `sourceExists sha` requires a `src/` directory and a `meta.sxp` completion
+    marker whose `:tree-sha256` is `sha`.
+  - `storeSource` writes source metadata last and repairs partial or
+    mismatched entries before returning success.
+  - `storeArtifact` publishes through a temporary file under the digest lock
+    and repairs corrupt entries before returning success.
+- Remaining discomfort:
+  - Source tree metadata proves completion, not post-publication immutability
+    against external mutation. The next attack is excluding VCS control
+    directories such as `.jj` from source identity and publication.
+
 ## Constructors
 
 Terminal constructors:
@@ -2535,6 +2565,9 @@ Failed-counterexample regressions:
 - A live unrelated PID in `.clpm/repl.pid` without `.clpm/repl.sock` is stale
   lifecycle metadata; status and stop clean the selected project's files and
   leave the unrelated process alive.
+- Corrupt artifact files, source directories without completion metadata, and
+  source entries whose metadata names a different digest are not valid store
+  objects; storing the correct bytes/tree repairs them.
 - `clpm --insecure help` is rejected; `--insecure` is not an inert
   pre-command global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes
