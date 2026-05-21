@@ -5,24 +5,24 @@ description: Prefer and operate CLPM's persistent project-scoped Lisp daemon for
 
 # clpm-repl-bridge
 
-Use `clpm repl-bridge` whenever you need to understand or change a live Common
+Use `clpm repl` whenever you need to understand or change a live Common
 Lisp system. It gives agents a persistent project-scoped SBCL image with loaded
 systems, package state, workers, debugger sessions, inspector sessions, watches,
 traces, and a self-describing RPC registry.
 
-Prefer it over fresh `sbcl`, `clpm repl`, or one-off scripts for bug
-investigation, local redefinition, source navigation, frame inspection, timing,
-tracing, and recovery through restarts. Fresh processes are still right for
-clean end-to-end tests, dependency graph changes, packaging, and CI gates.
+Prefer it over fresh `sbcl` or one-off scripts for bug investigation, local
+redefinition, source navigation, frame inspection, timing, tracing, and
+recovery through restarts. Fresh processes are still right for clean
+end-to-end tests, dependency graph changes, packaging, and CI gates.
 
 ## Public CLI
 
 The CLI has three semantic commands:
 
 ```sh
-clpm repl-bridge daemon [--detach] [--no-load] [--status] [--stop]
-clpm repl-bridge eval FORM [--package P] [--worker W] [--debug] ...
-clpm repl-bridge call METHOD [--params-json JSON] [--PARAM VALUE]...
+clpm repl daemon [--detach] [--no-load] [--status] [--stop]
+clpm repl eval FORM [--package P] [--worker W] [--debug] ...
+clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
 
 - `daemon` owns lifecycle. Use `--detach` to start in the background,
@@ -39,22 +39,22 @@ clpm repl-bridge call METHOD [--params-json JSON] [--PARAM VALUE]...
 Discover the real daemon schema instead of trusting memory:
 
 ```sh
-clpm repl-bridge call methods
-clpm repl-bridge call help --method eval
-clpm repl-bridge call help --method debug-eval-in-frame
+clpm repl call methods
+clpm help repl eval
+clpm repl call help --method gc
 ```
 
 ## First Moves
 
 ```sh
-clpm repl-bridge daemon --detach
-clpm repl-bridge daemon --status
-clpm repl-bridge eval '(+ 1 2)'
-clpm repl-bridge call ping
+clpm repl daemon --detach
+clpm repl daemon --status
+clpm repl eval '(+ 1 2)'
+clpm repl call ping
 ```
 
 After changing `clpm.project`, `clpm.lock`, registry configuration, or
-dependency sources, run `clpm install` and restart the daemon so ASDF registry
+dependency sources, run `clpm deps sync` and restart the daemon so ASDF registry
 state and loaded systems match the new dependency graph.
 
 ## Debug-First Workflow
@@ -63,23 +63,23 @@ Use `eval --debug` before trying to "reason around" a Common Lisp condition.
 First observe the stop, frame numbers, restarts, and source locations:
 
 ```sh
-clpm repl-bridge eval '(error "boom")' --debug
+clpm repl eval '(error "boom")' --debug
 ```
 
 Then rerun with a selected restart or frame eval:
 
 ```sh
-clpm repl-bridge eval '(restart-case (/ 1 0) (use-value (v) v))' \
+clpm repl eval '(restart-case (/ 1 0) (use-value (v) v))' \
   --debug --restart USE-VALUE --arg 0
 
-clpm repl-bridge eval '(let ((x 7)) (error "x=~A" x))' \
+clpm repl eval '(let ((x 7)) (error "x=~A" x))' \
   --debug --frame 0 --frame-eval '(* x 2)'
 ```
 
 Use declarative recovery when you already know the condition and restart:
 
 ```sh
-clpm repl-bridge eval '(restart-case (/ 1 0) (use-value (v) v))' \
+clpm repl eval '(restart-case (/ 1 0) (use-value (v) v))' \
   --handler division-by-zero=use-value:999
 ```
 
@@ -87,13 +87,13 @@ Keep a debugger stop only when you need multiple follow-up calls against the
 same live stack:
 
 ```sh
-clpm repl-bridge eval '(restart-case (error "need value") (use-value (v) v))' \
+clpm repl eval '(restart-case (error "need value") (use-value (v) v))' \
   --debug --keep
-clpm repl-bridge call list-debug-sessions
-clpm repl-bridge call debug-eval-in-frame --session 1 --frame 4 --form 'x'
-clpm repl-bridge call debug-invoke-restart --session 1 --name USE-VALUE \
+clpm repl call list-debug-sessions
+clpm repl call debug-eval-in-frame --session 1 --frame 4 --form 'x'
+clpm repl call debug-invoke-restart --session 1 --name USE-VALUE \
   --args '["42"]'
-clpm repl-bridge call debug-abort --session 1
+clpm repl call debug-abort --session 1
 ```
 
 If more than one debug session is active, always pass `--session N`.
@@ -102,43 +102,43 @@ If more than one debug session is active, always pass `--session N`.
 
 ```sh
 # image and package state
-clpm repl-bridge call current-package
-clpm repl-bridge call set-package --name CL-USER
-clpm repl-bridge call image-info
-clpm repl-bridge call loaded-systems
-clpm repl-bridge call list-packages
-clpm repl-bridge call gc --full true
+clpm repl call current-package
+clpm repl call set-package --name CL-USER
+clpm repl call image-info
+clpm repl call loaded-systems
+clpm repl call list-packages
+clpm repl call gc --full true
 
 # workers and recovery
-clpm repl-bridge call list-workers
-clpm repl-bridge call interrupt --worker default
-clpm repl-bridge call reset --worker default
-clpm repl-bridge call kill-worker --name scratch
+clpm repl call list-workers
+clpm repl call interrupt --worker default
+clpm repl call reset --worker default
+clpm repl call kill-worker --name scratch
 
 # source and introspection
-clpm repl-bridge call compile-file --path src/foo.lisp
-clpm repl-bridge call load-file --path src/foo.lisp
-clpm repl-bridge call find-definition --symbol my-function
-clpm repl-bridge call xref --symbol my-function --direction calls
-clpm repl-bridge call macroexpand --form '(my-macro x)' --full true
-clpm repl-bridge call documentation --symbol my-function --type function
-clpm repl-bridge call arglist --symbol my-function
+clpm repl call compile-file --path src/foo.lisp
+clpm repl call load-file --path src/foo.lisp
+clpm repl call find-definition --symbol my-function
+clpm repl call xref --symbol my-function --direction calls
+clpm repl call macroexpand --form '(my-macro x)' --full true
+clpm repl call documentation --symbol my-function --type function
+clpm repl call arglist --symbol my-function
 
 # inspector sessions
-clpm repl-bridge call inspect --form '(list :a :b :c)'
-clpm repl-bridge call inspect-into --session ins-1 --i 0
-clpm repl-bridge call inspect-eval --session ins-1 --form '(length *)'
-clpm repl-bridge call inspect-close --session ins-1
+clpm repl call inspect --form '(list :a :b :c)'
+clpm repl call inspect-into --session ins-1 --i 0
+clpm repl call inspect-eval --session ins-1 --form '(length *)'
+clpm repl call inspect-close --session ins-1
 
 # watch, trace, profile
-clpm repl-bridge call watch --dir src --glob '*.lisp' --auto-revert true
-clpm repl-bridge call list-watches
-clpm repl-bridge call unwatch --id 1
-clpm repl-bridge call trace --symbols '["my-fn"]'
-clpm repl-bridge call untrace --symbols '["my-fn"]'
-clpm repl-bridge call list-traced
-clpm repl-bridge call time-eval --form '(some-fn)'
-clpm repl-bridge call profile-eval --form '(big-fn)' --top 10
+clpm repl call watch --dir src --glob '*.lisp' --auto-revert true
+clpm repl call list-watches
+clpm repl call unwatch --id 1
+clpm repl call trace --symbols '["my-fn"]'
+clpm repl call untrace --symbols '["my-fn"]'
+clpm repl call list-traced
+clpm repl call time-eval --form '(some-fn)'
+clpm repl call profile-eval --form '(big-fn)' --top 10
 ```
 
 `call` emits raw JSON responses and streams raw event frames, which is the right
@@ -149,22 +149,23 @@ shape for agents and other tools.
 Before handing off, make the daemon state boring:
 
 ```sh
-clpm repl-bridge call list-debug-sessions
-clpm repl-bridge call debug-abort --session 1
-clpm repl-bridge call list-watches
-clpm repl-bridge call unwatch --id 1
-clpm repl-bridge call list-traced
-clpm repl-bridge call untrace
-clpm repl-bridge call list-workers
-clpm repl-bridge call kill-worker --name scratch
-clpm repl-bridge call list-redefinitions
-clpm repl-bridge daemon --status
+clpm repl call list-debug-sessions
+clpm repl call debug-abort --session 1
+clpm repl call list-watches
+clpm repl call unwatch --id 1
+clpm repl call list-traced
+clpm repl call untrace
+clpm repl call list-workers
+clpm repl call kill-worker --name scratch
+clpm repl call list-redefinitions
+clpm repl daemon --status
 ```
 
 Non-empty `list-redefinitions` means the image contains definitions that may
 still need to be written to source. Use `daemon --stop` for normal shutdown and
 let `daemon --status` or `daemon --stop` clean stale files; do not delete
-`.clpm/repl-bridge.*` by hand unless the CLI cannot recover and the user agrees.
+`.clpm/repl.sock`, `.clpm/repl.pid`, or `.clpm/repl.log` by hand unless the CLI
+cannot recover and the user agrees.
 
 ## Limits
 

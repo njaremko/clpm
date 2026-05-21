@@ -2860,6 +2860,10 @@ Failed-counterexample regressions:
   `repl eval --worker`.
 - Root help, README, and generated `clpm skill` output state that scoped
   options must appear before the command token.
+- BRIDGE.md and `.claude/skills/clpm-repl-bridge.md` describe the surviving
+  `clpm repl` surface, human-default eval output, and `--json` machine output;
+  they do not advertise `clpm repl-bridge`, `--pretty`, raw-JSON defaults, or
+  hidden eval method help.
 - `clpm help repl eval` lists accepted debug selectors including
   `--break-on` and `--timeout-ms`.
 - `clpm repl eval FORM --debug` rejects incomplete or conflicting

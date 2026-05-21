@@ -146,7 +146,10 @@ clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 and `daemon --stop` shuts it down. The daemon reads requests from the socket,
 never from its own stdin, and logs to `.clpm/repl.log`.
 
-`eval` is a one-shot client. Connects to the socket, sends one `eval` request, prints the response as JSON to stdout (or as a rendered summary with `--pretty`), exits with status 0 on success, non-zero on error. Auto-starts the daemon if `--no-autostart` isn't passed.
+`eval` is a one-shot client. Connects to the socket, sends one `eval`
+request, prints human output by default, exits with status 0 on success, and
+exits non-zero on error. Pass `--json' for the raw JSON line. Auto-starts the
+daemon if `--no-autostart` isn't passed.
 
 `call` is the generic one-shot RPC constructor for introspection and
 intercession: `clpm repl call interrupt`, `call ping`,
@@ -284,13 +287,18 @@ Help text (`print-command-help :repl`) with per-subcommand drilling per #017 of 
 
 ### #007 — `[x]` `P0` `repl` `cli` `eval` end-to-end with auto-start
 
-`clpm repl eval FORM` connects to `.clpm/repl.sock`. If absent or connect fails, spawn `daemon --detach`, wait up to 5 s for the socket to appear, retry. Then send the request, print the JSON result line, exit with status 0 on success, non-zero on `error`-shaped responses.
-
-Pretty mode: `--pretty` reformats the response as a human-readable summary (`value=...; output:\n...; error: ...`). Default mode is raw JSON, ideal for LLM consumption and `jq` piping.
+`clpm repl eval FORM` connects to `.clpm/repl.sock`. If absent or connect
+fails, spawn `daemon --detach`, wait up to 5 s for the socket to appear, retry.
+Then send the request, print a human summary by default, and exit with status 0
+on success or non-zero on `error`-shaped responses. Pass `--json' for the raw
+JSON line when a tool needs machine-readable output.
 
 **Acceptance criteria**
 
-- `clpm repl eval '(+ 1 2)'` in a fresh project prints a JSON response with `value: "3"`. Daemon was auto-started.
+- `clpm repl eval '(+ 1 2)'` in a fresh project prints a human response with
+  `=> 3`. Daemon was auto-started.
+- `clpm repl eval '(+ 1 2)' --json` prints a JSON response with
+  `value: "3"`.
 - Second `eval` in the same project reuses the daemon (no new pidfile, same pid).
 - `--no-autostart` errors with "no daemon running" if the socket is absent.
 - Exit code is 0 for success, 1 for `error`-shaped response, 2 for transport failure (no daemon when autostart is disabled).
