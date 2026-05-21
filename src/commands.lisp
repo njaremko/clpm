@@ -1732,6 +1732,11 @@ giving the loopback port and a 32-hex shared token)."
   "Return the canonical project identity used by the repl daemon protocol."
   (namestring (uiop:ensure-directory-pathname (truename project-root))))
 
+(defun %bridge-project-fingerprint (project-root)
+  "Return the opaque project identity proof expected in daemon ping output."
+  (clpm.crypto.sha256:bytes-to-hex
+   (clpm.crypto.sha256:sha256 (%bridge-project-root-id project-root))))
+
 (defun %bridge-params-with-project-root (params project-root)
   "Return PARAMS with the daemon project identity attached."
   (let ((project-id (%bridge-project-root-id project-root)))
@@ -2193,32 +2198,55 @@ own renderer so this fallback is rarely hit."
 
 (defun %bridge-send-or-autostart (sock pid project-root method
                                   &key params (autostart t) on-event)
-  "Send a request, auto-starting the daemon on connect failure."
+  "Send a request to PROJECT-ROOT's daemon, auto-starting on absence.
+
+Before dispatching METHOD, prove that the endpoint is the selected project's
+daemon by requiring an authenticated ping with the expected project
+fingerprint. A token-valid but unscoped or foreign endpoint is treated as
+absent for this project."
   (let ((wire-params (%bridge-params-with-project-root params project-root)))
     (labels ((send-once (timeout)
                (clpm.repl:send-request sock method
                                        :params wire-params
                                        :connect-timeout timeout
                                        :on-event on-event))
+             (probe-endpoint ()
+               (multiple-value-bind (state _ping _obj)
+                   (%bridge-ping-daemon sock project-root)
+                 (declare (ignore _ping _obj))
+                 state))
              (no-daemon ()
                (log-error "No daemon running for this project. Start one with `clpm repl daemon --detach`.")
                nil)
+             (verified-send ()
+               (let ((resp (send-once 5)))
+                 (cond
+                   ((%bridge-project-root-error-p resp)
+                    (%bridge-clean-lifecycle-files sock pid)
+                    (if autostart
+                        (start-and-send)
+                        (no-daemon)))
+                   (t resp))))
              (start-and-send ()
                (let ((rc (%bridge-daemon-start (list "--detach"))))
-                 (declare (ignore rc))
-                 (send-once 5))))
-      (let ((resp (send-once 1)))
+                 (if (zerop rc)
+                     (if (eq (probe-endpoint) :running)
+                         (verified-send)
+                         :no-daemon)
+                     :no-daemon))))
+      (let ((state (probe-endpoint)))
         (cond
-          ((eq resp :no-daemon)
-           (if autostart
-               (start-and-send)
-               (no-daemon)))
-          ((%bridge-project-root-error-p resp)
+          ((eq state :running)
+           (verified-send))
+          ((eq state :project-mismatch)
            (%bridge-clean-lifecycle-files sock pid)
            (if autostart
                (start-and-send)
                (no-daemon)))
-          (t resp))))))
+          (t
+           (if autostart
+               (start-and-send)
+               (no-daemon))))))))
 
 (defun %bridge-split-on (char string)
   "Split STRING on every occurrence of CHAR (a character). Empty fields
@@ -2378,16 +2406,9 @@ server-owned session for later `call debug-* ...' requests."
         (debug
          (let ((*bridge-cli-json* (or *bridge-cli-json* json)))
            (labels ((foreign-project-p (ping)
-                      (let ((result (%bridge-obj ping)))
-                        (or (%bridge-project-root-error-p ping)
-                            (and result
-                                 (let ((reported (%bridge-field
-                                                  result "project_root")))
-                                   (and (stringp reported)
-                                        (not (string=
-                                              reported
-                                              (%bridge-project-root-id
-                                               project-root)))))))))
+                      (or (%bridge-project-root-error-p ping)
+                          (not (%bridge-ping-project-match-p
+                                ping project-root))))
                     (open-checked ()
                       (let ((conn (clpm.repl:open-connection
                                    sock :connect-timeout 5)))
@@ -2470,6 +2491,13 @@ server-owned session for later `call debug-* ...' requests."
          (or (search "project_root" message :test #'char-equal)
              (search "token" message :test #'char-equal)))))
 
+(defun %bridge-ping-project-match-p (ping project-root)
+  "Does PING prove that the endpoint owns PROJECT-ROOT?"
+  (let* ((result (%bridge-obj ping))
+         (reported (and result (%bridge-field result "project_id"))))
+    (and (stringp reported)
+         (string= reported (%bridge-project-fingerprint project-root)))))
+
 (defun %bridge-token-path (endpoint)
   (concatenate 'string endpoint ".token"))
 
@@ -2485,8 +2513,10 @@ server-owned session for later `call debug-* ...' requests."
                                                nil project-root)
                                       :connect-timeout 1)))
     (cond
-      ((%bridge-obj ping)
+      ((%bridge-ping-project-match-p ping project-root)
        (values :running ping (%bridge-obj ping)))
+      ((%bridge-obj ping)
+       (values :project-mismatch ping nil))
       ((%bridge-project-root-error-p ping)
        (values :project-mismatch ping nil))
       ((and (eq ping :no-daemon)

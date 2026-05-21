@@ -97,6 +97,13 @@
     (ignore-errors (delete-file socket))
     (sb-posix:symlink target (namestring socket))))
 
+(defun point-token-at (project-root target-socket)
+  (let ((token (merge-pathnames ".clpm/repl.sock.token" project-root)))
+    (ensure-directories-exist token)
+    (ignore-errors (delete-file token))
+    (sb-posix:symlink (concatenate 'string target-socket ".token")
+                      (namestring token))))
+
 (defun raw-unix-request (socket-path request-json)
   (let ((sock (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
     (unwind-protect
@@ -309,6 +316,53 @@
               do (sleep 0.1))
         (when (and thread-a (sb-thread:thread-alive-p thread-a))
           (ignore-errors (sb-thread:terminate-thread thread-a)))))))
+
+(sb-posix:chdir (namestring *repo-root*))
+
+(with-short-temp-dir (tmp)
+  (let* ((project (merge-pathnames "project/" tmp))
+         (raw-sock (namestring (merge-pathnames "raw-repl.sock" tmp)))
+         (thread (sb-thread:make-thread
+                  (lambda ()
+                    (handler-case
+                        (clpm.repl:start-server :socket-path raw-sock)
+                      (error (c)
+                        (format *error-output* "raw daemon: ~A~%" c))))
+                  :name "test-raw-repl-no-project")))
+    (write-minimal-project project "project")
+    (unwind-protect
+         (progn
+           (wait-for-socket raw-sock)
+           (clpm.repl:send-request
+            raw-sock "eval"
+            :params (list :object
+                          (list (cons "form"
+                                      "(defparameter *foreign-repl-token* :foreign)"))))
+           (write-pidfile project (sb-posix:getpid))
+           (point-socket-at project raw-sock)
+           (point-token-at project raw-sock)
+           (format t "Test: project repl call rejects unscoped daemon endpoint~%")
+           (multiple-value-bind (rc stdout stderr)
+               (run-cli-captured '("repl" "call" "list-workers")
+                                 :directory project)
+             (assert-eql 2 rc)
+             (assert-not-contains stdout "default")
+             (assert-contains stderr "No daemon"))
+           (multiple-value-bind (rc stdout stderr)
+               (run-cli-captured
+                '("repl" "eval" "(boundp '*foreign-repl-token*)"
+                  "--no-autostart")
+                :directory project)
+             (assert-eql 2 rc)
+             (assert-not-contains stdout "=> T")
+             (assert-contains stderr "No daemon")))
+      (handler-case (clpm.repl:send-request raw-sock "shutdown")
+        (error () nil))
+      (loop for i from 0 below 30
+            while (sb-thread:thread-alive-p thread)
+            do (sleep 0.05))
+      (when (sb-thread:thread-alive-p thread)
+        (ignore-errors (sb-thread:terminate-thread thread))))))
 
 (sb-posix:chdir (namestring *repo-root*))
 

@@ -2331,6 +2331,41 @@ but output kind and machine-readable shape are semantic.
     slice closes the counterexamples found in the registry trust/operator
     surface and the top-level nullary observation.
 
+### Iteration 75: REPL Liveness Requires Project Proof
+
+- Commands deleted:
+  - The accidental endpoint state where a token-valid daemon without a project
+    identity could satisfy `repl call` for the selected project.
+- Commands merged:
+  - Daemon liveness and project ownership are one observation. "The socket is
+    reachable" is not a useful public fact unless the daemon proves it denotes
+    the selected project image.
+- Commands derived instead of exposed:
+  - `project_id` is an opaque fingerprint of the daemon's canonical project
+    root. It is a proof field for clients and lifecycle code, not a user
+    selector and not a replacement for `project_root`.
+- Commands that survived and why:
+  - `repl call METHOD` survives as a non-autostarting RPC constructor, but it
+    can only dispatch after the endpoint proves the selected project identity.
+  - `repl eval FORM` survives as the autostarting constructor; an unscoped or
+    foreign endpoint is cleaned before autostart.
+  - `repl call ping` survives as the daemon health observation and now carries
+    the opaque identity proof without exposing the project path.
+- Laws/protocol invariants added:
+  - `daemonExists(root)` requires live lifecycle metadata, endpoint-token
+    authentication, accepted `project_root`, and
+    `ping.project_id = sha256(canonical(root))`.
+  - `tokenMatches(endpoint) && missing ping.project_id => endpoint = Absent`
+    for a project-scoped CLI command.
+  - `replCall root method` preflights the endpoint with the same project proof
+    as `daemon --status` and `repl eval`; it cannot observe workers,
+    debugger sessions, packages, or eval history from an unscoped daemon.
+  - `ping.project_id` is not `project_root`: public output may expose an opaque
+    digest proof, but not the selected project path.
+- Remaining discomfort:
+  - Existing raw in-process test daemons still exist for protocol tests. They
+    remain outside the project CLI algebra unless they carry the project proof.
+
 ## Constructors
 
 Terminal constructors:
@@ -2769,6 +2804,9 @@ Failed-counterexample regressions:
 - A stale REPL endpoint in project B that points at project A is treated as
   absent for B; `repl call`, `repl eval --no-autostart`, and debug eval do
   not surface project A's daemon.
+- A token-valid REPL endpoint with no project identity proof is treated as
+  absent for a project-scoped `repl call`; it cannot expose raw daemon workers
+  to the selected project.
 - `clpm repl daemon` and manifest repl autostart authenticate a live endpoint
   and prove selected-project acceptance before deciding that daemon already
   exists.

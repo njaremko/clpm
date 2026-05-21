@@ -763,6 +763,18 @@ the public protocol."
      (%find-package-loose name))
     (t nil)))
 
+(defun %project-root-fingerprint (project-root)
+  "Return an opaque stable fingerprint for PROJECT-ROOT, or NIL.
+
+The protocol uses this as a same-project proof without exposing the
+canonical project path in public ping output."
+  (when (and (stringp project-root) (plusp (length project-root)))
+    (clpm.crypto.sha256:bytes-to-hex
+     (clpm.crypto.sha256:sha256 project-root))))
+
+(defun %server-project-fingerprint (server)
+  (%project-root-fingerprint (and server (server-project-root server))))
+
 (defparameter +max-log-bytes+ (* 10 1024 1024)
   "Rotate `.clpm/repl.log' once it grows past this many bytes.")
 
@@ -2455,16 +2467,22 @@ event log."
     (declare (ignore params ctx))
     (%success-response
      id
-     (%json-object
-      "pid" (clpm.repl.compat:getpid)
-      "uptime_ms" (* 1000 (- (get-universal-time)
-                             (server-started-at server)))
-      "lisp" (format nil "~A ~A"
-                     (lisp-implementation-type)
-                     (lisp-implementation-version))
-      "eval_count" (server-eval-count server)
-      "method_counts" (%method-counts-json server)
-      "recent_error_count" (server-recent-error-count server))))))
+     (apply #'%json-object
+            (append
+             (list
+              "pid" (clpm.repl.compat:getpid)
+              "uptime_ms" (* 1000 (- (get-universal-time)
+                                      (server-started-at server)))
+              "lisp" (format nil "~A ~A"
+                              (lisp-implementation-type)
+                              (lisp-implementation-version)))
+             (let ((project-id (%server-project-fingerprint server)))
+               (when project-id
+                 (list "project_id" project-id)))
+             (list
+              "eval_count" (server-eval-count server)
+              "method_counts" (%method-counts-json server)
+              "recent_error_count" (server-recent-error-count server))))))))
 
 (%register-method
  (make-method-spec

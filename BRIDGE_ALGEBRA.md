@@ -320,6 +320,10 @@ Consequences:
 - Project root is part of the REPL carrier identity. Two different project
   roots denote different daemon images even when their forms, packages,
   worker names, or symbol names coincide.
+- A reachable transport endpoint denotes a project daemon only when its
+  liveness observation carries an opaque identity proof for that project.
+  Token authentication without a project proof is transport reachability, not
+  REPL ownership.
 - A cache hit, thread reuse, method-handler arrangement, or fresh-id counter
   value may not alter semantic observations except through alpha-renamed
   capabilities.
@@ -485,6 +489,13 @@ forall projectA projectB actionsA actionsB.
   => run actionsA (repl projectA) cannot create, mutate, or observe
      bindings, workers, debugger sessions, inspectors, watches, traces, or
      history in repl projectB
+```
+
+```haskell
+Law: "project-daemon-liveness-requires-proof"
+forall project endpoint.
+  tokenValid endpoint && missing (ping endpoint).projectId
+  => endpoint does not denote repl project
 ```
 
 ```haskell
