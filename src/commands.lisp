@@ -794,6 +794,8 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
           (let ((arg (nth i args)))
             (cond
               ((string= arg "--limit")
+               (when limit
+                 (usage-error "Duplicate option: --limit"))
                (incf i)
                (when (>= i (length args))
                  (usage-error "Missing value for --limit"))
@@ -2320,11 +2322,17 @@ server-owned session for later `call debug-* ...' requests."
       (let ((arg (pop args)))
         (cond
           ((string= arg "--package")
+           (when package
+             (log-error "Duplicate option: --package")
+             (return-from %bridge-eval 1))
            (setf package (pop args))
            (unless (stringp package)
              (log-error "Missing value for --package")
              (return-from %bridge-eval 1)))
           ((string= arg "--worker")
+           (when worker
+             (log-error "Duplicate option: --worker")
+             (return-from %bridge-eval 1))
            (setf worker (pop args))
            (unless (stringp worker)
              (log-error "Missing value for --worker")
@@ -4019,6 +4027,8 @@ Default: remove the project's .clpm/ activation cache.
                  (let ((a (pop rest)))
                    (cond
                      ((string= a "--dir")
+                      (when dir
+                        (usage-error "Duplicate option: --dir"))
                       (setf dir (pop rest))
                       (unless (and (stringp dir) (plusp (length dir)))
                         (usage-error "Missing value for --dir")))
@@ -4190,73 +4200,97 @@ Default: remove the project's .clpm/ activation cache.
                          (clpm.project:registry-ref-trust r)))))
        0)
 
-	      ((string= subcommand "add")
-	       (let ((name nil)
-	             (url nil)
-	             (trust nil)
-	             (kind :git))
-	         (loop while rest do
-	           (let ((arg (pop rest)))
-	             (cond
-	               ((string= arg "--name") (setf name (pop rest)))
-	               ((string= arg "--url") (setf url (pop rest)))
-	               ((string= arg "--trust") (setf trust (pop rest)))
-	               ((string= arg "--quicklisp") (setf kind :quicklisp))
-	               (t
-	                (log-error "Unknown option: ~A" arg)
-	                (return-from cmd-registry 1)))))
+      ((string= subcommand "add")
+       (let ((name nil)
+             (url nil)
+             (trust nil)
+             (kind :git)
+             (name-seen nil)
+             (url-seen nil)
+             (trust-seen nil)
+             (quicklisp-seen nil))
+         (loop while rest do
+           (let ((arg (pop rest)))
+             (cond
+               ((string= arg "--name")
+                (when name-seen
+                  (log-error "Duplicate option: --name")
+                  (return-from cmd-registry 1))
+                (setf name-seen t
+                      name (pop rest)))
+               ((string= arg "--url")
+                (when url-seen
+                  (log-error "Duplicate option: --url")
+                  (return-from cmd-registry 1))
+                (setf url-seen t
+                      url (pop rest)))
+               ((string= arg "--trust")
+                (when trust-seen
+                  (log-error "Duplicate option: --trust")
+                  (return-from cmd-registry 1))
+                (setf trust-seen t
+                      trust (pop rest)))
+               ((string= arg "--quicklisp")
+                (when quicklisp-seen
+                  (log-error "Duplicate option: --quicklisp")
+                  (return-from cmd-registry 1))
+                (setf quicklisp-seen t
+                      kind :quicklisp))
+               (t
+                (log-error "Unknown option: ~A" arg)
+                (return-from cmd-registry 1)))))
 
-	         (when (eq kind :quicklisp)
-	           (unless name
-	             (setf name "quicklisp"))
-	           (unless url
-	             (setf url "https://beta.quicklisp.org/dist/quicklisp.txt"))
-	           (unless trust
-	             (setf trust "tofu")))
+         (when (eq kind :quicklisp)
+           (unless name
+             (setf name "quicklisp"))
+           (unless url
+             (setf url "https://beta.quicklisp.org/dist/quicklisp.txt"))
+           (unless trust
+             (setf trust "tofu")))
 
-	         (case kind
-	           (:git
-	            (unless (and name url trust)
-	              (log-error "Missing required options: --name, --url, --trust")
-	              (return-from cmd-registry 1)))
-	           (:quicklisp
-	            (unless (and name url trust)
-	              (log-error "Missing required options: --name, --url")
-	              (return-from cmd-registry 1)))
-	           (t
-	            (log-error "Unknown registry kind: ~S" kind)
-	            (return-from cmd-registry 1)))
-	         (unless (%valid-registry-trust-p kind trust)
-	           (log-error "Invalid trust for ~A registry ~A: ~A (expected ~A)"
-	                      (string-downcase (symbol-name kind))
-	                      (or name "<unnamed>")
-	                      trust
-	                      (%registry-trust-description kind))
-	           (return-from cmd-registry 1))
+         (case kind
+           (:git
+            (unless (and name url trust)
+              (log-error "Missing required options: --name, --url, --trust")
+              (return-from cmd-registry 1)))
+           (:quicklisp
+            (unless (and name url trust)
+              (log-error "Missing required options: --name, --url")
+              (return-from cmd-registry 1)))
+           (t
+            (log-error "Unknown registry kind: ~S" kind)
+            (return-from cmd-registry 1)))
+         (unless (%valid-registry-trust-p kind trust)
+           (log-error "Invalid trust for ~A registry ~A: ~A (expected ~A)"
+                      (string-downcase (symbol-name kind))
+                      (or name "<unnamed>")
+                      trust
+                      (%registry-trust-description kind))
+           (return-from cmd-registry 1))
 
-	         (clpm.config:update-config
-	          (lambda (cfg)
-	            (let* ((regs (clpm.config:config-registries cfg))
-	                   (existing (find name regs
-	                                   :key #'clpm.project:registry-ref-name
-	                                   :test #'string=)))
-	              (if existing
-	                  (progn
-	                    (setf (clpm.project:registry-ref-kind existing) kind
-	                          (clpm.project:registry-ref-url existing) url
-	                          (clpm.project:registry-ref-trust existing) trust)
-	                    (log-info "Updated registry: ~A" name))
-	                  (progn
-	                    (push (clpm.project::make-registry-ref
-	                           :kind kind
-	                           :name name
-	                           :url url
-	                           :trust trust)
-	                          regs)
-	                    (setf (clpm.config:config-registries cfg) regs)
-	                    (log-info "Added registry: ~A" name)))
-	              cfg)))
-	         0))
+         (clpm.config:update-config
+          (lambda (cfg)
+            (let* ((regs (clpm.config:config-registries cfg))
+                   (existing (find name regs
+                                   :key #'clpm.project:registry-ref-name
+                                   :test #'string=)))
+              (if existing
+                  (progn
+                    (setf (clpm.project:registry-ref-kind existing) kind
+                          (clpm.project:registry-ref-url existing) url
+                          (clpm.project:registry-ref-trust existing) trust)
+                    (log-info "Updated registry: ~A" name))
+                  (progn
+                    (push (clpm.project::make-registry-ref
+                           :kind kind
+                           :name name
+                           :url url
+                           :trust trust)
+                          regs)
+                    (setf (clpm.config:config-registries cfg) regs)
+                    (log-info "Added registry: ~A" name)))
+              cfg)))
+         0))
 
       ((string= subcommand "init")
        (let ((dir nil)
@@ -5447,10 +5481,14 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
         (let ((arg (pop args)))
           (cond
             ((string= arg "--out")
+             (when output
+               (usage-error "Duplicate option: --out"))
              (setf output (pop args))
              (unless (nonempty-string output)
                (usage-error "Missing value for ~A" arg)))
             ((string= arg "--format")
+             (when format
+               (usage-error "Duplicate option: --format"))
              (setf format (pop args))
              (unless (nonempty-string format)
                (usage-error "Missing value for --format")))

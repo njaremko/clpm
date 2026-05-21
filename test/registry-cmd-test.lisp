@@ -48,6 +48,21 @@
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
            (multiple-value-bind (code stdout stderr)
                (run-cli-captured '("registry" "add"
+                                   "--name" "first"
+                                   "--name" "second"
+                                   "--url" "https://example.invalid/main.git"
+                                   "--trust" "ed25519:test"))
+             (declare (ignore stdout))
+             (assert-true (= code 1)
+                          "Expected duplicate registry add --name to fail")
+             (assert-true (search "Duplicate option: --name" stderr
+                                  :test #'char-equal)
+                          "Expected duplicate --name error, got:~%~A" stderr)
+             (let ((cfg (clpm.config:read-config)))
+               (assert-true (null (clpm.config:config-registries cfg))
+                            "Duplicate registry name should not mutate config")))
+           (multiple-value-bind (code stdout stderr)
+               (run-cli-captured '("registry" "add"
                                    "--name" "bad"
                                    "--url" "https://example.invalid/bad.git"
                                    "--trust" "none"))

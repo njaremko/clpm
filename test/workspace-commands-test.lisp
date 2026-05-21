@@ -71,6 +71,14 @@
          (progn
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
 
+           (multiple-value-bind (code stdout stderr)
+               (run-cli-captured (list "project" "workspace" "list"
+                                       "--dir" (namestring ws-root)
+                                       "--dir" (namestring app-root)))
+             (declare (ignore stdout))
+             (assert-eql 1 code)
+             (assert-contains stderr "Duplicate option: --dir"))
+
            (uiop:with-current-directory (ws-root)
              (assert-eql 0 (clpm:run-cli '("project" "new" "dep" "--lib")))
              (assert-eql 0 (clpm:run-cli '("project" "new" "app" "--bin"))))

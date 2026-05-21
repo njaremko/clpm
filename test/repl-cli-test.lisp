@@ -75,6 +75,17 @@
       (write-string ";; empty for test~%" s))
 
     (uiop:with-current-directory (proj)
+      (format t "Test: eval singleton options reject duplicates~%")
+      (multiple-value-bind (rc stdout stderr)
+          (run-cli-captured '("repl" "eval" "(+ 1 2)"
+                              "--worker" "one"
+                              "--worker" "two"
+                              "--no-autostart"))
+        (declare (ignore stdout))
+        (assert-eql 1 rc)
+        (assert-contains stderr "Duplicate option: --worker"))
+      (format t "  singleton option rejection OK~%")
+
       (format t "Test: daemon (no --detach) blocks; we run it in a thread~%")
       (let ((srv (sb-thread:make-thread
                   (lambda ()

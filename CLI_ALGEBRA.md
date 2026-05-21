@@ -2622,6 +2622,15 @@ Law: "leaf argv validation before state lookup"
   -- these failures are independent of project discovery, registry state,
   -- lockfile state, activation state, and manifest contents.
 
+Law: "leaf singleton options are values"
+  duplicate opt in {
+    ["deps", "search", query, "--limit"],
+    ["deps", "sbom", "--format"],
+    ["project", "workspace", "list", "--dir"],
+    ["registry", "add", "--name"],
+    ["repl", "eval", form, "--worker"]
+  } => denote (parse argv) ctx world = FailedUsage
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -2845,6 +2854,10 @@ Failed-counterexample regressions:
 - `clpm deps remove`, `clpm deps remove --bogus`, and `clpm run script`
   reject with command-local usage/option errors before any project discovery
   error can mask the malformed argv.
+- Duplicate singleton leaf options reject instead of silently overwriting:
+  `deps search --limit`, `deps sbom --format`,
+  `project workspace list --dir`, `registry add --name`, and
+  `repl eval --worker`.
 - Root help, README, and generated `clpm skill` output state that scoped
   options must appear before the command token.
 - `clpm help repl eval` lists accepted debug selectors including

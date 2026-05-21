@@ -32,6 +32,13 @@
   (unless x
     (apply #'fail fmt args)))
 
+(defun assert-contains (haystack needle)
+  (assert-true (and (stringp haystack)
+                    (search needle haystack :test #'char-equal))
+               "Expected output to contain ~S, got:~%~A"
+               needle
+               haystack))
+
 (defun write-text (path text)
   (ensure-directories-exist path)
   (with-open-file (s path :direction :output
@@ -252,6 +259,15 @@ Returns (values base-url stop-fn)."
                              (:quicklisp :url ,(format nil "~Adist/quicklisp.txt" base-url)
                               :name "quicklisp-test" :trust nil))
                 :defaults nil))
+
+             ;; Singleton options are values, not accumulators.
+             (multiple-value-bind (code stdout stderr)
+                 (run-cli-captured '("deps" "search" "ql-"
+                                     "--limit" "1"
+                                     "--limit" "2"))
+               (declare (ignore stdout))
+               (assert-eql 1 code)
+               (assert-contains stderr "Duplicate option: --limit"))
 
              ;; Search output should be deterministic and include both registries.
              (multiple-value-bind (code stdout stderr)

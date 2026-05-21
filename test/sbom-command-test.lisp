@@ -62,6 +62,15 @@
          (progn
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
 
+           (uiop:with-current-directory (tmp)
+             (multiple-value-bind (code stdout stderr)
+                 (run-cli-captured '("deps" "sbom"
+                                     "--format" "cyclonedx-json"
+                                     "--format" "spdx-json"))
+               (declare (ignore stdout))
+               (assert-eql 1 code)
+               (assert-contains stderr "Duplicate option: --format")))
+
            ;; Create a minimal local git registry in CLPM_HOME/registries/main/.
            (let* ((reg-root (merge-pathnames "registries/main/" clpm-home))
                   (snapshot (merge-pathnames "registry/snapshot.sxp" reg-root))
