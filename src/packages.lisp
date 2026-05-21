@@ -386,17 +386,7 @@
 (defpackage #:clpm.commands
   (:use #:cl #:clpm.log #:clpm.project #:clpm.registry #:clpm.solver #:clpm.fetch
         #:clpm.build #:clpm.store #:clpm.platform #:clpm.config #:clpm.errors)
-  (:export #:*verbose*
-           #:log-info
-           #:log-verbose
-           #:log-error
-           #:*offline*
-           #:*insecure*
-           #:*jobs*
-           #:*lisp*
-           #:*target-package*
-           #:*with-optional*
-           #:cmd-project
+  (:export #:cmd-project
            #:cmd-deps
            #:cmd-store
            #:cmd-registry
@@ -409,8 +399,4 @@
 (defpackage #:clpm
   (:use #:cl #:clpm.commands #:clpm.errors)
   (:export #:main
-           #:run-cli
-           #:*verbose*
-           #:*offline*
-           #:*insecure*
-           #:*jobs*))
+           #:run-cli))

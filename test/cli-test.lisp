@@ -30,6 +30,16 @@
   (unless (string= expected actual)
     (fail "Assertion failed: expected ~S, got ~S" expected actual)))
 
+(defun assert-equal (expected actual)
+  (unless (equal expected actual)
+    (fail "Assertion failed: expected ~S, got ~S" expected actual)))
+
+(defun external-symbol-names (package-name)
+  (let ((names '()))
+    (do-external-symbols (sym (find-package package-name))
+      (push (symbol-name sym) names))
+    (sort names #'string<)))
+
 (defun run-cli-captured (args)
   (let ((out (make-string-output-stream))
         (err (make-string-output-stream)))
@@ -60,6 +70,12 @@
 (format t "  Unknown command PASSED~%")
 
 (format t "Testing public command handler exports...~%")
+(assert-equal '("CMD-DEPS" "CMD-DOCTOR" "CMD-HELP" "CMD-PROJECT"
+                "CMD-REGISTRY" "CMD-REPL" "CMD-RUN" "CMD-SKILL"
+                "CMD-STORE")
+              (external-symbol-names "CLPM.COMMANDS"))
+(assert-equal '("MAIN" "RUN-CLI")
+              (external-symbol-names "CLPM"))
 (dolist (name '("CMD-PROJECT" "CMD-DEPS" "CMD-REGISTRY" "CMD-RUN"
                 "CMD-STORE" "CMD-REPL" "CMD-SKILL" "CMD-HELP"
                 "CMD-DOCTOR"))

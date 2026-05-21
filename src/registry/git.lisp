@@ -199,8 +199,8 @@ Modifies REGISTRY in place."
                 :file snapshot-path))
        ;; Verify signature if trust key is set
        (when (registry-trust-key registry)
-         (if (and (boundp 'clpm.commands:*insecure*)
-                  (symbol-value 'clpm.commands:*insecure*))
+         (if (and (boundp 'clpm.commands::*insecure*)
+                  (symbol-value 'clpm.commands::*insecure*))
              (progn
                (setf (registry-snapshot-sig-sha256 registry) nil)
                (log-info
@@ -329,8 +329,8 @@ Signals CLPM-SIGNATURE-ERROR if invalid."
        (unless (uiop:file-exists-p release-path)
          (return-from get-release-metadata nil))
        (when (registry-trust-key registry)
-         (unless (and (boundp 'clpm.commands:*insecure*)
-                      (symbol-value 'clpm.commands:*insecure*))
+         (unless (and (boundp 'clpm.commands::*insecure*)
+                      (symbol-value 'clpm.commands::*insecure*))
            (verify-release-metadata-signature local-path package-name version
                                               (registry-trust-key registry))))
        (let ((form (clpm.io.sexp:read-release-metadata release-path)))

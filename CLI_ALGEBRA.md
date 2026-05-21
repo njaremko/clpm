@@ -971,6 +971,38 @@ but output kind and machine-readable shape are semantic.
     registry observation. They survive under `-p` only because selected member
     registries are now part of their denotation.
 
+### Iteration 22: Attack Package Export Leakage
+
+- Commands deleted:
+  - Public exports of option specials (`*offline*`, `*insecure*`, `*jobs*`,
+    `*lisp*`, `*target-package*`, `*with-optional*`) from `clpm.commands`.
+  - Public exports of logging helpers from `clpm.commands`.
+  - Public exports of root option specials from `clpm`.
+- Commands merged:
+  - Mutable invocation state is now internal binding state, not a public CLI
+    algebra constructor.
+- Commands derived instead of exposed:
+  - Lower layers that need the current invocation state refer to the internal
+    binding explicitly; callers do not get a second API for mutating command
+    meaning.
+- Commands that survived and why:
+  - `clpm.commands:cmd-project`, `cmd-deps`, `cmd-registry`, `cmd-run`,
+    `cmd-store`, `cmd-repl`, `cmd-skill`, `cmd-help`, and `cmd-doctor`
+    survive as the resource dispatcher/observation handler boundary.
+  - `clpm:main` and `clpm:run-cli` survive as the executable entry and
+    in-process test/embedding entry.
+- Laws/protocol invariants added:
+  - Exact export schema:
+    `externalSymbols("CLPM.COMMANDS") = {cmd-project, cmd-deps,
+    cmd-registry, cmd-run, cmd-store, cmd-repl, cmd-skill, cmd-help,
+    cmd-doctor}`.
+  - Exact root package schema:
+    `externalSymbols("CLPM") = {main, run-cli}`.
+- Remaining discomfort:
+  - Internal specials still carry invocation context dynamically. That is
+    acceptable inside the implementation boundary, but it should not become
+    public API again.
+
 ## Constructors
 
 Terminal constructors:
@@ -1262,6 +1294,9 @@ Law: "package/export schema"
   exportedCommandHandlers(clpm.commands)
   = { cmd-project, cmd-deps, cmd-registry, cmd-run, cmd-store, cmd-repl,
       cmd-skill, cmd-help, cmd-doctor }
+
+Law: "root/export schema"
+  exportedSymbols(clpm) = { main, run-cli }
 ```
 
 Rejected instances:

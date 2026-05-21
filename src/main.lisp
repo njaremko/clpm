@@ -400,21 +400,21 @@ This function must not call `sb-ext:exit` so it can be used from tests."
           (validate-option-scope command command-args options)
           (apply-options options)
         ;; Bind command module variables
-        (let ((clpm.commands:*verbose* *verbose*)
-              (clpm.commands:*offline* *offline*)
-              (clpm.commands:*insecure* *insecure*)
-              (clpm.commands:*jobs* *jobs*)
-              (clpm.commands:*lisp*
+        (let ((clpm.commands::*verbose* *verbose*)
+              (clpm.commands::*offline* *offline*)
+              (clpm.commands::*insecure* *insecure*)
+              (clpm.commands::*jobs* *jobs*)
+              (clpm.commands::*lisp*
                 (loop for opt in options
                       when (and (consp opt) (eq (car opt) :lisp))
                         do (return (cdr opt))
                       finally (return nil)))
-              (clpm.commands:*target-package*
+              (clpm.commands::*target-package*
                 (loop for opt in options
                       when (and (consp opt) (eq (car opt) :package))
                         do (return (cdr opt))
                       finally (return nil)))
-              (clpm.commands:*with-optional*
+              (clpm.commands::*with-optional*
                 (let ((vals (loop for opt in options
                                   when (and (consp opt) (eq (car opt) :with-optional))
                                     collect (cdr opt))))
