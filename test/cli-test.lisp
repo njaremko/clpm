@@ -115,6 +115,18 @@
       (fail "Expected inert --offline to be rejected, got: ~A" err))))
 (format t "  Offline option scope PASSED~%")
 
+(format t "Testing jobs option scope...~%")
+(dolist (args '(("--jobs" "4" "help")
+                ("-j" "4" "repl")
+                ("--jobs" "2" "deps" "sync" "--to" "lock")))
+  (multiple-value-bind (code _out err)
+      (run-cli-captured args)
+    (declare (ignore _out))
+    (assert-eql 1 code)
+    (unless (search "--jobs only applies" err)
+      (fail "Expected inert --jobs to be rejected, got: ~A" err))))
+(format t "  Jobs option scope PASSED~%")
+
 (format t "Testing run-program :timeout keyword...~%")
 (multiple-value-bind (output error-output exit-code)
     (clpm.platform:run-program (list "sh" "-c" "exit 0") :timeout 1)

@@ -293,6 +293,8 @@ Bare `clpm [options]` denotes `clpm [options] help`.
 `repl eval FORM`.
 `--offline` is accepted only where artifact/cache state can affect the
 operation: `deps sync` beyond the lock stage and `deps sbom`.
+`--jobs` is accepted only where dependency realization can perform parallel
+source fetch or build work: `deps sync` beyond the lock stage.
 
 ## Current Surface Classification
 
@@ -524,6 +526,33 @@ operation: `deps sync` beyond the lock stage and `deps sbom`.
   - `--jobs`, `--lisp`, optional-dependency flags, and fetch tuning are still
     accepted as broad parser options. Each needs the same denotational audit.
 
+### Iteration 9: Attack Parallelism Scope
+
+- Commands deleted:
+  - No commands. The cut removes inert `--jobs` placements.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - `--jobs` denotes the parallelism budget for dependency realization. It is
+    not a process-wide scheduler option and not a REPL/run/store/registry
+    option.
+- Commands that survived and why:
+  - `--jobs N deps sync`, `--jobs N deps sync --to source`,
+    `--jobs N deps sync --to build`, and
+    `--jobs N deps sync --to active` survive because source fetching and
+    dependency building consume the job budget.
+  - `--jobs N deps sync --to lock` is rejected because lockfile resolution is
+    not currently parallelized through this option.
+  - `--jobs N help` and `repl -j N` are rejected as inert parser decoration.
+- Laws/protocol invariants added:
+  - Parallelism is realization-scoped:
+    `parse ["--jobs", n, "help"] = Error`.
+  - Lock-only resolution has no parallel job budget:
+    `parse ["--jobs", n, "deps", "sync", "--to", "lock"] = Error`.
+- Remaining discomfort:
+  - `--lisp`, optional-dependency flags, and fetch tuning are still accepted
+    as broad parser options. Each needs the same denotational audit.
+
 ### Iteration 7: Attack Eval-as-Raw-RPC Alias
 
 - Commands deleted:
@@ -712,6 +741,12 @@ Law: "offline is cache-scoped"
   parse ["--offline", "deps", "sync", "--to", "source"] =
     Right (deps (sync Source) with OfflineCacheOnly)
 
+Law: "jobs are realization-scoped"
+  parse ["--jobs", n, "help"] = Error
+  parse ["--jobs", n, "deps", "sync", "--to", "lock"] = Error
+  parse ["--jobs", n, "deps", "sync", "--to", "build"] =
+    Right (deps (sync Build) with ParallelJobs n)
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -892,6 +927,9 @@ Failed-counterexample regressions:
 - `clpm --offline help`, `clpm repl --offline`, and
   `clpm --offline deps sync --to lock` are rejected; `--offline` is only for
   artifact/cache operations.
+- `clpm --jobs 4 help`, `clpm -j 4 repl`, and
+  `clpm --jobs 2 deps sync --to lock` are rejected; `--jobs` is only for
+  parallel dependency realization.
 
 Reference versus optimized equivalence:
 

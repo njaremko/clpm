@@ -258,7 +258,7 @@ explicit resource operations.
 ### Global Options
 
 - `-v, --verbose` - Verbose output
-- `-j, --jobs N` - Parallel build jobs
+- `-j, --jobs N` - Parallel dependency realization jobs
 - `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for `run/test/repl`
 - `-p, --package <member>` - Workspace member to target from workspace root
 - `--offline` - Use cached artifacts for `deps sync` realization and `deps sbom`

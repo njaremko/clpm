@@ -35,7 +35,7 @@ Commands:
 
 Options:
   -v, --verbose    Verbose output
-  -j, --jobs N     Parallel jobs (default: 1)
+  -j, --jobs N     Parallel jobs for dependency realization (default: 1)
   --lisp <impl>    Lisp implementation (sbcl|ccl|ecl)
   -p, --package M  Workspace member to target
   --offline        Use cached artifacts for dependency realization/SBOM
@@ -230,6 +230,16 @@ Returns (values command command-args options)."
          (t nil))))
     (t nil)))
 
+(defun parallel-realization-command-p (command command-args)
+  "Return true when COMMAND may use the parallel dependency job budget."
+  (case command
+    (:deps
+     (let ((subcommand (first command-args)))
+       (and (stringp subcommand)
+            (string= subcommand "sync")
+            (not (sync-lock-stage-p command-args)))))
+    (t nil)))
+
 (defun validate-option-scope (command command-args options)
   "Reject global options that have no denotation for COMMAND."
   (when (and (option-present-p :insecure options)
@@ -241,7 +251,12 @@ Returns (values command command-args options)."
              (not (artifact-cache-command-p command command-args)))
     (clpm.errors:signal-error
      'clpm.errors:clpm-user-error
-     "--offline only applies to artifact/cache commands: clpm deps sync --to source|build|active, clpm deps sync, or clpm deps sbom")))
+     "--offline only applies to artifact/cache commands: clpm deps sync --to source|build|active, clpm deps sync, or clpm deps sbom"))
+  (when (and (option-present-p :jobs options)
+             (not (parallel-realization-command-p command command-args)))
+    (clpm.errors:signal-error
+     'clpm.errors:clpm-user-error
+     "--jobs only applies to parallel dependency realization: clpm deps sync --to source|build|active or clpm deps sync")))
 
 (defun apply-options (options)
   "Apply parsed options to global variables."
