@@ -49,6 +49,19 @@
                 (get-output-stream-string out)
                 (get-output-stream-string err))))))
 
+(defun tar-list (tarball)
+  (let ((tar (clpm.platform:find-tar)))
+    (unless tar
+      (fail "tar not found"))
+    (multiple-value-bind (out err code)
+        (clpm.platform:run-program
+         (list tar "-tzf" (namestring tarball))
+         :output :string
+         :error-output :string)
+      (unless (zerop code)
+        (fail "tar list failed: ~A" err))
+      out)))
+
 (format t "Testing `clpm registry publish`...~%")
 
 (clpm.store:with-temp-dir (tmp)
@@ -91,6 +104,8 @@
            (assert-eql
             0
             (clpm:run-cli (list "project" "new" project-name "--lib" "--dir" (namestring tmp))))
+           (write-text (merge-pathnames ".jj/secret" project-root)
+                       "private-control-data")
 
            ;; Publishing writes registry artifacts only; VCS commits belong to
            ;; the caller.
@@ -130,7 +145,11 @@
            (let ((tarball (merge-pathnames "mylib-0.1.0.tar.gz" tarballs-dir)))
              (assert-true (uiop:file-exists-p tarball)
                           "Expected tarball to exist: ~A"
-                          (namestring tarball)))
+                          (namestring tarball))
+             (let ((contents (tar-list tarball)))
+               (assert-true (not (search ".jj/" contents :test #'char=))
+                            "Publish tarball leaked .jj metadata:~%~A"
+                            contents)))
 
            (let* ((release-dir (merge-pathnames "registry/packages/mylib/0.1.0/" reg-root))
                   (release (merge-pathnames "release.sxp" release-dir))

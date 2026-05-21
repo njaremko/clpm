@@ -2121,8 +2121,33 @@ but output kind and machine-readable shape are semantic.
     and repairs corrupt entries before returning success.
 - Remaining discomfort:
   - Source tree metadata proves completion, not post-publication immutability
-    against external mutation. The next attack is excluding VCS control
-    directories such as `.jj` from source identity and publication.
+    against external mutation. Local VCS control directory leakage is closed
+    by Iteration 68.
+
+### Iteration 68: Source Identity Excludes Local VCS Control State
+
+- Commands deleted:
+  - The accidental source identity where `.jj` control metadata affected tree
+    hashes, source-store copies, and publish tarballs.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - VCS control directories are local workspace machinery, not project source
+    content.
+- Commands that survived and why:
+  - Path/git/tarball source realization survives; it now realizes only project
+    source files after the standard local-control exclusions.
+  - `registry publish` survives as a source-content publication operation, not
+    an archive of the caller's checkout machinery.
+- Laws/protocol invariants added:
+  - Mutating `.git`, `.hg`, `.svn`, `.jj`, or `.clpm` does not change default
+    `sha256-tree`.
+  - Default source walking and store copies exclude `.git`, `.hg`, `.svn`,
+    `.jj`, and `.clpm`.
+  - Publish tarballs exclude `.git`, `.hg`, `.svn`, `.jj`, `.clpm`, `dist`,
+    and `clpm.lock`.
+- Remaining discomfort:
+  - None for local VCS control directories.
 
 ## Constructors
 
@@ -2568,6 +2593,8 @@ Failed-counterexample regressions:
 - Corrupt artifact files, source directories without completion metadata, and
   source entries whose metadata names a different digest are not valid store
   objects; storing the correct bytes/tree repairs them.
+- `.jj` control state does not affect default source tree hashes, is not copied
+  into the source store, and is not included in publish tarballs.
 - `clpm --insecure help` is rejected; `--insecure` is not an inert
   pre-command global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes

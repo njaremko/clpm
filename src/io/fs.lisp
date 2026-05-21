@@ -61,7 +61,11 @@ EXCLUDE is a list of entry names (strings) to ignore (directories or files)."
         (write-char #\. s)
         (write-string type s)))))
 
-(defun walk-files (root &key (exclude '(".git" ".hg" ".svn" ".clpm")))
+(defparameter +default-source-excludes+
+  '(".git" ".hg" ".svn" ".jj" ".clpm")
+  "Directory names excluded from project source identity by default.")
+
+(defun walk-files (root &key (exclude +default-source-excludes+))
   "Walk ROOT and return (rel-path . absolute-path) for all files.
 
 REL-PATH is a deterministic, slash-separated string, sorted lexicographically."

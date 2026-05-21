@@ -276,7 +276,7 @@ On non-POSIX platforms the executable bit is approximated by extension
                                   :test #'string=))))
     (values (if execp "100755" "100644") (%read-file-octets path))))
 
-(defun sha256-tree (directory &key (exclude '(".git" ".hg" ".svn" ".clpm")))
+(defun sha256-tree (directory &key (exclude clpm.io.fs::+default-source-excludes+))
   "Compute deterministic SHA-256 hash of a directory tree.
 Files are hashed in lexicographic order by path with metadata.
 

@@ -4799,6 +4799,10 @@ Returns an alist: (system-id . ((dep-system . nil) ...))."
                         (clpm.platform:run-program
                          (list tar
                                "-czf" (namestring tarball-path)
+                               "--exclude=.git"
+                               "--exclude=.hg"
+                               "--exclude=.svn"
+                               "--exclude=.jj"
                                "--exclude=.clpm"
                                "--exclude=dist"
                                "--exclude=clpm.lock"

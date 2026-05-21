@@ -47,11 +47,13 @@
          (dest (merge-pathnames "dest/" tmp))
          (file1 (merge-pathnames "file" root))
          (hidden (merge-pathnames ".hidden" root))
-         (inner (merge-pathnames ".inner" nested)))
+         (inner (merge-pathnames ".inner" nested))
+         (jj-secret (merge-pathnames ".jj/secret" root)))
     (ensure-directories-exist nested)
     (write-file file1 "a")
     (write-file hidden "b")
     (write-file inner "c")
+    (write-file jj-secret "private-control-data")
 
     ;; walk-files includes extensionless and dotfiles
     (let ((paths (mapcar #'car (clpm.io.fs:walk-files root :exclude nil))))
@@ -60,7 +62,21 @@
       (assert-true (member "file" paths :test #'string=)
                    "walk-files missing extensionless file: ~S" paths)
       (assert-true (member "dir/.inner" paths :test #'string=)
-                   "walk-files missing nested dotfile: ~S" paths))
+                   "walk-files missing nested dotfile: ~S" paths)
+      (assert-true (member ".jj/secret" paths :test #'string=)
+                   "walk-files with :exclude nil missing .jj file: ~S" paths))
+
+    ;; Default walking and hashing exclude VCS control metadata.
+    (let ((paths (mapcar #'car (clpm.io.fs:walk-files root))))
+      (assert-true (not (member ".jj/secret" paths :test #'string=))
+                   "default walk-files leaked .jj metadata: ~S" paths))
+    (let ((h1 (clpm.crypto.sha256:bytes-to-hex
+               (clpm.crypto.sha256:sha256-tree root))))
+      (write-file jj-secret "different-private-control-data")
+      (let ((h2 (clpm.crypto.sha256:bytes-to-hex
+                 (clpm.crypto.sha256:sha256-tree root))))
+        (assert-true (string= h1 h2)
+                     "default sha256-tree changed after modifying .jj metadata")))
 
     ;; sha256-tree changes when a dotfile changes
     (let* ((h1 (clpm.crypto.sha256:bytes-to-hex
@@ -75,10 +91,13 @@
     (clpm.store::copy-directory-tree root dest)
     (let ((dest-file1 (merge-pathnames "file" dest))
           (dest-hidden (merge-pathnames ".hidden" dest))
-          (dest-inner (merge-pathnames "dir/.inner" dest)))
+          (dest-inner (merge-pathnames "dir/.inner" dest))
+          (dest-jj-secret (merge-pathnames ".jj/secret" dest)))
       (assert-true (uiop:file-exists-p dest-file1) "copied file missing")
       (assert-true (uiop:file-exists-p dest-hidden) "copied .hidden missing")
       (assert-true (uiop:file-exists-p dest-inner) "copied dir/.inner missing")
+      (assert-true (not (uiop:file-exists-p dest-jj-secret))
+                   "copy-directory-tree copied .jj metadata")
       (assert-true (string= (read-file dest-file1) "a") "copied file contents mismatch")
       (assert-true (string= (read-file dest-hidden) "b2") "copied .hidden contents mismatch")
       (assert-true (string= (read-file dest-inner) "c") "copied inner contents mismatch"))))
@@ -87,4 +106,3 @@
 
 (format t "~%FS tests PASSED!~%")
 (sb-ext:exit :code 0)
-
