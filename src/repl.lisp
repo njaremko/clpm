@@ -432,11 +432,10 @@ single (read-line) returns the answer."
 ;;; --------------------------------------------------------------------------
 ;;; Transport: Unix socket vs. TCP loopback
 ;;;
-;;; Unix sockets are the preferred transport: mode-0600 on the file system
-;;; gives us free authentication (only the project owner's processes can
-;;; connect). Windows lacked AF_UNIX until recent builds, so we fall back to
-;;; a loopback TCP socket on a random ephemeral port and authenticate via a
-;;; 32-hex-char shared token written to `.clpm/repl.port'.
+;;; Unix sockets are the preferred transport. Both transports authenticate
+;;; with a 32-hex-char shared token: Unix writes it beside the socket, TCP
+;;; writes it into `.clpm/repl.port' with the port. The project_root field is
+;;; identity, not authority; the token is the endpoint capability.
 ;;; --------------------------------------------------------------------------
 
 (defstruct transport
@@ -446,7 +445,7 @@ KIND is :unix or :tcp.
 PATH is the filesystem path the transport advertises:
   - :unix -> the Unix-domain socket file (mode 0600)
   - :tcp  -> the `.clpm/repl.port' file containing `<port>~%<token>~%'
-TOKEN is a 32-hex-char shared secret, used only with :tcp.
+TOKEN is a 32-hex-char shared secret.
 LISTENER and PORT are filled in once the listener is opened."
   (kind :unix :type (member :unix :tcp))
   (path "" :type string)
@@ -463,7 +462,7 @@ LISTENER and PORT are filled in once the listener is opened."
       :unix))
 
 (defun %random-token ()
-  "Return a 32-hex-char shared secret used for TCP transport authentication.
+  "Return a 32-hex-char shared secret used for transport authentication.
 The token is generated from `clpm.platform:secure-random-bytes' (which reads
 from /dev/urandom on Unix), so guessing it costs 2^128."
   (clpm.crypto.sha256:bytes-to-hex
@@ -498,6 +497,27 @@ within the longer string)."
   #+sbcl (handler-case (sb-posix:chmod path #o600) (error () nil))
   #-sbcl path)
 
+(defun %unix-token-path (socket-path)
+  "Return the token-file path paired with SOCKET-PATH."
+  (concatenate 'string socket-path ".token"))
+
+(defun %write-token-file (path token)
+  (with-open-file (s path :direction :output
+                          :if-exists :supersede
+                          :if-does-not-exist :create
+                          :external-format :utf-8)
+    (format s "~A~%" token))
+  #+sbcl (handler-case (sb-posix:chmod path #o600) (error () nil))
+  #-sbcl path)
+
+(defun %read-token-file (path)
+  "Read a 32-hex endpoint token from PATH, or signal an error."
+  (with-open-file (s path :direction :input :external-format :utf-8)
+    (let ((line (read-line s nil nil)))
+      (unless (and (stringp line) (= 32 (length line)))
+        (error "Invalid token file ~A" path))
+      (string-trim '(#\Space #\Newline #\Return) line))))
+
 (defun %read-port-file (path)
   "Return (values port token) from PATH, or signal an error."
   (with-open-file (s path :direction :input :external-format :utf-8)
@@ -515,8 +535,11 @@ socket (and, for :tcp, the bound port) back into the struct. For :tcp, also
 writes the port file."
   (ecase (transport-kind transport)
     (:unix
-     (let ((sock (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+     (let ((sock (make-instance 'sb-bsd-sockets:local-socket :type :stream))
+           (token (or (transport-token transport)
+                      (setf (transport-token transport) (%random-token)))))
        (ignore-errors (delete-file (transport-path transport)))
+       (%write-token-file (%unix-token-path (transport-path transport)) token)
        (sb-bsd-sockets:socket-bind sock (transport-path transport))
        #+sbcl
        (handler-case (sb-posix:chmod (transport-path transport) #o600)
@@ -545,12 +568,14 @@ writes the port file."
   (when (transport-listener transport)
     (ignore-errors (sb-bsd-sockets:socket-close (transport-listener transport)))
     (setf (transport-listener transport) nil))
-  (ignore-errors (delete-file (transport-path transport))))
+  (ignore-errors (delete-file (transport-path transport)))
+  (when (eq (transport-kind transport) :unix)
+    (ignore-errors (delete-file (%unix-token-path (transport-path transport))))))
 
 (defun %connect-transport (kind path &key (timeout-seconds 5))
   "Open a connected stream socket. For :unix, PATH is the socket path. For
 :tcp, PATH is the port file path; the port and token are read from it.
-Returns (values socket token) where TOKEN is non-NIL only for :tcp.
+Returns (values socket token).
 
 Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
   (let ((deadline (+ (get-internal-real-time)
@@ -560,9 +585,10 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
           (return
             (ecase kind
               (:unix
-               (let ((s (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+               (let ((token (%read-token-file (%unix-token-path path)))
+                     (s (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
                  (sb-bsd-sockets:socket-connect s path)
-                 (values s nil)))
+                 (values s token)))
               (:tcp
                (multiple-value-bind (port token) (%read-port-file path)
                  (let ((s (make-instance 'sb-bsd-sockets:inet-socket
@@ -632,6 +658,28 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
    (shutdown-requested? :initform nil :accessor server-shutdown-requested?)
    (event-log :initform nil :accessor server-event-log)))
 
+(defvar *active-project-server-roots* '()
+  "Project roots whose REPL daemons are active in this Lisp process.")
+
+(defvar *active-project-server-roots-mutex*
+  (clpm.repl.compat:make-mutex :name "clpm.repl.project-roots"))
+
+(defun %register-active-project-server (project-root)
+  "Register PROJECT-ROOT as the only project daemon in this Lisp image."
+  (when (and (stringp project-root) (plusp (length project-root)))
+    (clpm.repl.compat:with-mutex (*active-project-server-roots-mutex*)
+      (when *active-project-server-roots*
+        (error "A project REPL daemon is already active in this Lisp image; start each project daemon in a separate Lisp process for isolation."))
+      (push project-root *active-project-server-roots*)
+      t)))
+
+(defun %unregister-active-project-server (project-root)
+  (when (and (stringp project-root) (plusp (length project-root)))
+    (clpm.repl.compat:with-mutex (*active-project-server-roots-mutex*)
+      (setf *active-project-server-roots*
+            (remove project-root *active-project-server-roots*
+                    :test #'string=)))))
+
 (defun %server-default-pathname-defaults (server)
   "Return the pathname defaults that belong to SERVER's project image."
   (let ((project-root (and server (server-project-root server))))
@@ -639,22 +687,31 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
         (uiop:ensure-directory-pathname project-root)
         *default-pathname-defaults*)))
 
-(defun %project-package-name (project-root)
-  "Return the package name for PROJECT-ROOT's default REPL namespace."
-  (concatenate 'string "CLPM.REPL.USER." project-root))
+(defparameter +project-package-prefix+ "CLPM.REPL.USER."
+  "Prefix for private project REPL packages.")
+
+(defun %project-package-name ()
+  "Return a fresh private package name for a project daemon."
+  (loop for name = (concatenate 'string +project-package-prefix+ (%random-token))
+        unless (find-package name)
+          return name))
+
+(defun %project-package-p (package)
+  (and package
+       (let ((name (package-name package))
+             (prefix +project-package-prefix+))
+         (and (>= (length name) (length prefix))
+              (string= prefix name :end2 (length prefix))))))
 
 (defun %project-initial-package (project-root)
   "Return the default package for a project daemon.
 
 Raw in-process test servers that do not carry PROJECT-ROOT keep CL-USER.
-Project daemons get a package keyed by canonical project identity, so
-unqualified definitions in one project are not visible in another daemon
-hosted by the same Lisp process."
+Project daemons get a private package whose printed name is never part of
+the public protocol."
   (cond
     ((and (stringp project-root) (plusp (length project-root)))
-     (let ((name (%project-package-name project-root)))
-       (or (find-package name)
-           (make-package name :use '("COMMON-LISP")))))
+     (make-package (%project-package-name) :use '("COMMON-LISP")))
     (t
      (find-package "COMMON-LISP-USER"))))
 
@@ -664,9 +721,47 @@ hosted by the same Lisp process."
         (package (and server (server-initial-package server))))
     (when (and (stringp project-root)
                package
-               (string= (package-name package)
-                        (%project-package-name project-root)))
+               (%project-package-p package))
       (ignore-errors (delete-package package)))))
+
+(defun %current-server-binding ()
+  (and (boundp '*server*) (symbol-value '*server*)))
+
+(defun %public-package-name (package &optional server)
+  "Return the protocol-visible name for PACKAGE in SERVER."
+  (let ((server (or server (%current-server-binding))))
+    (cond
+      ((and server
+            (server-project-root server)
+            package
+            (eq package (server-initial-package server)))
+       "COMMON-LISP-USER")
+      (package (package-name package))
+      (t "COMMON-LISP-USER"))))
+
+(defun %public-package-list-name (package &optional server)
+  "Return PACKAGE's public name, or NIL when another project owns it."
+  (let ((server (or server (%current-server-binding))))
+    (cond
+      ((and server
+            (server-project-root server)
+            (%project-package-p package)
+            (not (eq package (server-initial-package server))))
+       nil)
+      (t (%public-package-name package server)))))
+
+(defun %resolve-package-for-server (server name)
+  "Resolve public package NAME in SERVER's namespace."
+  (cond
+    ((and server
+          (server-project-root server)
+          (stringp name)
+          (or (string-equal name "COMMON-LISP-USER")
+              (string-equal name "CL-USER")))
+     (server-initial-package server))
+    ((stringp name)
+     (%find-package-loose name))
+    (t nil)))
 
 (defparameter +max-log-bytes+ (* 10 1024 1024)
   "Rotate `.clpm/repl.log' once it grows past this many bytes.")
@@ -1686,7 +1781,8 @@ sessions."
          (start (get-internal-real-time))
          (form nil)
          (override-pkg (and package-override
-                            (%find-package-loose package-override)))
+                            (%resolve-package-for-server *server*
+                                                         package-override)))
          (package (or override-pkg
                       (and *current-worker* (worker-package *current-worker*))
                       (and *server* (server-current-package *server*))
@@ -1715,7 +1811,8 @@ sessions."
            :values nil
            :output ""
            :error-output ""
-           :package (package-name (or *package* (find-package "COMMON-LISP-USER")))
+           :package (%public-package-name
+                     (or *package* (find-package "COMMON-LISP-USER")))
            :elapsed-ms 0
            :conditions (nreverse conditions)
            :signaled-conditions nil
@@ -1748,7 +1845,7 @@ sessions."
                   :values value-strings
                   :output (%capture-text out-stream sink)
                   :error-output (%capture-text err-stream sink)
-                  :package (package-name package)
+                  :package (%public-package-name package)
                   :elapsed-ms (round (* 1000.0
                                         (/ (- (get-internal-real-time) start)
                                            internal-time-units-per-second)))
@@ -2365,7 +2462,6 @@ event log."
       "lisp" (format nil "~A ~A"
                      (lisp-implementation-type)
                      (lisp-implementation-version))
-      "project_root" (server-project-root server)
       "eval_count" (server-eval-count server)
       "method_counts" (%method-counts-json server)
       "recent_error_count" (server-recent-error-count server))))))
@@ -2385,7 +2481,8 @@ worker's package; otherwise the default worker is reported."
            (w (%ensure-worker server :name wname)))
       (%success-response
        id (%json-object "worker" (worker-name w)
-                        "package" (package-name (worker-package w))))))))
+                        "package" (%public-package-name
+                                   (worker-package w) server)))))))
 
 (%register-method
  (make-method-spec
@@ -2403,7 +2500,7 @@ worker is changed."
     (declare (ignore ctx))
     (let* ((name (%json-getf params "name"))
            (wname (or (%json-getf params "worker") +default-worker-name+))
-           (pkg (and (stringp name) (%find-package-loose name))))
+           (pkg (%resolve-package-for-server server name)))
       (cond
         ((not (stringp name))
          (%error-response id "protocol-error" "missing `name` param"))
@@ -2415,7 +2512,7 @@ worker is changed."
            (setf (worker-package w) pkg)
            (%success-response id
             (%json-object "worker" (worker-name w)
-                          "package" (package-name pkg))))))))))
+                          "package" (%public-package-name pkg server))))))))))
 
 (%register-method
  (make-method-spec
@@ -2589,7 +2686,8 @@ universal time, used for `age_seconds'."
     (list :object
           (list (cons "name" (worker-name worker))
                 (cons "state" (%worker-state-string worker))
-                (cons "package" (package-name (worker-package worker)))
+                (cons "package" (%public-package-name
+                                 (worker-package worker) *server*))
                 (cons "last_eval_id" (worker-last-eval-id worker))
                 (cons "started_at_unix" (worker-started-at worker))
                 (cons "age_seconds" (- now (worker-started-at worker)))
@@ -3679,9 +3777,9 @@ external symbol count, and a small head of exported symbols."
                       :description "Package name."))
   :handler
   (lambda (server params id ctx)
-    (declare (ignore server ctx))
+    (declare (ignore ctx))
     (let* ((name (%json-getf params "name"))
-           (pkg (and (stringp name) (%find-package-loose name))))
+           (pkg (%resolve-package-for-server server name)))
       (cond
         ((null pkg)
          (%error-response id "eval-error"
@@ -3696,12 +3794,18 @@ external symbol count, and a small head of exported symbols."
            (%success-response
             id
             (%json-object
-             "name" (package-name pkg)
+             "name" (%public-package-name pkg server)
              "nicknames" (%json-array (package-nicknames pkg))
              "use" (%json-array
-                    (mapcar #'package-name (package-use-list pkg)))
+                    (remove nil
+                            (mapcar (lambda (p)
+                                      (%public-package-list-name p server))
+                                    (package-use-list pkg))))
              "used_by" (%json-array
-                        (mapcar #'package-name (package-used-by-list pkg)))
+                        (remove nil
+                                (mapcar (lambda (p)
+                                          (%public-package-list-name p server))
+                                        (package-used-by-list pkg))))
              "export_count" export-count
              "exports_head" (%json-array (sort exports #'string<)))))))))))
 
@@ -4250,9 +4354,11 @@ directory."
   :params nil
   :handler
   (lambda (server params id ctx)
-    (declare (ignore server params ctx))
+    (declare (ignore params ctx))
     (let ((entries
             (loop for pkg in (list-all-packages)
+                  for public-name = (%public-package-list-name pkg server)
+                  when public-name
                   collect
                   (let ((internal 0) (external 0))
                     (do-symbols (s pkg)
@@ -4263,7 +4369,7 @@ directory."
                           (:internal (incf internal))
                           (:external (incf external)))))
                     (%json-object
-                     "name" (package-name pkg)
+                     "name" public-name
                      "nicknames" (%json-array (package-nicknames pkg))
                      "external" external
                      "internal" internal)))))
@@ -4703,7 +4809,7 @@ active when load returned."
                 id
                 (%json-object
                  "success" t
-                 "package" (package-name *package*))))
+                 "package" (%public-package-name *package* server))))
            (error (c)
              (%error-response id "eval-error" (princ-to-string c))))))))))
 
@@ -4857,8 +4963,8 @@ as a prin1 string, or NIL for `(values)')."
                                 :values nil
                                 :output ""
                                 :error-output ""
-                                :package (package-name
-                                          (worker-package worker))
+                                :package (%public-package-name
+                                          (worker-package worker) server)
                                 :elapsed-ms 0
                                 :conditions
                                 (list (%json-object
@@ -4915,13 +5021,15 @@ as a prin1 string, or NIL for `(values)')."
 
 (defun %dispatch-describe (server params id)
   (let* ((sym-name (%json-getf params "symbol"))
-         (pkg-name (or (%json-getf params "package")
-                       (package-name (server-current-package server)))))
+         (pkg-name (%json-getf params "package"))
+         (pkg-default (server-current-package server)))
     (cond
       ((not (stringp sym-name))
        (%error-response id "protocol-error" "missing `symbol` param"))
       (t
-       (let* ((pkg (or (%find-package-loose pkg-name)
+       (let* ((pkg (or (and pkg-name
+                            (%resolve-package-for-server server pkg-name))
+                       (and (null pkg-name) pkg-default)
                        (return-from %dispatch-describe
                          (%error-response id "eval-error"
                                           (format nil "no such package: ~A"
@@ -4979,7 +5087,8 @@ process."
                                         :project-root project-root
                                         :initial-package
                                         (%project-initial-package project-root)
-                                        :transport transport)))
+                                        :transport transport))
+         (registered-project? nil))
     (when (and log-path (stringp log-path))
       (setf (server-event-log server) (%open-event-log log-path)))
     (let ((*server* server)
@@ -4987,6 +5096,8 @@ process."
             (%server-default-pathname-defaults server)))
       (unwind-protect
            (progn
+             (setf registered-project?
+                   (%register-active-project-server project-root))
              (%open-listener transport)
              (setf (server-socket server) (transport-listener transport))
              (%log-event (server-event-log server) "start"
@@ -5057,6 +5168,8 @@ process."
         (%log-event (server-event-log server) "stop")
         (%close-event-log (server-event-log server))
         (%close-listener transport)
+        (when registered-project?
+          (%unregister-active-project-server project-root))
         (%delete-project-initial-package server)))))
 
 ;;; --------------------------------------------------------------------------
@@ -5418,6 +5531,12 @@ with v2 toggles requiring continuations)."
           ((not (stringp method))
            (%log-event (server-event-log server) "request-invalid" "id" id)
            (%write-error-inline cstate id "protocol-error" "missing `method'"))
+          ((and params (not (%json-object-p params)))
+           (%log-event (server-event-log server) "request-invalid"
+                       "id" id "method" method)
+           (%write-error-inline cstate id "protocol-error"
+                                (format nil "params must be an object for ~A"
+                                        method)))
           ((and expected-token
                 (let ((tok (%json-getf params "token")))
                   (or (not (stringp tok))
@@ -5486,7 +5605,9 @@ with v2 toggles requiring continuations)."
 ;;; --------------------------------------------------------------------------
 
 (defun %inject-token (params token)
-  "Add a `token' field to PARAMS (a JSON object form), creating one if NIL."
+  "Add a `token' field to PARAMS (a JSON object form), creating one if NIL.
+Malformed non-object params are preserved so the server reports the real
+protocol error instead of hiding it behind token injection."
   (cond
     ((null token) (or params (%json-object)))
     (t
@@ -5494,7 +5615,7 @@ with v2 toggles requiring continuations)."
        (cond
          ((and (consp base) (eq (car base) :object))
           (list :object (cons (cons "token" token) (cadr base))))
-         (t (%json-object "token" token)))))))
+         (t base))))))
 
 (defun send-request (endpoint method &key params (id 1) (connect-timeout 5)
                                           on-event)
@@ -5506,7 +5627,8 @@ JSON object). Returns
 ENDPOINT is a filesystem path. If it ends in `.port', the TCP transport
 is used: the file's first line is the bound port, the second line is a
 32-hex shared token, and the token is injected into the request's
-params. Otherwise the path is treated as a Unix-domain socket.
+params. Otherwise the path is treated as a Unix-domain socket and the
+token is read from ENDPOINT.token.
 
 ON-EVENT, when supplied, is invoked once per non-terminal frame
 (streamed stdout, debugger-entered, trace lines, ...). It receives the

@@ -97,6 +97,32 @@
     (ignore-errors (delete-file socket))
     (sb-posix:symlink target (namestring socket))))
 
+(defun raw-unix-request (socket-path request-json)
+  (let ((sock (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+    (unwind-protect
+         (progn
+           (sb-bsd-sockets:socket-connect sock socket-path)
+           (let ((stream (sb-bsd-sockets:socket-make-stream
+                          sock :input t :output t :buffering :full
+                               :external-format :utf-8
+                               :element-type 'character)))
+             (unwind-protect
+                  (progn
+                    (write-string request-json stream)
+                    (write-char #\Newline stream)
+                    (force-output stream)
+                    (let ((line (read-line stream nil nil)))
+                      (and line (clpm.io.json:read-json-from-string line))))
+               (ignore-errors (close stream)))))
+      (ignore-errors (sb-bsd-sockets:socket-close sock)))))
+
+(defun json-lookup (object key)
+  (when (and (consp object) (eq (car object) :object))
+    (cdr (assoc key (cadr object) :test #'string=))))
+
+(defun project-root-id (project-root)
+  (namestring (uiop:ensure-directory-pathname (truename project-root))))
+
 (defun start-daemon-thread (directory name &optional (args '("repl" "daemon")))
   (sb-thread:make-thread
    (lambda ()
@@ -137,28 +163,54 @@
 (with-short-temp-dir (tmp)
   (let* ((project-a (merge-pathnames "project-a/" tmp))
          (project-b (merge-pathnames "project-b/" tmp))
-         (sock-a (namestring (merge-pathnames ".clpm/repl.sock" project-a)))
-         (sock-b (namestring (merge-pathnames ".clpm/repl.sock" project-b))))
+         (sock-a (namestring (merge-pathnames ".clpm/repl.sock" project-a))))
     (write-minimal-project project-a "project-a")
     (write-minimal-project project-b "project-b")
-    (format t "Test: two foreground project daemons do not share sessions~%")
-    (let ((thread-a (start-daemon-thread project-a "project-a"))
-          (thread-b nil))
+    (format t "Test: foreground project daemon owns one project image~%")
+    (let ((thread-a (start-daemon-thread project-a "project-a")))
       (sleep 0.05)
       (wait-for-socket sock-a)
-      (format t "Test: daemon start cleans foreign lifecycle files~%")
-      (write-pidfile project-b (sb-posix:getpid))
-      (point-socket-at project-b sock-a)
-      (setf thread-b (start-daemon-thread project-b "project-b"))
-      (sleep 0.05)
-      (loop for i from 0 below 20
-            while (and thread-b (not (sb-thread:thread-alive-p thread-b)))
-            do (sleep 0.1))
-      (assert-true (and thread-b (sb-thread:thread-alive-p thread-b))
-                   "project-b daemon refused to start over foreign repl lifecycle files")
-      (wait-for-project-ping project-b "project-b")
       (unwind-protect
            (progn
+             (let* ((request (format nil
+                                      "{\"id\":1,\"method\":\"ping\",\"params\":{\"project_root\":~S}}"
+                                      (project-root-id project-a)))
+                    (resp (raw-unix-request sock-a request)))
+               (assert-true (json-lookup resp "error")
+                            "unauthenticated Unix request reached project daemon: ~S"
+                            resp))
+             (let* ((second-sock (namestring (merge-pathnames ".clpm/repl.sock"
+                                                              project-b)))
+                    (second-done nil)
+                    (second-error nil)
+                    (second (sb-thread:make-thread
+                             (lambda ()
+                               (handler-case
+                                   (progn
+                                     (clpm.repl:start-server
+                                      :socket-path second-sock
+                                      :project-root (project-root-id project-b))
+                                     (setf second-done :returned))
+                                 (error (c)
+                                   (setf second-error c
+                                         second-done :errored))))
+                             :name "test-repl-isolation-second-project")))
+               (loop for i from 0 below 20
+                     while (and (null second-done)
+                                (sb-thread:thread-alive-p second))
+                     do (sleep 0.05))
+               (when (and (null second-done)
+                          (sb-thread:thread-alive-p second))
+                 (ignore-errors
+                   (clpm.repl:send-request second-sock "shutdown"
+                                           :params (list :object
+                                                         (list (cons "project_root"
+                                                                     (project-root-id project-b))))))
+                 (ignore-errors (sb-thread:terminate-thread second))
+                 (fail "second project daemon started in the same Lisp image"))
+               (assert-eql :errored second-done)
+               (assert-contains (princ-to-string second-error)
+                                "separate Lisp process"))
              (multiple-value-bind (rc _stdout stderr)
                  (run-cli-captured '("repl" "eval"
                                      "(error \"project-a-only\")"
@@ -173,11 +225,6 @@
                                    :directory project-a)
                (assert-eql 0 rc)
                (assert-contains stdout "project-a-only"))
-             (multiple-value-bind (rc stdout)
-                 (run-cli-captured '("repl" "call" "list-debug-sessions")
-                                   :directory project-b)
-               (assert-eql 0 rc)
-               (assert-not-contains stdout "project-a-only"))
              (run-cli-captured '("repl" "eval"
                                  "(defun trace-shared-target (x) (1+ x))"
                                  "--worker" "trace-isolation"
@@ -189,20 +236,6 @@
                   :directory project-a)
                (declare (ignore stdout stderr))
                (assert-eql 0 rc))
-             (multiple-value-bind (rc stdout)
-                 (run-cli-captured '("repl" "call" "list-traced")
-                                   :directory project-b)
-               (assert-eql 0 rc)
-               (assert-not-contains stdout "TRACE-SHARED-TARGET"))
-             (multiple-value-bind (rc stdout stderr)
-                 (run-cli-captured '("repl" "eval"
-                                     "(fboundp 'trace-shared-target)"
-                                     "--no-autostart")
-                                   :directory project-b)
-               (assert-eql 0 rc)
-               (assert-contains stdout "=> NIL")
-               (assert-not-contains stdout "TRACE-SHARED-TARGET")
-               (assert-not-contains stderr "TRACE-SHARED-TARGET"))
              (run-cli-captured
               '("repl" "call" "untrace" "--symbols" "[\"trace-shared-target\"]")
               :directory project-a)
@@ -265,20 +298,17 @@
                           (run-cli-captured '("repl" "call" "ping")
                                             :directory project-a)
                         (assert-eql 0 rc)
-                        (assert-contains stdout "\"project_root\"")))
+                        (assert-contains stdout "\"pid\"")
+                        (assert-not-contains stdout "\"project_root\"")))
                  (when (uiop:process-alive-p sleeper)
                    (ignore-errors (uiop:terminate-process sleeper)))))
              (format t "  project session isolation OK~%"))
         (stop-daemon project-a)
-        (stop-daemon project-b)
         (loop for i from 0 below 30
-              while (or (and thread-a (sb-thread:thread-alive-p thread-a))
-                        (and thread-b (sb-thread:thread-alive-p thread-b)))
+              while (and thread-a (sb-thread:thread-alive-p thread-a))
               do (sleep 0.1))
         (when (and thread-a (sb-thread:thread-alive-p thread-a))
-          (ignore-errors (sb-thread:terminate-thread thread-a)))
-        (when (and thread-b (sb-thread:thread-alive-p thread-b))
-          (ignore-errors (sb-thread:terminate-thread thread-b)))))))
+          (ignore-errors (sb-thread:terminate-thread thread-a)))))))
 
 (sb-posix:chdir (namestring *repo-root*))
 

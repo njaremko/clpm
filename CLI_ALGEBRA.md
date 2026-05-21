@@ -1384,13 +1384,14 @@ but output kind and machine-readable shape are semantic.
     before reporting or stopping it.
 - Commands that survived and why:
   - `repl daemon --status` survives as lifecycle observation, but only when
-    the daemon reports the same canonical `project_root`.
+    the endpoint authenticates and accepts the selected canonical
+    `project_root`.
   - `repl daemon --stop` survives as lifecycle mutation, but it refuses to
     signal a pid unless the endpoint first proves it belongs to the selected
     project image.
 - Laws/protocol invariants added:
   - `status(root)` may report running only if
-    `ping(socket(root)).project_root == canonical(root)`.
+    `authenticatedPing(endpoint(root), root)` succeeds.
   - `stop(root)` may send shutdown only after the same identity proof.
   - If pid/socket files point at another project's daemon, status and stop
     clean the selected project's stale lifecycle files and do not mutate the
@@ -1519,8 +1520,9 @@ but output kind and machine-readable shape are semantic.
   - `history(eval(worker, form)) = worker.history after form`.
   - No eval in one worker mutates another worker's package, history, or
     redefinition log.
-  - Project daemon isolation is stronger than socket identity: foreground
-    daemons embedded in one host Lisp must not share worker histories.
+  - Project daemon isolation is stronger than socket identity: one host Lisp
+    process may own at most one active project daemon, so process-global CL
+    state cannot become an accidental inter-project bus.
 - Remaining discomfort:
   - None for REPL history isolation. The remaining broad attack is the loose
     eval options plist named in Iteration 41.
@@ -2086,7 +2088,7 @@ but output kind and machine-readable shape are semantic.
     selected-project daemon.
 - Laws/protocol invariants added:
   - `running(root)` requires a live pidfile, an existing endpoint, and a
-    successful daemon ping whose `project_root` equals `root`.
+    successful authenticated daemon ping whose params select `root`.
   - A pidfile that names a live process but has no endpoint denotes stale
     lifecycle metadata, not an unresponsive daemon.
   - Cleaning stale lifecycle metadata must not signal or kill the pid named in
@@ -2207,26 +2209,29 @@ but output kind and machine-readable shape are semantic.
 - Commands merged:
   - None.
 - Commands derived instead of exposed:
-  - A daemon's default eval namespace is derived from canonical project root,
-    not from process-global `CL-USER`.
+  - A daemon's default eval namespace is a private package owned by that
+    daemon. Public observations map it back to `COMMON-LISP-USER`; the private
+    package name and project path are not part of the CLI algebra.
 - Commands that survived and why:
   - `repl daemon`, `repl eval`, and `repl call` survive as the lifecycle,
     ergonomic eval, and RPC constructors for one project-scoped image.
 - Laws/protocol invariants added:
   - `daemonExists(project)` requires both live lifecycle metadata and
-    `ping.project_root = canonical(project)`.
-  - `defaultPackage(projectA) != defaultPackage(projectB)` when their canonical
-    roots differ, so unqualified definitions in one foreground project daemon
-    are not visible in another daemon hosted by the same Lisp process.
+    an authenticated ping whose params select `canonical(project)`.
+  - A Lisp process hosts at most one active project daemon. Different projects
+    get separate daemon processes, not separate threads in one CL image.
+  - `current-package`, `list-workers`, and eval result package fields report
+    the selected daemon's private default package as `COMMON-LISP-USER` and
+    never expose a root-derived `CLPM.REPL.USER.*` name.
   - Shutting down a project daemon releases CLPM's owned default package, so a
     later foreground daemon in the same Lisp process does not inherit stopped
     REPL bindings as a hidden cache.
   - Explicit package selection remains explicit: `--package` and `set-package`
     may choose a shared package by name, but the default constructor never does.
 - Remaining discomfort:
-  - ASDF's loaded-system registry is process-global in raw in-process test
-    servers. Detached CLI daemons remain separate OS processes, and the default
-    eval namespace now covers the user-visible REPL binding leak.
+  - None for project daemon identity. ASDF and package registries remain
+    process-global, so the law is process isolation rather than multi-project
+    hosting inside one Lisp image.
 
 ### Iteration 72: Public Schema Must Be Bound and Concrete
 
@@ -2251,6 +2256,50 @@ but output kind and machine-readable shape are semantic.
     eval output is a surviving observation mode.
 - Remaining discomfort:
   - None for this schema-honesty slice.
+
+### Iteration 73: REPL Endpoint Authority Is Token Plus Project Acceptance
+
+- Commands deleted:
+  - The accidental unauthenticated Unix transport. File permissions are useful
+    containment, not a protocol proof.
+  - The accidental `ping.project_root` observation. Echoed request identity is
+    not authority and leaks selected project paths.
+  - Root-derived private package names in public REPL observations.
+  - `repl daemon --status --json` disclosure of socket and log paths.
+- Commands merged:
+  - Missing/wrong endpoint token and project-root rejection are both stale
+    lifecycle metadata for the selected project, not "an unresponsive daemon"
+    and not proof that another project's image is usable.
+- Commands derived instead of exposed:
+  - Unix endpoints derive their shared token from `endpoint.token`; TCP
+    endpoints derive it from the advertised port file. Clients inject the token
+    and the selected `project_root`; users cannot supply either field through
+    `repl call`.
+  - `COMMON-LISP-USER` in a project daemon denotes that daemon's private
+    default package, not the process-global CL-USER package.
+- Commands that survived and why:
+  - `repl eval` survives because it is the ergonomic constructor for one
+    selected-project image.
+  - `repl call ping` survives as a liveness observation, but only after the
+    endpoint has authenticated and accepted the selected project root.
+  - `repl daemon --status --json` survives as machine lifecycle state, not as a
+    filesystem topology dump.
+- Laws/protocol invariants added:
+  - `project_root` is identity carried by the client; authority is
+    `token(endpoint) && acceptsProject(endpoint, project_root)`.
+  - `ping(root)` success means the endpoint's token matched and its project
+    guard accepted `root`; the result does not contain `project_root`.
+  - `statusJson(root)` contains lifecycle facts such as state, pid, Lisp, and
+    eval count, but not socket path, log path, or project path.
+  - A forged Unix request with only `project_root` and no token is rejected.
+  - A wrong-token TCP endpoint for the selected project is stale lifecycle
+    metadata and is cleaned by status/stop/eval autostart paths.
+  - A second active project daemon in one Lisp process is rejected before it can
+    share packages, ASDF state, debugger sessions, workers, or loaded systems.
+- Remaining discomfort:
+  - None for cross-project REPL visibility. A user with filesystem access to
+    another project's token can intentionally target that daemon, but the
+    daemon still rejects requests whose selected project root differs.
 
 ## Constructors
 
@@ -2690,11 +2739,19 @@ Failed-counterexample regressions:
 - A stale REPL endpoint in project B that points at project A is treated as
   absent for B; `repl call`, `repl eval --no-autostart`, and debug eval do
   not surface project A's daemon.
-- `clpm repl daemon` and manifest repl autostart prove a live endpoint's
-  `project_root` before deciding a selected project's daemon already exists.
-- Two foreground project daemons hosted by one Lisp process get distinct
-  default eval packages; an unqualified function defined in project A is not
-  fbound in project B's default REPL context.
+- `clpm repl daemon` and manifest repl autostart authenticate a live endpoint
+  and prove selected-project acceptance before deciding that daemon already
+  exists.
+- A forged Unix `ping` that supplies only `project_root` and no token is
+  rejected.
+- A TCP endpoint whose port is live but whose advertised token is wrong is
+  stale lifecycle metadata for the selected project, not an unresponsive
+  daemon.
+- A second active project daemon in one Lisp process is rejected; different
+  project REPLs are isolated by process, not by sharing a CL image.
+- `current-package`, `list-workers`, `ping`, and
+  `repl daemon --status --json` do not expose root-derived private package
+  names, socket paths, log paths, or selected project paths.
 - A live unrelated PID in `.clpm/repl.pid` without `.clpm/repl.sock` is stale
   lifecycle metadata; status and stop clean the selected project's files and
   leave the unrelated process alive.

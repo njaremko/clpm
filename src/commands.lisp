@@ -1768,8 +1768,7 @@ malformed."
     (when (or (null pid)
               (not (%bridge-pid-alive-p pid))
               (not (probe-file sock-path)))
-      (ignore-errors (delete-file pid-path))
-      (ignore-errors (delete-file sock-path))
+      (%bridge-clean-lifecycle-files sock-path pid-path)
       t)))
 
 (defun %bridge-write-pidfile (path)
@@ -2379,15 +2378,16 @@ server-owned session for later `call debug-* ...' requests."
         (debug
          (let ((*bridge-cli-json* (or *bridge-cli-json* json)))
            (labels ((foreign-project-p (ping)
-                      (or (%bridge-project-root-error-p ping)
-                          (let* ((result (%bridge-obj ping))
-                                 (reported (%bridge-field result
-                                                          "project_root")))
+                      (let ((result (%bridge-obj ping)))
+                        (or (%bridge-project-root-error-p ping)
                             (and result
-                                 (not (and (stringp reported)
-                                           (string= reported
-                                                    (%bridge-project-root-id
-                                                     project-root))))))))
+                                 (let ((reported (%bridge-field
+                                                  result "project_root")))
+                                   (and (stringp reported)
+                                        (not (string=
+                                              reported
+                                              (%bridge-project-root-id
+                                               project-root)))))))))
                     (open-checked ()
                       (let ((conn (clpm.repl:open-connection
                                    sock :connect-timeout 5)))
@@ -2467,29 +2467,30 @@ server-owned session for later `call debug-* ...' requests."
   (let* ((err (%bridge-err resp))
          (message (%bridge-field err "message")))
     (and (stringp message)
-         (search "project_root" message :test #'char-equal))))
+         (or (search "project_root" message :test #'char-equal)
+             (search "token" message :test #'char-equal)))))
+
+(defun %bridge-token-path (endpoint)
+  (concatenate 'string endpoint ".token"))
 
 (defun %bridge-clean-lifecycle-files (sock pid)
   (ignore-errors (delete-file pid))
-  (ignore-errors (delete-file sock)))
+  (ignore-errors (delete-file sock))
+  (ignore-errors (delete-file (%bridge-token-path sock))))
 
 (defun %bridge-ping-daemon (sock project-root)
   "Return (values STATE RESPONSE RESULT) for PROJECT-ROOT's daemon endpoint."
-  (let ((project-id (%bridge-project-root-id project-root))
-        (ping (clpm.repl:send-request sock "ping"
+  (let ((ping (clpm.repl:send-request sock "ping"
                                       :params (%bridge-params-with-project-root
                                                nil project-root)
                                       :connect-timeout 1)))
     (cond
       ((%bridge-obj ping)
-       (let* ((result (%bridge-obj ping))
-              (reported (%bridge-field result "project_root")))
-         (cond
-           ((and (stringp reported) (string= reported project-id))
-            (values :running ping result))
-           (t
-            (values :project-mismatch ping result)))))
+       (values :running ping (%bridge-obj ping)))
       ((%bridge-project-root-error-p ping)
+       (values :project-mismatch ping nil))
+      ((and (eq ping :no-daemon)
+            (uiop:file-exists-p sock))
        (values :project-mismatch ping nil))
       (t
        (values :unresponsive ping nil)))))
@@ -2502,10 +2503,7 @@ server-owned session for later `call debug-* ...' requests."
     (flet ((emit-json (state &rest extras)
              (%bridge-emit-json
               (%json-object*
-               (list* "state" state
-                      "socket" (namestring sock)
-                      "log" (namestring log)
-                      extras)))))
+               (list* "state" state extras)))))
       (let ((existing (%bridge-read-pidfile pid)))
         (cond
           ((null existing)

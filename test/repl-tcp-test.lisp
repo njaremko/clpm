@@ -269,10 +269,70 @@
 (format t "  wrong-token rejection OK~%")
 
 ;;; ----------------------------------------------------------------------------
-;;; Unix transport is unaffected: send-request without a token still works on
-;;; a Unix-socket daemon.
+;;; Lifecycle code treats a wrong-token endpoint as stale project metadata,
+;;; rather than reporting another project's live daemon as this one.
 
-(format t "Test: Unix transport requires no token~%")
+(format t "Test: TCP stale foreign token is stale lifecycle state~%")
+(clpm.store:with-temp-dir (tmp)
+  (let* ((root-a (merge-pathnames "project-a/" tmp))
+         (root-b (merge-pathnames "project-b/" tmp))
+         (port-a (namestring (merge-pathnames ".clpm/repl.port" root-a)))
+         (port-b (namestring (merge-pathnames ".clpm/repl.port" root-b)))
+         (server-thread nil))
+    (ensure-directories-exist (merge-pathnames ".clpm/" root-a))
+    (ensure-directories-exist (merge-pathnames ".clpm/" root-b))
+    (setf server-thread
+          (sb-thread:make-thread
+           (lambda ()
+             (handler-case
+                 (clpm.repl:start-server
+                  :transport-kind :tcp
+                  :port-path port-a
+                  :project-root (namestring
+                                 (uiop:ensure-directory-pathname
+                                  (truename root-a))))
+               (error (c)
+                 (format *error-output* "daemon: ~A~%" c))))
+           :name "test-tcp-foreign-token"))
+    (unwind-protect
+         (progn
+           (loop for i from 0 below 50
+                 while (not (probe-file port-a))
+                 do (sleep 0.1))
+           (assert-true (probe-file port-a) "project A port file never appeared")
+           (let* ((raw (uiop:read-file-string port-a))
+                  (nl (position #\Newline raw))
+                  (port (parse-integer (subseq raw 0 nl) :junk-allowed nil))
+                  (ping (find-symbol "%BRIDGE-PING-DAEMON"
+                                     (find-package "CLPM.COMMANDS"))))
+             (with-open-file (s port-b :direction :output
+                                       :if-exists :supersede
+                                       :if-does-not-exist :create
+                                       :external-format :utf-8)
+               (format s "~D~%deadbeefdeadbeefdeadbeefdeadbeef~%" port))
+             (multiple-value-bind (state response result)
+                 (funcall ping port-b root-b)
+               (declare (ignore result))
+               (assert-eql :project-mismatch state)
+               (let ((err (lookup response "error")))
+                 (assert-true (and err
+                                   (search "token" (lookup err "message")))
+                              "expected token rejection response, got ~S"
+                              response)))))
+      (handler-case (clpm.repl:send-request port-a "shutdown")
+        (error () nil))
+      (loop for i from 0 below 30
+            while (sb-thread:thread-alive-p server-thread)
+            do (sleep 0.1))
+      (when (sb-thread:thread-alive-p server-thread)
+        (ignore-errors (sb-thread:terminate-thread server-thread))))))
+(format t "  TCP stale token lifecycle OK~%")
+
+;;; ----------------------------------------------------------------------------
+;;; Unix transport writes an auth token next to the socket. The public client
+;;; helper reads and injects it.
+
+(format t "Test: Unix transport injects its auth token~%")
 (when (and (find-package "UIOP/OS")
            (fboundp (find-symbol "OS-WINDOWS-P" "UIOP/OS"))
            (funcall (find-symbol "OS-WINDOWS-P" "UIOP/OS")))

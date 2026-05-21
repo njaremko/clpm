@@ -51,6 +51,20 @@
                     (integerp index))
             return index)))
 
+(defun authenticated-message (conn message)
+  (let ((token (clpm.repl::connection-token conn)))
+    (if (null token)
+        message
+        (let* ((entries (copy-list (cadr message)))
+               (params-cell (assoc "params" entries :test #'string=))
+               (params (and params-cell (cdr params-cell)))
+               (auth-params (clpm.repl::%inject-token params token)))
+          (if params-cell
+              (setf (cdr params-cell) auth-params)
+              (setf entries (append entries
+                                    (list (cons "params" auth-params)))))
+          (list :object entries)))))
+
 (defun with-daemon (fn)
   (let* ((sock (format nil "/tmp/clpm-rb-debug-~A.sock" (random (expt 2 32))))
          (thread (sb-thread:make-thread
@@ -83,14 +97,14 @@ can keep reading event frames)."
      (handler-case
          (clpm.repl::%write-line-json
           (clpm.repl::connection-stream conn)
-          message)
+          (authenticated-message conn message))
        (error () nil)))
    :name "test-debug-replier"))
 
 (defun send-raw (conn message)
   (clpm.repl::%write-line-json
    (clpm.repl::connection-stream conn)
-   message))
+   (authenticated-message conn message)))
 
 (defun read-raw-frame (conn)
   (let ((line (read-line (clpm.repl::connection-stream conn) nil nil)))

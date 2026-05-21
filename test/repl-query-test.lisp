@@ -86,13 +86,10 @@
                         ;; Reply on the same id with the answer.
                         (clpm.repl.compat:make-thread
                          (lambda ()
-                           (clpm.repl::%write-line-json
-                            (clpm.repl::connection-stream conn)
-                            (clpm.repl::%json-object
-                             "id" eval-id
-                             "method" "query-response"
-                             "params" (clpm.repl::%json-object
-                                       "value" "hello there"))))
+                           (clpm.repl:send-continuation-on-connection
+                            conn eval-id "query-response"
+                            :params (clpm.repl::%json-object
+                                     "value" "hello there")))
                          :name "test-query-replier"))
                       nil))))
              (let ((result (lookup response "result")))
@@ -112,12 +109,9 @@
     (let ((conn (clpm.repl:open-connection sock)))
       (unwind-protect
            (let ((stream (clpm.repl::connection-stream conn)))
-             (clpm.repl::%write-line-json
-              stream
-              (clpm.repl::%json-object
-               "id" 999
-               "method" "query-response"
-               "params" (clpm.repl::%json-object "value" "hi")))
+             (clpm.repl:send-continuation-on-connection
+              conn 999 "query-response"
+              :params (clpm.repl::%json-object "value" "hi"))
              (let* ((line (read-line stream nil nil))
                     (frame (and line
                                 (clpm.io.json:read-json-from-string line)))

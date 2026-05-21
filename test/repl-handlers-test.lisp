@@ -108,11 +108,8 @@
                         (setf entered t)
                         (clpm.repl.compat:make-thread
                          (lambda ()
-                           (clpm.repl::%write-line-json
-                            (clpm.repl::connection-stream conn)
-                            (clpm.repl::%json-object
-                             "id" eval-id
-                             "method" "debug-continue")))
+                           (clpm.repl:send-continuation-on-connection
+                            conn eval-id "debug-continue"))
                          :name "test-handler-resumer"))
                       nil))))
              (assert-true entered "never entered debugger from break")
