@@ -750,6 +750,37 @@ the public protocol."
        nil)
       (t (%public-package-name package server)))))
 
+(defun %replace-substrings (text old new)
+  "Return TEXT with every OLD substring replaced by NEW."
+  (cond
+    ((or (not (stringp text))
+         (not (stringp old))
+         (zerop (length old)))
+     text)
+    (t
+     (with-output-to-string (out)
+       (loop with start = 0
+             for pos = (search old text :start2 start)
+             do (cond
+                  (pos
+                   (write-string text out :start start :end pos)
+                   (write-string new out)
+                   (setf start (+ pos (length old))))
+                  (t
+                   (write-string text out :start start)
+                   (return))))))))
+
+(defun %public-package-text (text &optional server)
+  "Rewrite SERVER's private package name in protocol-visible TEXT."
+  (let* ((server (or server (%current-server-binding)))
+         (package (and server (server-initial-package server)))
+         (private-name (and (%project-package-p package)
+                            (package-name package))))
+    (if (and private-name (stringp text))
+        (%replace-substrings text private-name
+                             (%public-package-name package server))
+        text)))
+
 (defun %resolve-package-for-server (server name)
   "Resolve public package NAME in SERVER's namespace."
   (cond
@@ -1319,8 +1350,10 @@ must not block the eval response."
                          (symbol-name name)
                          (princ-to-string name)))
            (pkg-name (cond
-                       ((symbolp name) (package-name (symbol-package name)))
-                       (t (package-name package))))
+                       ((symbolp name)
+                        (%public-package-name
+                         (or (symbol-package name) package)))
+                       (t (%public-package-name package))))
            (key (list kind name-str pkg-name))
            (record (list (cons "kind" kind)
                          (cons "name" name-str)
@@ -1352,17 +1385,19 @@ must not block the eval response."
 errors, return a fallback `#<unprintable ...>' string instead of letting
 the error blast through the eval response."
   (handler-case
-      (let ((*print-length* (if print-length-p print-length (or *print-length* 200)))
-            (*print-level*  (if print-level-p print-level (or *print-level* 8)))
-            (*print-circle* (if print-circle-p print-circle t))
-            (*print-radix*  (if print-radix-p print-radix *print-radix*))
-            (*print-base*   (if print-base-p print-base *print-base*))
-            (*print-pretty* (if print-pretty-p print-pretty nil)))
-        (prin1-to-string value))
+      (%public-package-text
+       (let ((*print-length* (if print-length-p print-length (or *print-length* 200)))
+             (*print-level*  (if print-level-p print-level (or *print-level* 8)))
+             (*print-circle* (if print-circle-p print-circle t))
+             (*print-radix*  (if print-radix-p print-radix *print-radix*))
+             (*print-base*   (if print-base-p print-base *print-base*))
+             (*print-pretty* (if print-pretty-p print-pretty nil)))
+         (prin1-to-string value)))
     (error (c)
-      (format nil "#<unprintable ~A: ~A>"
-              (handler-case (type-of value) (error () "?"))
-              (handler-case (princ-to-string c) (error () "?"))))))
+      (%public-package-text
+       (format nil "#<unprintable ~A: ~A>"
+               (handler-case (type-of value) (error () "?"))
+               (handler-case (princ-to-string c) (error () "?")))))))
 
 (defparameter +history-symbols+ '("*" "**" "***" "+" "++" "+++" "/" "//" "///")
   "REPL history bindings updated after every eval. CL semantics: `*' is the
@@ -3583,7 +3618,7 @@ inhabits: :function, :macro, :generic-function, :special-operator,
     (when (find-package sym) (push :package tags))
     (nreverse tags)))
 
-(defun %apropos-entries (pattern pkg)
+(defun %apropos-entries (pattern pkg &optional server)
   "Build [{name, package, kinds, external}, ...] for symbols matching PATTERN.
 PKG is a package object or NIL (search all)."
   (let ((upat (string-upcase pattern))
@@ -3591,22 +3626,23 @@ PKG is a package object or NIL (search all)."
     (flet ((add (sym)
              (let* ((name (symbol-name sym))
                     (sym-pkg (symbol-package sym))
+                    (public-pkg (%public-package-list-name sym-pkg server))
                     (external? (and sym-pkg
                                     (eq :external
                                         (nth-value 1
                                                    (find-symbol name sym-pkg))))))
-               (push (list :object
-                           (list (cons "name" name)
-                                 (cons "package"
-                                       (and sym-pkg (package-name sym-pkg)))
-                                 (cons "kinds"
-                                       (%json-array
-                                        (mapcar (lambda (k)
-                                                  (string-downcase
-                                                   (symbol-name k)))
-                                                (%symbol-kinds sym))))
-                                 (cons "external" (and external? t))))
-                     entries))))
+               (when public-pkg
+                 (push (list :object
+                             (list (cons "name" name)
+                                   (cons "package" public-pkg)
+                                   (cons "kinds"
+                                         (%json-array
+                                          (mapcar (lambda (k)
+                                                    (string-downcase
+                                                     (symbol-name k)))
+                                                  (%symbol-kinds sym))))
+                                   (cons "external" (and external? t))))
+                       entries)))))
       (cond
         (pkg
          (do-symbols (s pkg)
@@ -3648,10 +3684,11 @@ external}, ...]}'."
                       :description "Limit the search to one package."))
   :handler
   (lambda (server params id ctx)
-    (declare (ignore server ctx))
+    (declare (ignore ctx))
     (let* ((pat (%json-getf params "pattern"))
            (pkg-name (%json-getf params "package"))
-           (pkg (and pkg-name (%find-package-loose pkg-name))))
+           (pkg (and pkg-name
+                     (%resolve-package-for-server server pkg-name))))
       (cond
         ((not (stringp pat))
          (%error-response id "protocol-error" "missing `pattern' param"))
@@ -3663,7 +3700,7 @@ external}, ...]}'."
           id
           (%json-object
            "entries"
-           (%json-array (%apropos-entries pat pkg))))))))))
+           (%json-array (%apropos-entries pat pkg server))))))))))
 
 (%register-method
  (make-method-spec
@@ -3919,7 +3956,8 @@ documentation, and inline-p."
           (%json-object
            "name" (symbol-name sym)
            "package" (and (symbol-package sym)
-                          (package-name (symbol-package sym)))
+                          (%public-package-name
+                           (symbol-package sym) server))
            "arglist" (%safe-prin1 (%arglist-of sym))
            "documentation" (handler-case (documentation sym 'function)
                              (error () nil))
@@ -4147,7 +4185,8 @@ slices [offset, offset+page-size)."
                                      "kind" "name"))
                  (list (%json-object "i" 1 "label" "package"
                                      "repr" (and (symbol-package value)
-                                                 (package-name (symbol-package value)))
+                                                 (%public-package-name
+                                                  (symbol-package value)))
                                      "kind" "package"))
                  (when (boundp value)
                    (list (%json-object "i" 2 "label" "value"
@@ -5062,7 +5101,8 @@ as a prin1 string, or NIL for `(values)')."
             (let ((text (with-output-to-string (s)
                           (let ((*package* pkg)) (describe sym s)))))
               (%success-response id
-               (%json-object "output" text))))))))))
+               (%json-object "output"
+                             (%public-package-text text server)))))))))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Server: accept loop

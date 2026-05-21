@@ -2221,9 +2221,9 @@ but output kind and machine-readable shape are semantic.
     an authenticated ping whose params select `canonical(project)`.
   - A Lisp process hosts at most one active project daemon. Different projects
     get separate daemon processes, not separate threads in one CL image.
-  - `current-package`, `list-workers`, and eval result package fields report
-    the selected daemon's private default package as `COMMON-LISP-USER` and
-    never expose a root-derived `CLPM.REPL.USER.*` name.
+  - Every public REPL observer reports the selected daemon's private default
+    package as `COMMON-LISP-USER` and never exposes a root-derived
+    `CLPM.REPL.USER.*` name.
   - Shutting down a project daemon releases CLPM's owned default package, so a
     later foreground daemon in the same Lisp process does not inherit stopped
     REPL bindings as a hidden cache.
@@ -2837,7 +2837,8 @@ Failed-counterexample regressions:
   daemon.
 - A second active project daemon in one Lisp process is rejected; different
   project REPLs are isolated by process, not by sharing a CL image.
-- `current-package`, `list-workers`, `ping`, and
+- `current-package`, `list-workers`, `apropos`, `function-info`,
+  `list-redefinitions`, `describe`, `inspect`, `list-traced`, `ping`, and
   `repl daemon --status --json` do not expose root-derived private package
   names, socket paths, log paths, or selected project paths.
 - `clpm doctor extra`, `clpm registry list extra`,

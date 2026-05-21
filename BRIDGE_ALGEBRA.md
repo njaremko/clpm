@@ -476,6 +476,14 @@ forall s w worker form.
 ```
 
 ```haskell
+Law: "private-project-package-quotient"
+forall public observation o.
+  o mentions selectedProjectPrivatePackage
+  => render o contains "COMMON-LISP-USER"
+     and not contains "CLPM.REPL.USER."
+```
+
+```haskell
 Law: "same-worker-serial"
 forall a b worker.
   target a = worker and target b = worker

@@ -344,7 +344,38 @@
                    (run-cli-captured '("repl" "call"
                                        "list-redefinitions"))
                  (assert-eql 0 rc)
-                 (assert-contains stdout "DIFF-FN-X"))
+                 (assert-contains stdout "DIFF-FN-X")
+                 (assert-contains stdout "COMMON-LISP-USER")
+                 (assert-not-contains stdout "CLPM.REPL.USER."))
+               (run-cli-captured '("repl" "eval"
+                                   "(defun package-leak-sentinel () 42)"))
+               (dolist (case '(("apropos" ("--pattern" "PACKAGE-LEAK-SENTINEL"))
+                               ("function-info" ("--symbol" "PACKAGE-LEAK-SENTINEL"))
+                               ("describe" ("--symbol" "PACKAGE-LEAK-SENTINEL"))))
+                 (destructuring-bind (method args) case
+                   (multiple-value-bind (rc stdout)
+                       (run-cli-captured (append (list "repl" "call" method)
+                                                 args))
+                     (assert-eql 0 rc)
+                     (assert-contains stdout "PACKAGE-LEAK-SENTINEL")
+                     (assert-contains stdout "COMMON-LISP-USER")
+                     (assert-not-contains stdout "CLPM.REPL.USER."))))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl" "call" "inspect"
+                                       "--form" "(quote package-leak-sentinel)"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "PACKAGE-LEAK-SENTINEL")
+                 (assert-contains stdout "COMMON-LISP-USER")
+                 (assert-not-contains stdout "CLPM.REPL.USER."))
+               (run-cli-captured '("repl" "call" "trace"
+                                   "--symbols" "[\"PACKAGE-LEAK-SENTINEL\"]"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl" "call" "list-traced"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "PACKAGE-LEAK-SENTINEL")
+                 (assert-not-contains stdout "CLPM.REPL.USER."))
+               (run-cli-captured '("repl" "call" "untrace"
+                                   "--symbols" "[\"PACKAGE-LEAK-SENTINEL\"]"))
                (format t "  source RPCs OK~%")
 
                (format t "Test: legacy wrappers are gone~%")
