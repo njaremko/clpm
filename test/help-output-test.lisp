@@ -183,6 +183,22 @@
   (assert-contains stdout "clpm project new"))
 (format t "  `<cmd> --help` PASSED~%")
 
+(format t "Testing command-local help aliases...~%")
+(dolist (command '("project" "deps" "registry" "run" "store"))
+  (multiple-value-bind (expected-code expected-stdout expected-stderr)
+      (run-cli-captured (list "help" command))
+    (declare (ignore expected-stderr))
+    (assert-eql 0 expected-code)
+    (multiple-value-bind (code stdout stderr)
+        (run-cli-captured (list command "help"))
+      (assert-eql 0 code)
+      (assert-true (string= expected-stdout stdout)
+                   "~A help diverged from clpm help ~A:~%expected:~%~A~%actual:~%~A"
+                   command command expected-stdout stdout)
+      (assert-true (string= "" stderr)
+                   "~A help wrote to stderr:~%~A" command stderr))))
+(format t "  command-local help aliases PASSED~%")
+
 (format t "Testing per-subcommand help...~%")
 
 ;; workspace add: dedicated page with the add usage line.

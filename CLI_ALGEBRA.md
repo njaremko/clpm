@@ -1234,6 +1234,10 @@ but output kind and machine-readable shape are semantic.
 - Commands derived instead of exposed:
   - Resource-local `--help` still derives the same closed selector as
     `clpm help ...`.
+  - Exact resource-root `COMMAND help` aliases for `project`, `deps`,
+    `registry`, `run`, and `store` derive the same selector as
+    `clpm help COMMAND`; longer `COMMAND help ...` forms are not extra help
+    grammar.
 - Commands that survived and why:
   - `help run repl` survives as an error page because the help schema
     deliberately points old ordinary-REPL users to `clpm repl`.
@@ -2609,6 +2613,12 @@ forall selector ctx world.
   denote (help selector) ctx world =
     Succeeded world (HumanText (render selector commandSchema))
 
+Law: "exact resource-root help alias"
+forall command in {project, deps, registry, run, store}.
+  denote (parse [command, "help"]) ctx world =
+    denote (parse ["help", command]) ctx world
+  xs /= [] => denote (parse ([command, "help"] ++ xs)) ctx world = Failed
+
 Law: "root help mentions only root controls"
 forall scoped.
   scoped in {Offline, Insecure, FetchRetries, FetchTimeout,
@@ -2790,6 +2800,10 @@ Observation properties:
 - Root `help` advertises only top-level controls; scoped dependency,
   registry, fetch, and Lisp-selection options live on command-specific help
   and README scoped-option documentation.
+- Exact `project help`, `deps help`, `registry help`, `run help`, and
+  `store help` produce the same successful schema observation as
+  `clpm help project`, `clpm help deps`, `clpm help registry`,
+  `clpm help run`, and `clpm help store`.
 - `deps search/info/audit/sbom --json` remain stable.
 
 Failed-counterexample regressions:

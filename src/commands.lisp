@@ -320,7 +320,7 @@ When not in a project, only the global config registries are used."
                (log-error "  clpm project package")
                1))
       (cond
-        ((or (null sub) (string= sub "help") (string= sub "--help"))
+        ((or (null sub) (string= sub "--help"))
          (usage))
         ((string= sub "new")
          (apply #'cmd-new rest))
@@ -1674,7 +1674,7 @@ deps don't churn)."
                (log-error "  clpm deps sbom --format <format> [--out <path>]")
                1))
       (cond
-        ((or (null sub) (string= sub "help") (string= sub "--help"))
+        ((or (null sub) (string= sub "--help"))
          (usage))
         ((string= sub "add")
          (apply #'cmd-add rest))
@@ -3340,7 +3340,7 @@ Returns an integer exit code."
          (log-error "Usage: clpm run scripts")
          (return-from cmd-run 1))
        (cmd-scripts "list"))
-      ((or (string= sub "help") (string= sub "--help"))
+      ((string= sub "--help")
        (%log-run-usage)
        1)
       (t
@@ -3939,7 +3939,7 @@ Default: remove the project's .clpm/ activation cache.
                (log-error "  clpm store gc [--dry-run]")
                1))
       (cond
-        ((or (null sub) (string= sub "help") (string= sub "--help"))
+        ((or (null sub) (string= sub "--help"))
          (usage))
         ((string= sub "clean")
          (apply #'cmd-clean rest))
@@ -4169,7 +4169,7 @@ Default: remove the project's .clpm/ activation cache.
   (let ((subcommand (first args))
         (rest (rest args)))
     (cond
-      ((or (null subcommand) (string= subcommand "help"))
+      ((null subcommand)
        (log-error "Usage: clpm registry <list|add|update|trust|init|key|publish> [options]")
        (return-from cmd-registry 1))
 

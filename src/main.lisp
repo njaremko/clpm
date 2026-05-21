@@ -59,6 +59,11 @@ Examples:
 
 ;;; Argument parsing
 
+(defun command-local-help-alias-p (command command-args)
+  "Return true for exact `COMMAND help' aliases with existing public surface."
+  (and (member command '(:project :deps :registry :run :store) :test #'eq)
+       (equal command-args '("help"))))
+
 (defun parse-args (args)
   "Parse command line arguments.
 Returns (values command command-args options)."
@@ -219,7 +224,12 @@ Returns (values command command-args options)."
            (push arg command-args))))
       (incf i))
     (if command
-        (values command (nreverse command-args) options)
+        (let ((command-args (nreverse command-args)))
+          (if (command-local-help-alias-p command command-args)
+              (values :help
+                      (list (string-downcase (symbol-name command)))
+                      options)
+              (values command command-args options)))
         (values :help nil options))))
 
 (defun option-present-p (option options)
