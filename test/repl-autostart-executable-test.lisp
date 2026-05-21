@@ -115,6 +115,10 @@
                (run-program-captured
                 (list (namestring exe) "-p" member "repl" "eval" form)
                 :directory ws-root))
+             (clpm-call (project method)
+               (run-program-captured
+                (list (namestring exe) "repl" "call" method)
+                :directory project))
              (stop-daemon (project)
                (ignore-errors
                  (run-program-captured
@@ -122,6 +126,20 @@
                   :directory project))))
         (unwind-protect
              (progn
+               (format t "Test: repl call does not autostart daemon~%")
+               (multiple-value-bind (rc stdout stderr)
+                   (clpm-call proj-a "methods")
+                 (when (zerop rc)
+                   (stop-daemon proj-a)
+                   (fail "expected call without daemon to fail~%stdout:~%~A~%stderr:~%~A"
+                         stdout stderr))
+                 (assert-eql 2 rc)
+                 (when (probe-file sock-a)
+                   (stop-daemon proj-a)
+                   (fail "repl call created daemon socket: ~A" sock-a))
+                 (assert-contains stderr "No daemon running"))
+               (format t "  call lifecycle isolation OK~%")
+
                (multiple-value-bind (rc stdout stderr)
                    (clpm-eval proj-a "(+ 1 2)")
                  (unless (zerop rc)

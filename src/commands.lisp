@@ -2171,7 +2171,7 @@ own renderer so this fallback is rarely hit."
       ((eq resp :no-daemon)
        (cond
          ((not autostart)
-          (log-error "No daemon running. Start one with `clpm repl daemon --detach` or drop --no-autostart.")
+          (log-error "No daemon running. Start one with `clpm repl daemon --detach`.")
           (return-from %bridge-send-or-autostart nil))
          (t
           (let ((rc (%bridge-daemon-start (list "--detach"))))
@@ -2596,7 +2596,7 @@ can pass through optional flags safely)."
   "Wrap a Lisp list of strings as a JSON array for params."
   (list :array (coerce raw 'list)))
 
-(defun %bridge-rpc (method &key params (autostart t) on-event)
+(defun %bridge-rpc (method &key params (autostart nil) on-event)
   "Project-aware RPC entry point.
 
 Resolves the project, optionally autostarts the daemon, sends METHOD
@@ -2686,9 +2686,11 @@ quotes around every non-JSON atom."
        (values body nil nil)))))
 
 (defun %bridge-call (args)
-  "Generic typed method constructor for `clpm repl call METHOD ...'."
+  "Generic typed method constructor for `clpm repl call METHOD ...'.
+
+`call' addresses an existing REPL image. It never starts the daemon; image
+lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
   (let ((method (pop args))
-        (autostart t)
         (params '()))
     (unless method
       (log-error "Usage: clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...")
@@ -2699,8 +2701,6 @@ quotes around every non-JSON atom."
     (loop while args do
       (let ((arg (pop args)))
         (cond
-          ((string= arg "--no-autostart")
-           (setf autostart nil))
           ((string= arg "--params-json")
            (let ((raw (pop args)))
              (unless (stringp raw)
@@ -2741,7 +2741,6 @@ quotes around every non-JSON atom."
     (multiple-value-bind (resp)
         (%bridge-rpc method
                      :params (%bridge-call-params-object params)
-                     :autostart autostart
                      :on-event #'%bridge-emit-json)
       (cond
         ((or (null resp) (eq resp :no-daemon) (eq resp :io-error))
@@ -5897,9 +5896,10 @@ sub-subcommand=\"set\")."
            ((and sub (string= sub "call"))
             (p "Usage: clpm repl call <method> [--params-json <json>] [--PARAM <value>]...")
             (p "")
-            (p "Send one daemon RPC method. Parameter values are parsed as JSON")
-            (p "when possible, otherwise passed as strings. Hyphens in flag names")
-            (p "map to underscores in JSON parameter names.")
+           (p "Send one daemon RPC method. Parameter values are parsed as JSON")
+           (p "when possible, otherwise passed as strings. Hyphens in flag names")
+           (p "map to underscores in JSON parameter names.")
+           (p "The daemon must already be running; call never autostarts it.")
             (p "")
             (p "Examples:")
             (p "  clpm repl call methods")
@@ -5919,7 +5919,8 @@ sub-subcommand=\"set\")."
             (p "")
             (p "Drive a persistent project-scoped Lisp daemon. `call methods`")
             (p "lists the RPC registry, and `call help --method NAME` returns")
-            (p "the exact parameter schema for a method.")
+            (p "the exact parameter schema for a method. `call` requires an")
+            (p "existing daemon; use `daemon --detach` or `eval` to start one.")
             (p "")
             (p "Run `clpm help repl <subcommand>` for per-subcommand details.")
             (p "")

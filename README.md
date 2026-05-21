@@ -115,7 +115,8 @@ State persists across `eval` calls. Hung evals are unwound with
 `clpm repl call interrupt` (daemon stays up); a wedged worker is
 recovered with `clpm repl call reset`.
 Use `clpm repl eval FORM` for evaluation; `clpm repl call` is not an
-alternate spelling of the daemon's eval RPC.
+alternate spelling of the daemon's eval RPC. `call` requires an existing
+daemon; it never starts one implicitly.
 
 ### Capabilities
 

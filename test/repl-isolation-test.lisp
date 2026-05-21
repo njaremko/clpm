@@ -134,14 +134,12 @@
                (assert-eql 3 rc)
                (assert-contains stderr "session:"))
              (multiple-value-bind (rc stdout)
-                 (run-cli-captured '("repl" "call" "list-debug-sessions"
-                                     "--no-autostart")
+                 (run-cli-captured '("repl" "call" "list-debug-sessions")
                                    :directory project-a)
                (assert-eql 0 rc)
                (assert-contains stdout "project-a-only"))
              (multiple-value-bind (rc stdout)
-                 (run-cli-captured '("repl" "call" "list-debug-sessions"
-                                     "--no-autostart")
+                 (run-cli-captured '("repl" "call" "list-debug-sessions")
                                    :directory project-b)
                (assert-eql 0 rc)
                (assert-not-contains stdout "project-a-only"))

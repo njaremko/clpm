@@ -389,7 +389,7 @@ but output kind and machine-readable shape are semantic.
 | `repl daemon --status` | Human status | Errors only | Cleans stale pid/socket files | `--json` status object | `test/repl-cli-test.lisp` |
 | `repl daemon --stop` | Human stop/not-running status | Errors only | Removes daemon lifecycle state | None | `test/repl-cli-test.lisp` |
 | `repl eval` | Human `=> value` plus captured output | Debug/errors on stderr | Mutates persistent image/worker state | `--json` raw eval response | `test/repl-cli-test.lisp`, `test/repl-cli-subcommands-test.lisp` |
-| `repl call` | Raw JSON response/event frames | Transport/usage errors | Mutates only the called method's REPL resource | Always JSON | `test/repl-cli-subcommands-test.lisp`, `test/repl-methods-test.lisp` |
+| `repl call` | Raw JSON response/event frames | Transport/usage errors | Mutates only the called method's existing REPL resource; never autostarts | Always JSON | `test/repl-cli-subcommands-test.lisp`, `test/repl-methods-test.lisp` |
 
 ## Hostile Reduction Ledger
 
@@ -1082,6 +1082,29 @@ but output kind and machine-readable shape are semantic.
     operating-system cwd because the OS process owns that state. In-process
     tests therefore validate per-daemon Lisp pathname defaults as the useful
     isolation boundary for relative Lisp file operations.
+
+### Iteration 26: Attack `repl call` Lifecycle Leakage
+
+- Commands deleted:
+  - Hidden `repl call --no-autostart` as a semantic option. `call` now has
+    no autostart path, so the flag denoted nothing useful.
+- Commands merged:
+  - Daemon creation remains only in `repl daemon --detach` and the ergonomic
+    `repl eval` autostart path.
+- Commands derived instead of exposed:
+  - `methods` and `help` remain daemon RPCs, not local schema fallbacks. They
+    observe the running daemon's actual method registry.
+- Commands that survived and why:
+  - `repl call METHOD` survives as the generic request constructor for an
+    existing project image.
+- Laws/protocol invariants added:
+  - `daemonAbsent root => denote (repl (call method params)) root world =
+     Failed no-daemon`.
+  - `repl call` must not add `root` to `world.repls`; only `repl daemon` and
+    `repl eval` may do that.
+- Remaining discomfort:
+  - `time-eval` and `profile-eval` are still eval-shaped RPC aliases. They
+    should be attacked as either `repl eval` options or deleted recipes.
 
 ## Constructors
 
