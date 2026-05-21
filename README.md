@@ -133,9 +133,9 @@ daemon; it never starts one implicitly. Transport fields such as
   binds `*` to the focus; `inspect-mutate` replaces an element.
 - **Compile diagnostics.** `call compile-file --path PATH` returns warnings/errors with
   file + line positions, suitable for surfacing in an editor.
-- **Source navigation.** `find-definitions`, `who-calls`, `apropos`,
-  `documentation`, `arglist`, `complete-symbol`, `disassemble`,
-  `describe-system`, all through `call METHOD`.
+- **Source navigation.** `call find-definition`, `call xref`, `call apropos`,
+  `call documentation`, `call arglist`, `call complete-symbol`,
+  `call disassemble`, and `call describe-system`.
 - **Named workers.** `eval --worker NAME` runs on an isolated worker with
   its own `*package*`, history, and redefinition log. `call list-workers`
   and `call kill-worker --name NAME` manage them.

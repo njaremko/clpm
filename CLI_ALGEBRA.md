@@ -1438,6 +1438,27 @@ but output kind and machine-readable shape are semantic.
   - None for `eval` discovery. Method schemas still use string type names,
     which remains a separate schema-algebra problem.
 
+### Iteration 40: Pin README to Callable REPL Methods
+
+- Commands deleted:
+  - Stale README names `find-definitions` and `who-calls`.
+- Commands merged:
+  - Source navigation prose now names the callable method constructors:
+    `call find-definition` and `call xref`.
+- Commands derived instead of exposed:
+  - No runtime command. The documentation observation is now checked by
+    `test/readme-docs-test.lisp` instead of trusted by review memory.
+- Commands that survived and why:
+  - README remains a human overview, but it must not introduce method names
+    outside the callable registry.
+- Laws/protocol invariants added:
+  - `README_REPL_METHODS subset callableMethodRegistry`.
+  - Removed discovery examples such as `help --method eval` do not reappear
+    in README prose.
+- Remaining discomfort:
+  - README is still hand-maintained Markdown; this adds a targeted guard for
+    stale REPL method names, not a generator.
+
 ## Constructors
 
 Terminal constructors:
