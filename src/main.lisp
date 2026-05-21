@@ -39,7 +39,7 @@ Options:
   --lisp <impl>    Lisp implementation (sbcl|ccl|ecl)
   -p, --package M  Workspace member to target
   --offline        Fail if artifacts not in cache
-  --insecure       Skip signature verification (dangerous)
+  --insecure       Skip signature verification for registry-loading commands
   --fetch-retries N      Retry budget for HTTP fetches (default: 3, env: CLPM_FETCH_RETRIES)
   --fetch-timeout SECS   Per-request timeout for HTTP fetches (default: 60, env: CLPM_FETCH_TIMEOUT)
   -h, --help       Show this help
@@ -172,9 +172,9 @@ Returns (values command command-args options)."
                          (cons (string-downcase (symbol-name command))
                                (nreverse command-args))
                          options))
-               (return-from parse-args (values :help nil nil))))
+               (return-from parse-args (values :help nil options))))
           ((string= arg "--version")
-           (return-from parse-args (values :version nil nil)))
+           (return-from parse-args (values :version nil options)))
           ;; Command
           ((and (null command) (not (char= (char arg 0) #\-)))
            (setf command (intern (string-upcase arg) :keyword)))
@@ -185,6 +185,36 @@ Returns (values command command-args options)."
     (if command
         (values command (nreverse command-args) options)
         (values :help nil options))))
+
+(defun option-present-p (option options)
+  "Return true when OPTION is present in parsed OPTIONS."
+  (some (lambda (opt)
+          (if (consp opt)
+              (eq (car opt) option)
+              (eq opt option)))
+        options))
+
+(defun registry-verification-command-p (command command-args)
+  "Return true when COMMAND may load signed registry data."
+  (case command
+    (:deps
+     (let ((subcommand (first command-args)))
+       (and (stringp subcommand)
+            (member subcommand '("sync" "update" "search" "info")
+                    :test #'string=))))
+    (:registry
+     (let ((subcommand (first command-args)))
+       (and (stringp subcommand)
+            (string= subcommand "update"))))
+    (t nil)))
+
+(defun validate-option-scope (command command-args options)
+  "Reject global options that have no denotation for COMMAND."
+  (when (and (option-present-p :insecure options)
+             (not (registry-verification-command-p command command-args)))
+    (clpm.errors:signal-error
+     'clpm.errors:clpm-user-error
+     "--insecure only applies to commands that load signed registry data: clpm deps sync, clpm deps update, clpm deps search, clpm deps info, or clpm registry update")))
 
 (defun apply-options (options)
   "Apply parsed options to global variables."
@@ -202,10 +232,15 @@ Returns (values command command-args options)."
   "Run CLPM with ARGS and return an integer exit code.
 
 This function must not call `sb-ext:exit` so it can be used from tests."
-  (handler-case
-      (multiple-value-bind (command command-args options)
-          (parse-args args)
-        (apply-options options)
+  (let ((*verbose* nil)
+        (*offline* nil)
+        (*insecure* nil)
+        (*jobs* 1))
+    (handler-case
+        (multiple-value-bind (command command-args options)
+            (parse-args args)
+          (validate-option-scope command command-args options)
+          (apply-options options)
         ;; Bind command module variables
         (let ((clpm.commands:*verbose* *verbose*)
               (clpm.commands:*offline* *offline*)
@@ -280,7 +315,7 @@ This function must not call `sb-ext:exit` so it can be used from tests."
       (when *verbose*
         (format *error-output* "~&Backtrace:~%")
         (sb-debug:print-backtrace :stream *error-output* :count 20))
-      1)))
+      1))))
 
 (defun main (&optional (args (uiop:command-line-arguments)))
   "Main entry point for CLPM."

@@ -431,10 +431,9 @@ Bare `clpm [options]` denotes `clpm [options] help`.
   - Package export morphism: exported command-handler symbols are exactly the
     public command constructors, not every implementation leaf.
 - Remaining discomfort:
-  - `--insecure` remains a deliberately dangerous global option because the
-    test suite needs a way to prove verification failure and explicit
-    debugging sometimes requires bypassing trust. It is semantically marked
-    as an integrity override and must stay noisy in documentation and logs.
+  - `--insecure` still exists because explicit debugging sometimes requires
+    bypassing trust. A later pass must prove it is scoped to verifier-bearing
+    commands rather than tolerated as inert decoration everywhere.
 
 ### Iteration 5: Attack Output-Mode Scope
 
@@ -460,6 +459,36 @@ Bare `clpm [options]` denotes `clpm [options] help`.
   - JSON daemon status is an observation:
     `parse ["repl", "daemon", "--status", "--json"] =
      Repl (Daemon (Status Json))`.
+- Remaining discomfort:
+  - `repl call METHOD` is still intentionally broad. It survives only as the
+    controlled protocol hook and remains a target for the next RPC-overreach
+    attack.
+
+### Iteration 6: Attack Integrity-Override Scope
+
+- Commands deleted:
+  - No commands. The cut removes inert `--insecure` placements.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - `--insecure` is not an observation modifier and not a command-wide mode.
+    It denotes exactly one thing: disable signed-registry verification while
+    loading registry data for a command that would otherwise verify it.
+- Commands that survived and why:
+  - `--insecure deps sync`, `--insecure deps update`,
+    `--insecure deps search`, `--insecure deps info`, and
+    `--insecure registry update` survive because each may load signed
+    registry snapshots or release metadata.
+  - `--insecure help`, `repl --insecure`, and other inert placements are
+    rejected. A dangerous flag with no denotation is worse than syntax noise.
+- Laws/protocol invariants added:
+  - Integrity overrides are verifier-scoped:
+    `parse ["--insecure", "help"] = Error`.
+  - A verifier-bearing command may carry the override:
+    `parse ["--insecure", "deps", "sync", "--to", "lock"] =
+     Right (deps (sync Lock) with IntegrityOverride)`.
+  - Invocation option specials are per-run bindings; one `run-cli` call must
+    not leak `--insecure` into the next in-process call.
 - Remaining discomfort:
   - `repl call METHOD` is still intentionally broad. It survives only as the
     controlled protocol hook and remains a target for the next RPC-overreach
@@ -606,6 +635,12 @@ Law: "json is leaf-scoped"
   parse ["repl", "--json"] = Error
   parse ["repl", "daemon", "--status", "--json"] =
     Right (repl (daemon (status Json)))
+
+Law: "insecure is verifier-scoped"
+  parse ["--insecure", "help"] = Error
+  parse ["repl", "--insecure"] = Error
+  parse ["--insecure", "deps", "sync", "--to", "lock"] =
+    Right (deps (sync Lock) with IntegrityOverride)
 
 Law: "help is schema projection"
 forall selector ctx world.
@@ -780,6 +815,8 @@ Failed-counterexample regressions:
   `clpm.commands:cmd-gc`, and other leaf handlers are not external symbols.
 - `clpm repl --json` is rejected; `--json` is not a resource-level output
   mode.
+- `clpm --insecure help` and `clpm repl --insecure` are rejected;
+  `--insecure` is not an inert global decoration.
 
 Reference versus optimized equivalence:
 

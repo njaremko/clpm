@@ -260,7 +260,7 @@ explicit resource operations.
 - `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for `run/test/repl`
 - `-p, --package <member>` - Workspace member to target from workspace root
 - `--offline` - Fail if artifacts not cached
-- `--insecure` - Skip signature verification
+- `--insecure` - Skip signature verification for registry-loading commands
 - `--fetch-retries N` - HTTP retry budget (default: 3, env: `CLPM_FETCH_RETRIES`)
 - `--fetch-timeout SECS` - Per-request timeout (default: 60, env: `CLPM_FETCH_TIMEOUT`)
 - `--with-optional <sys>` - Opt in to an optional dependency (repeatable)
