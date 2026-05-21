@@ -670,6 +670,40 @@ operations: `deps sync`, `deps update`, `deps search`, `deps info`,
     The next attack is whether parameter construction is too loose at the CLI
     boundary.
 
+### Iteration 13: Attack `repl call` Parameter Overreach
+
+- Commands deleted:
+  - No new command tokens. The prior `repl call eval` deletion remains the
+    important anti-aliasing cut.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - One-off wrappers for non-eval RPCs stay derived recipes:
+    `repl call METHOD --PARAM VALUE...` or `--params-json OBJECT`.
+- Commands that survived and why:
+  - `repl call METHOD` survives because the REPL daemon's method registry is
+    itself a semantic carrier: `methods` and `help` expose the closed method
+    domain, parameter names, parameter types, requiredness, and docs.
+  - `--PARAM VALUE` survives as a projection into that typed parameter object,
+    not as an untyped escape hatch. The daemon rejects unknown method names,
+    unknown parameter names, missing required parameters, non-object params,
+    and wrong JSON value types against the same registry that `methods` and
+    `help` report.
+  - `--params-json OBJECT` survives because array/object/null parameters
+    cannot be represented faithfully by scalar shell flags.
+- Laws/protocol invariants added:
+  - The public call constructor is closed over the registry:
+    `method notin registry => denote (repl (call method params)) =
+     Failed protocol-error`.
+  - Parameters are schema-typed:
+    `param notin method.params => Failed protocol-error`.
+  - CLI scalar params and `--params-json` are two renderings of the same
+    JSON object; later occurrences with the same key overwrite earlier ones.
+- Remaining discomfort:
+  - The complete command inventory still needs an output-contract audit:
+    human text versus JSON versus file writes must be classified for every
+    surviving observation.
+
 ## Constructors
 
 Terminal constructors:
@@ -815,6 +849,14 @@ Law: "json is leaf-scoped"
 Law: "eval has one public CLI constructor"
   parse ["repl", "call", "eval", "--form", form] = Error
   parse ["repl", "eval", form] = Right (repl (eval form))
+
+Law: "repl call is registry-closed"
+  method notin replMethodRegistry
+  => denote (repl (call method params)) ctx world = Failed 1 protocolError
+  param notin paramsFor(method)
+  => denote (repl (call method params)) ctx world = Failed 1 protocolError
+  type(params[param]) /= typeOf(method.param)
+  => denote (repl (call method params)) ctx world = Failed 1 protocolError
 
 Law: "insecure is verifier-scoped"
   parse ["--insecure", "help"] = Error

@@ -117,6 +117,17 @@
                  (assert-contains stderr "Use `clpm repl eval FORM`"))
                (format t "  eval alias rejection OK~%")
 
+               (format t "Test: call params are checked by method schema~%")
+               (multiple-value-bind (rc stdout stderr)
+                   (run-cli-captured '("repl" "call" "help"
+                                       "--method" "eval"
+                                       "--bogus" "true"))
+                 (declare (ignore stderr))
+                 (assert-eql 1 rc)
+                 (assert-contains stdout "\"error\"")
+                 (assert-contains stdout "unknown param"))
+               (format t "  schema rejection OK~%")
+
                (format t "Test: call dispatches ordinary RPCs~%")
                (multiple-value-bind (rc stdout)
                    (run-cli-captured '("repl" "call" "image-info"))
