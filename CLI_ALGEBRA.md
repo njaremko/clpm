@@ -291,6 +291,8 @@ clpm [options] repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 Bare `clpm [options]` denotes `clpm [options] help`.
 `repl call METHOD` excludes the daemon's `eval` RPC; public evaluation is
 `repl eval FORM`.
+`--offline` is accepted only where artifact/cache state can affect the
+operation: `deps sync` beyond the lock stage and `deps sbom`.
 
 ## Current Surface Classification
 
@@ -496,6 +498,32 @@ Bare `clpm [options]` denotes `clpm [options] help`.
     The next attack is whether parameter construction is too loose at the CLI
     boundary.
 
+### Iteration 8: Attack Offline Scope
+
+- Commands deleted:
+  - No commands. The cut removes inert `--offline` placements.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - `--offline` denotes an artifact/cache constraint, not a global program
+    mode. It is only meaningful for dependency realization stages that may
+    fetch sources or build artifacts, and for SBOM registry enrichment from a
+    lockfile.
+- Commands that survived and why:
+  - `--offline deps sync`, `--offline deps sync --to source|build|active`,
+    and `--offline deps sbom` survive because they can consult cached source,
+    build, or registry-enrichment state.
+  - `--offline help`, `repl --offline`, and `deps sync --to lock --offline`
+    are rejected because they do not perform artifact/cache realization.
+- Laws/protocol invariants added:
+  - Offline is cache-scoped:
+    `parse ["--offline", "help"] = Error`.
+  - Lock-only resolution is not an offline artifact operation:
+    `parse ["--offline", "deps", "sync", "--to", "lock"] = Error`.
+- Remaining discomfort:
+  - `--jobs`, `--lisp`, optional-dependency flags, and fetch tuning are still
+    accepted as broad parser options. Each needs the same denotational audit.
+
 ### Iteration 7: Attack Eval-as-Raw-RPC Alias
 
 - Commands deleted:
@@ -677,6 +705,13 @@ Law: "insecure is verifier-scoped"
   parse ["--insecure", "deps", "sync", "--to", "lock"] =
     Right (deps (sync Lock) with IntegrityOverride)
 
+Law: "offline is cache-scoped"
+  parse ["--offline", "help"] = Error
+  parse ["repl", "--offline"] = Error
+  parse ["--offline", "deps", "sync", "--to", "lock"] = Error
+  parse ["--offline", "deps", "sync", "--to", "source"] =
+    Right (deps (sync Source) with OfflineCacheOnly)
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -854,6 +889,9 @@ Failed-counterexample regressions:
   `--insecure` is not an inert global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes
   through `clpm repl eval FORM`.
+- `clpm --offline help`, `clpm repl --offline`, and
+  `clpm --offline deps sync --to lock` are rejected; `--offline` is only for
+  artifact/cache operations.
 
 Reference versus optimized equivalence:
 

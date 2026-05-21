@@ -38,7 +38,7 @@ Options:
   -j, --jobs N     Parallel jobs (default: 1)
   --lisp <impl>    Lisp implementation (sbcl|ccl|ecl)
   -p, --package M  Workspace member to target
-  --offline        Fail if artifacts not in cache
+  --offline        Use cached artifacts for dependency realization/SBOM
   --insecure       Skip signature verification for registry-loading commands
   --fetch-retries N      Retry budget for HTTP fetches (default: 3, env: CLPM_FETCH_RETRIES)
   --fetch-timeout SECS   Per-request timeout for HTTP fetches (default: 60, env: CLPM_FETCH_TIMEOUT)
@@ -208,13 +208,40 @@ Returns (values command command-args options)."
             (string= subcommand "update"))))
     (t nil)))
 
+(defun sync-lock-stage-p (command-args)
+  "Return true when dependency sync explicitly targets only the lock stage."
+  (loop for rest on command-args
+        for arg = (first rest)
+        when (and (stringp arg) (string= arg "--to"))
+          do (return (let ((stage (second rest)))
+                       (and (stringp stage) (string= stage "lock"))))
+        finally (return nil)))
+
+(defun artifact-cache-command-p (command command-args)
+  "Return true when COMMAND may consult artifact cache/offline realization."
+  (case command
+    (:deps
+     (let ((subcommand (first command-args)))
+       (cond
+         ((not (stringp subcommand)) nil)
+         ((string= subcommand "sync")
+          (not (sync-lock-stage-p command-args)))
+         ((string= subcommand "sbom") t)
+         (t nil))))
+    (t nil)))
+
 (defun validate-option-scope (command command-args options)
   "Reject global options that have no denotation for COMMAND."
   (when (and (option-present-p :insecure options)
              (not (registry-verification-command-p command command-args)))
     (clpm.errors:signal-error
      'clpm.errors:clpm-user-error
-     "--insecure only applies to commands that load signed registry data: clpm deps sync, clpm deps update, clpm deps search, clpm deps info, or clpm registry update")))
+     "--insecure only applies to commands that load signed registry data: clpm deps sync, clpm deps update, clpm deps search, clpm deps info, or clpm registry update"))
+  (when (and (option-present-p :offline options)
+             (not (artifact-cache-command-p command command-args)))
+    (clpm.errors:signal-error
+     'clpm.errors:clpm-user-error
+     "--offline only applies to artifact/cache commands: clpm deps sync --to source|build|active, clpm deps sync, or clpm deps sbom")))
 
 (defun apply-options (options)
   "Apply parsed options to global variables."

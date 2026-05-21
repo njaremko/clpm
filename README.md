@@ -261,7 +261,7 @@ explicit resource operations.
 - `-j, --jobs N` - Parallel build jobs
 - `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for `run/test/repl`
 - `-p, --package <member>` - Workspace member to target from workspace root
-- `--offline` - Fail if artifacts not cached
+- `--offline` - Use cached artifacts for `deps sync` realization and `deps sbom`
 - `--insecure` - Skip signature verification for registry-loading commands
 - `--fetch-retries N` - HTTP retry budget (default: 3, env: `CLPM_FETCH_RETRIES`)
 - `--fetch-timeout SECS` - Per-request timeout (default: 60, env: `CLPM_FETCH_TIMEOUT`)
