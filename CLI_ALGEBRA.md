@@ -116,7 +116,7 @@ tree        :: ProjectTarget -> World -> HumanText
 why         :: ProjectTarget -> SystemId -> World -> HumanText
 audit       :: ProjectTarget -> World -> HumanText | Json
 sbom        :: ProjectTarget -> Format -> World -> HumanText | Files
-replCall    :: ProjectTarget -> Method -> Params -> World -> Outcome
+replCall    :: ProjectTarget -> CallMethod -> Params -> World -> Outcome
 ```
 
 Derived observations:
@@ -289,6 +289,8 @@ clpm [options] repl call METHOD [--params-json JSON] [--PARAM VALUE]...
 ```
 
 Bare `clpm [options]` denotes `clpm [options] help`.
+`repl call METHOD` excludes the daemon's `eval` RPC; public evaluation is
+`repl eval FORM`.
 
 ## Current Surface Classification
 
@@ -490,9 +492,38 @@ Bare `clpm [options]` denotes `clpm [options] help`.
   - Invocation option specials are per-run bindings; one `run-cli` call must
     not leak `--insecure` into the next in-process call.
 - Remaining discomfort:
-  - `repl call METHOD` is still intentionally broad. It survives only as the
-    controlled protocol hook and remains a target for the next RPC-overreach
-    attack.
+  - `repl call METHOD` still accepts all registered non-eval protocol methods.
+    The next attack is whether parameter construction is too loose at the CLI
+    boundary.
+
+### Iteration 7: Attack Eval-as-Raw-RPC Alias
+
+- Commands deleted:
+  - No whole command. The cut removes `clpm repl call eval ...` as a second
+    CLI spelling of evaluation.
+- Commands merged:
+  - Evaluation is merged back into `clpm repl eval FORM`.
+- Commands derived instead of exposed:
+  - The daemon still has an internal `eval` RPC, but the public CLI projection
+    does not expose it through `call`. The derived public constructor is
+    `repl eval`, with human output, debug options, package/worker options, and
+    JSON output where requested.
+- Commands that survived and why:
+  - `repl call methods` and `repl call help --method eval` survive because
+    schema discovery is an observation over the daemon protocol.
+  - Non-eval protocol methods survive under `call` because they operate on
+    persistent image/debugger/inspector/watch/trace state that has no smaller
+    stable CLI constructor yet.
+- Laws/protocol invariants added:
+  - Eval has exactly one public CLI constructor:
+    `parse ["repl", "call", "eval", "--form", form] = Error`.
+  - Discovery is not dispatch:
+    `parse ["repl", "call", "help", "--method", "eval"] =
+     Right (repl (call Help {"method": "eval"}))`.
+- Remaining discomfort:
+  - `repl call METHOD` still accepts all registered non-eval protocol methods.
+    The next attack is whether parameter construction is too loose at the CLI
+    boundary.
 
 ## Constructors
 
@@ -635,6 +666,10 @@ Law: "json is leaf-scoped"
   parse ["repl", "--json"] = Error
   parse ["repl", "daemon", "--status", "--json"] =
     Right (repl (daemon (status Json)))
+
+Law: "eval has one public CLI constructor"
+  parse ["repl", "call", "eval", "--form", form] = Error
+  parse ["repl", "eval", form] = Right (repl (eval form))
 
 Law: "insecure is verifier-scoped"
   parse ["--insecure", "help"] = Error
@@ -817,6 +852,8 @@ Failed-counterexample regressions:
   mode.
 - `clpm --insecure help` and `clpm repl --insecure` are rejected;
   `--insecure` is not an inert global decoration.
+- `clpm repl call eval --form FORM` is rejected; public evaluation goes
+  through `clpm repl eval FORM`.
 
 Reference versus optimized equivalence:
 

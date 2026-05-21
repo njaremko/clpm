@@ -108,6 +108,15 @@
                  (assert-contains stdout "\"form\""))
                (format t "  registry discovery OK~%")
 
+               (format t "Test: call does not alias eval~%")
+               (multiple-value-bind (rc _stdout stderr)
+                   (run-cli-captured '("repl" "call" "eval"
+                                       "--form" "(+ 1 2)"))
+                 (declare (ignore _stdout))
+                 (assert-eql 1 rc)
+                 (assert-contains stderr "Use `clpm repl eval FORM`"))
+               (format t "  eval alias rejection OK~%")
+
                (format t "Test: call dispatches ordinary RPCs~%")
                (multiple-value-bind (rc stdout)
                    (run-cli-captured '("repl" "call" "image-info"))

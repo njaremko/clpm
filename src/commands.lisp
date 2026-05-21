@@ -2584,7 +2584,7 @@ printing the appropriate user-visible error."
   "Parse TEXT as JSON when possible, otherwise treat it as a string.
 
 This lets `call gc --full true' pass a boolean and
-`call eval --form \"(+ 1 2)\"' pass a plain string without requiring
+`call set-package --name CL-USER' pass a plain string without requiring
 quotes around every non-JSON atom."
   (handler-case
       (clpm.io.json:read-json-from-string text)
@@ -2631,6 +2631,9 @@ quotes around every non-JSON atom."
         (params '()))
     (unless method
       (log-error "Usage: clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...")
+      (return-from %bridge-call 1))
+    (when (string= method "eval")
+      (log-error "Use `clpm repl eval FORM` instead of `clpm repl call eval`")
       (return-from %bridge-call 1))
     (loop while args do
       (let ((arg (pop args)))
@@ -5771,6 +5774,7 @@ sub-subcommand=\"set\")."
             (p "  clpm repl call compile-file --path src/foo.lisp")
             (p "  clpm repl call debug-abort --session 1")
             (p "")
+            (p "Use `clpm repl eval FORM` for evaluation; call is not an eval alias.")
             (p "Use --params-json for arrays, objects, or explicit null.")
             0)
            (t
