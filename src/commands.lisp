@@ -2697,6 +2697,16 @@ quotes around every non-JSON atom."
       (t
        (values body nil nil)))))
 
+(defun %bridge-rejected-call-method-message (method)
+  (cond
+    ((string= method "eval")
+     "Use `clpm repl eval FORM` instead of `clpm repl call eval`")
+    ((string= method "shutdown")
+     "Use `clpm repl daemon --stop` instead of `clpm repl call shutdown`")
+    ((string= method "query-response")
+     "query-response is a continuation message, not a repl call method")
+    (t nil)))
+
 (defun %bridge-call (args)
   "Generic typed method constructor for `clpm repl call METHOD ...'.
 
@@ -2707,9 +2717,10 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
     (unless method
       (log-error "Usage: clpm repl call METHOD [--params-json JSON] [--PARAM VALUE]...")
       (return-from %bridge-call 1))
-    (when (string= method "eval")
-      (log-error "Use `clpm repl eval FORM` instead of `clpm repl call eval`")
-      (return-from %bridge-call 1))
+    (let ((message (%bridge-rejected-call-method-message method)))
+      (when message
+        (log-error "~A" message)
+        (return-from %bridge-call 1)))
     (loop while args do
       (let ((arg (pop args)))
         (cond

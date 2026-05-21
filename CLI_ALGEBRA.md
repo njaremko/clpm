@@ -1229,6 +1229,33 @@ but output kind and machine-readable shape are semantic.
   - Resource-local help aliases remain as derived syntax. They are useful, but
     the canonical schema projection is still `clpm help ...`.
 
+### Iteration 32: Delete Protocol-Only `repl call` Methods
+
+- Commands deleted:
+  - `repl call shutdown`.
+  - `repl call query-response`.
+- Commands merged:
+  - Daemon shutdown is merged into the resource lifecycle constructor
+    `repl daemon --stop`.
+  - `query-response` remains only as a continuation frame on an existing
+    in-flight evaluation, not as a shell command.
+- Commands derived instead of exposed:
+  - Protocol clients may still send raw `shutdown` and `query-response` frames
+    where the protocol requires them. The CLI `call` projection is narrower
+    than the wire protocol.
+- Commands that survived and why:
+  - `debug-*` methods survive because kept debugger sessions need explicit
+    operator actions after `repl eval --debug --keep`.
+- Laws/protocol invariants added:
+  - `repl call` excludes lifecycle aliases already represented by
+    `repl daemon`.
+  - `repl call` excludes continuation reply frames that have meaning only
+    inside an active request.
+- Remaining discomfort:
+  - `methods` still observes the wire protocol registry, not the smaller
+    shell-callable subset. That may deserve a later exposure field instead of
+    another ad hoc filter.
+
 ## Constructors
 
 Terminal constructors:

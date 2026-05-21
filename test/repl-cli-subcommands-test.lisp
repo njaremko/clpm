@@ -292,6 +292,19 @@
                  (declare (ignore stdout))
                  (assert-true (not (zerop rc)) "expected nonzero rc")
                  (assert-contains stderr "Unknown subcommand"))
+               (multiple-value-bind (rc _stdout stderr)
+                   (run-cli-captured '("repl" "call" "query-response"
+                                       "--value" "true"))
+                 (declare (ignore _stdout))
+                 (assert-eql 1 rc)
+                 (assert-contains stderr
+                                  "query-response is a continuation message"))
+               (multiple-value-bind (rc _stdout stderr)
+                   (run-cli-captured '("repl" "call" "shutdown"))
+                 (declare (ignore _stdout))
+                 (assert-eql 1 rc)
+                 (assert-contains stderr
+                                  "Use `clpm repl daemon --stop`"))
                (format t "  legacy wrappers rejected OK~%"))
           (ignore-errors (run-cli-captured '("repl" "daemon" "--stop")))
           (loop for i from 0 below 30
