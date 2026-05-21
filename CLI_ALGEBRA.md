@@ -904,8 +904,8 @@ but output kind and machine-readable shape are semantic.
   - No inert output aliases:
     `parse ["repl", "eval", form, "--pretty"] = Error`.
 - Remaining discomfort:
-  - Root help still groups leaf-scoped options under the top-level usage
-    banner. That should be attacked next as help/schema drift.
+  - None for eval output mode. Later iterations moved leaf-scoped option
+    documentation out of root help.
 
 ### Iteration 19: Attack Run Argument Boundary
 
