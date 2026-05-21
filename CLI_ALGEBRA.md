@@ -1435,8 +1435,8 @@ but output kind and machine-readable shape are semantic.
   - Raw protocol dispatch still satisfies
     `dispatch(eval, params) = replEval(params)`.
 - Remaining discomfort:
-  - None for `eval` discovery. Method schemas still use string type names,
-    which remains a separate schema-algebra problem.
+  - None for `eval` discovery. Iteration 41 closes the schema type-name
+    problem.
 
 ### Iteration 40: Pin README to Callable REPL Methods
 
@@ -1458,6 +1458,31 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - README is still hand-maintained Markdown; this adds a targeted guard for
     stale REPL method names, not a generator.
+
+### Iteration 41: Close Method Parameter Type Algebra
+
+- Commands deleted:
+  - No command token. The cut removes open string type names from the daemon's
+    internal method schema.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - JSON schema strings are now derived at the wire boundary from closed
+    keyword variants such as `:string`, `:boolean`, and
+    `:string-or-boolean`.
+- Commands that survived and why:
+  - `repl call methods` and `repl call help --method METHOD` still render
+    string type names because JSON clients need ordinary data, not Lisp
+    keywords.
+- Laws/protocol invariants added:
+  - `paramType(method, param) in MethodParamType`.
+  - `renderParamType : MethodParamType -> JsonString`.
+  - Unknown schema type variants are impossible in registered method specs and
+    are guarded by `test/repl-methods-test.lisp`.
+- Remaining discomfort:
+  - None for method parameter type closure. The parser still accumulates
+    debug eval options in a loose plist; that is a separate eval-option
+    algebra problem.
 
 ## Constructors
 

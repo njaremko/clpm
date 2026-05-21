@@ -2113,6 +2113,16 @@ NIL means the handler has already emitted its terminal frame."
                +undiscoverable-methods+
                :test #'string=)))
 
+(defun %method-param-type-name (type)
+  (ecase type
+    (:any "any")
+    (:string "string")
+    (:integer "integer")
+    (:boolean "boolean")
+    (:array "array")
+    (:object "object")
+    (:string-or-boolean "string-or-boolean")))
+
 (defun %method-spec-as-json (spec)
   (%json-object
    "name" (method-spec-name spec)
@@ -2122,7 +2132,7 @@ NIL means the handler has already emitted its terminal frame."
              (loop for p in (method-spec-params spec)
                    collect (%json-object
                             "name" (getf p :name)
-                            "type" (getf p :type)
+                            "type" (%method-param-type-name (getf p :type))
                             "required" (and (getf p :required) t)
 	                            "description" (getf p :description))))))
 
@@ -2153,16 +2163,15 @@ the method-local schema.")
     (t (string-downcase (symbol-name (type-of value))))))
 
 (defun %json-value-matches-type-p (value type)
-  (cond
-    ((string= type "any") t)
-    ((string= type "string") (stringp value))
-    ((string= type "integer") (integerp value))
-    ((string= type "boolean") (%json-boolean-p value))
-    ((string= type "array") (%json-array-p value))
-    ((string= type "object") (%json-object-p value))
-    ((string= type "string-or-boolean")
-     (or (stringp value) (%json-boolean-p value)))
-    (t nil)))
+  (ecase type
+    (:any t)
+    (:string (stringp value))
+    (:integer (integerp value))
+    (:boolean (%json-boolean-p value))
+    (:array (%json-array-p value))
+    (:object (%json-object-p value))
+    (:string-or-boolean
+     (or (stringp value) (%json-boolean-p value)))))
 
 (defun %method-param-spec (spec name)
   (find name (method-spec-params spec)
@@ -2216,7 +2225,7 @@ or (values NIL ERROR-RESPONSE) on failure."
                (values nil
                        (error-result "param `~A' expected ~A, got ~A"
                                      name
-                                     type
+                                     (%method-param-type-name type)
                                      (%json-value-type-name (cdr cell)))))))))
       (values (or params (%json-object)) nil))))
 
@@ -2298,7 +2307,7 @@ so clients can spot a misbehaving RPC without scraping the event log."
   :summary "Return the persistent eval *package* as a string."
   :doc "Returns `{package: \"FOO\"}'. Pass `worker' to inspect a named
 worker's package; otherwise the default worker is reported."
-  :params (list (list :name "worker" :type "string" :required nil
+  :params (list (list :name "worker" :type :string :required nil
                       :description "Name of the worker (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
@@ -2316,9 +2325,9 @@ worker's package; otherwise the default worker is reported."
   :doc "Looks up the package case-insensitively. Returns the canonical name.
 Pass `worker' to set a named worker's package; otherwise the default
 worker is changed."
-  :params (list (list :name "name" :type "string" :required t
+  :params (list (list :name "name" :type :string :required t
                       :description "Package name; matched case-insensitively.")
-                (list :name "worker" :type "string" :required nil
+                (list :name "worker" :type :string :required nil
                       :description "Worker name (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
@@ -2382,41 +2391,41 @@ no-handler-matched outcome.
 After an unexpected worker death, the next eval's result carries
 `worker_restarted: true' so the client knows in-image state was
 lost."
-  :params (list (list :name "form" :type "string" :required t
+  :params (list (list :name "form" :type :string :required t
                       :description "Lisp source for exactly one form.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Per-call package override.")
-                (list :name "stream" :type "boolean" :required nil
+                (list :name "stream" :type :boolean :required nil
                       :description "Emit incremental stdout/stderr events.")
-	                (list :name "query_interactive" :type "boolean" :required nil
+	                (list :name "query_interactive" :type :boolean :required nil
 	                      :description "Bind *standard-input* to a bidirectional query stream.")
-	                (list :name "debug" :type "boolean" :required nil
+	                (list :name "debug" :type :boolean :required nil
 	                      :description "Enter a server-owned debug session on unhandled conditions.")
-	                (list :name "record_signals" :type "boolean" :required nil
+	                (list :name "record_signals" :type :boolean :required nil
 	                      :description "Record non-error conditions signaled during eval.")
-	                (list :name "worker" :type "string" :required nil
+	                (list :name "worker" :type :string :required nil
 	                      :description "Run on a named worker; spawned if absent.")
-	                (list :name "concurrent" :type "boolean" :required nil
+	                (list :name "concurrent" :type :boolean :required nil
 	                      :description "Run on a fresh disposable worker that's destroyed after the eval.")
-	                (list :name "handlers" :type "array" :required nil
+	                (list :name "handlers" :type :array :required nil
 	                      :description "Declarative condition handlers as {type,restart,args} objects.")
-	                (list :name "break_on" :type "string-or-boolean" :required nil
+	                (list :name "break_on" :type :string-or-boolean :required nil
 	                      :description "Type name to bind *break-on-signals* to; \"none\" / false / \"nil\" disables.")
-	                (list :name "max_real_ms" :type "integer" :required nil
+	                (list :name "max_real_ms" :type :integer :required nil
 	                      :description "Abort with code resource-exhausted if real time exceeds this.")
-	                (list :name "max_cons_bytes" :type "integer" :required nil
+	                (list :name "max_cons_bytes" :type :integer :required nil
 	                      :description "Abort with code resource-exhausted if bytes-consed exceeds this.")
-	                (list :name "print_length" :type "integer" :required nil
+	                (list :name "print_length" :type :integer :required nil
 	                      :description "Bind *print-length* during prin1 of values.")
-	                (list :name "print_level" :type "integer" :required nil
+	                (list :name "print_level" :type :integer :required nil
 	                      :description "Bind *print-level* during prin1 of values.")
-	                (list :name "print_circle" :type "boolean" :required nil
+	                (list :name "print_circle" :type :boolean :required nil
 	                      :description "Bind *print-circle* during prin1 of values.")
-	                (list :name "print_radix" :type "boolean" :required nil
+	                (list :name "print_radix" :type :boolean :required nil
 	                      :description "Bind *print-radix* during prin1 of values.")
-	                (list :name "print_base" :type "integer" :required nil
+	                (list :name "print_base" :type :integer :required nil
 	                      :description "Bind *print-base* during prin1 of values.")
-	                (list :name "print_pretty" :type "boolean" :required nil
+	                (list :name "print_pretty" :type :boolean :required nil
 	                      :description "Bind *print-pretty* during prin1 of values."))
   :handler
   (lambda (server params id ctx)
@@ -2436,7 +2445,7 @@ confused with an interrupt that actually unwound an eval:
   \"no-such-worker\"  -- no worker by that name (typo or already reset).
 
 Pass `worker' to target a named worker; otherwise the default."
-  :params (list (list :name "worker" :type "string" :required nil
+  :params (list (list :name "worker" :type :string :required nil
                       :description "Worker name (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
@@ -2465,7 +2474,7 @@ Response `outcome' field:
                        one was created. (Only the default; for named
                        workers the spawning-on-reset would mask typos.)
   \"no-such-worker\"  -- the user named a worker that doesn't exist."
-  :params (list (list :name "worker" :type "string" :required nil
+  :params (list (list :name "worker" :type :string :required nil
                       :description "Worker name (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
@@ -2552,7 +2561,7 @@ alive}, ...]}'. `state' is one of `idle' / `busy' / `in-debugger' /
   :doc "Like `reset' but the worker is *not* recreated -- subsequent
 `eval' calls naming a killed worker will spawn a fresh one. The
 default worker cannot be killed; use `reset' instead."
-  :params (list (list :name "name" :type "string" :required t
+  :params (list (list :name "name" :type :string :required t
                       :description "Name of the worker to kill."))
   :handler
   (lambda (server params id ctx)
@@ -2584,9 +2593,9 @@ default worker cannot be killed; use `reset' instead."
   :summary "Return the CL:DESCRIBE output for a symbol."
   :doc "Resolves `symbol' in `package' (default: the persistent package).
 Returns `{output: <text>}'."
-  :params (list (list :name "symbol" :type "string" :required t
+  :params (list (list :name "symbol" :type :string :required t
                       :description "Symbol name; matched case-insensitively.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Package to resolve the symbol in."))
   :handler
   (lambda (server params id ctx)
@@ -2601,7 +2610,7 @@ Returns `{output: <text>}'."
 defparameter, defconstant, define-condition, defpackage. The log is
 cleared by `reset'. Pass `worker' to scope to a named worker, otherwise
 the default worker's log is returned."
-  :params (list (list :name "worker" :type "string" :required nil
+  :params (list (list :name "worker" :type :string :required nil
                       :description "Worker name (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
@@ -2838,11 +2847,11 @@ With `auto_revert: true', the watcher emits a `revert-applied' event
 listing in-image definitions originally recorded as coming from the
 reloaded file -- those definitions are now equivalent to the on-disk
 version (because the file was just LOADed)."
-  :params (list (list :name "dir" :type "string" :required t
+  :params (list (list :name "dir" :type :string :required t
                       :description "Directory to watch.")
-                (list :name "glob" :type "string" :required nil
+                (list :name "glob" :type :string :required nil
                       :description "Filename glob (default \"*.lisp\").")
-                (list :name "auto_revert" :type "boolean" :required nil
+                (list :name "auto_revert" :type :boolean :required nil
                       :description "Emit revert-applied events for matching definitions."))
   :handler
   (lambda (server params id ctx)
@@ -2899,7 +2908,7 @@ version (because the file was just LOADed)."
   :name "unwatch"
   :summary "Stop a directory watcher, emitting its terminal `result' frame."
   :doc "Required: `id'. Idempotent on unknown ids."
-  :params (list (list :name "id" :type "integer" :required t
+  :params (list (list :name "id" :type :integer :required t
                       :description "Watch id returned by `watch'."))
   :handler
   (lambda (server params id ctx)
@@ -2944,7 +2953,7 @@ protocol-internal continuation/lifecycle frames."
   :summary "Return the long-form documentation for one RPC method."
   :doc "Required: `method'. Returns `{method: <method-spec>}' with the full
 `doc' field. Returns a protocol-error for unknown methods."
-  :params (list (list :name "method" :type "string" :required t
+  :params (list (list :name "method" :type :string :required t
                       :description "Name of the RPC to document."))
   :handler
   (lambda (server params id ctx)
@@ -2975,9 +2984,9 @@ protocol-internal continuation/lifecycle frames."
   :doc "Sent on the *same* id as the in-flight eval that issued the query.
 Required: `value'. Optional: `eof' (boolean) signals end-of-input. Has no
 terminal frame -- the originating eval's terminal frame is the response."
-  :params (list (list :name "value" :type "string" :required nil
+  :params (list (list :name "value" :type :string :required nil
                       :description "The string the worker's read-line returns.")
-                (list :name "eof" :type "boolean" :required nil
+                (list :name "eof" :type :boolean :required nil
                       :description "If true, the worker sees EOF on the input stream."))
   :handler
   (lambda (server params id ctx)
@@ -3026,11 +3035,11 @@ server-owned debug session from a fresh connection. Required: `name'
 evaluated in the worker's package before being passed to the restart).
 Same-id continuations have no terminal frame; fresh session-addressed
 requests return `{session, worker, outcome}'."
-  :params (list (list :name "name" :type "string" :required t
+  :params (list (list :name "name" :type :string :required t
                       :description "Restart name, e.g. ABORT, CONTINUE, USE-VALUE.")
-                (list :name "args" :type "array" :required nil
+                (list :name "args" :type :array :required nil
                       :description "Forms to evaluate as restart arguments.")
-                (list :name "session" :type "integer" :required nil
+                (list :name "session" :type :integer :required nil
                       :description "Server-owned debug session id."))
   :handler
   (lambda (server params id ctx)
@@ -3046,11 +3055,11 @@ backtrace, 0 = innermost), `form' (Lisp source). Same-id continuations
 emit `event:frame-eval-result' with `values'/`output'/`error_output'.
 Fresh requests may pass `session' and receive those fields as their
 terminal result. The debugger session remains active afterwards."
-  :params (list (list :name "frame" :type "integer" :required t
+  :params (list (list :name "frame" :type :integer :required t
                       :description "Frame index; 0 is the innermost.")
-                (list :name "form" :type "string" :required t
+                (list :name "form" :type :string :required t
                       :description "Form to evaluate.")
-                (list :name "session" :type "integer" :required nil
+                (list :name "session" :type :integer :required nil
                       :description "Server-owned debug session id."))
   :handler
   (lambda (server params id ctx)
@@ -3064,7 +3073,7 @@ terminal result. The debugger session remains active afterwards."
   :doc "Sugar over debug-invoke-restart for the CONTINUE restart
 established by `cerror' / `break'. Pass `session' to drive a
 server-owned debug session from a fresh connection."
-  :params (list (list :name "session" :type "integer" :required nil
+  :params (list (list :name "session" :type :integer :required nil
                       :description "Server-owned debug session id."))
   :handler
   (lambda (server params id ctx)
@@ -3078,7 +3087,7 @@ server-owned debug session from a fresh connection."
   :doc "Lets the original condition propagate; the eval's terminal frame
 becomes the v1-shape `eval-error' response. Pass `session' to drive a
 server-owned debug session from a fresh connection."
-  :params (list (list :name "session" :type "integer" :required nil
+  :params (list (list :name "session" :type :integer :required nil
                       :description "Server-owned debug session id."))
   :handler
   (lambda (server params id ctx)
@@ -3150,11 +3159,11 @@ KIND-KW filters by kind (:function, :method, :macro, :class, :variable,
 persistent package), `kind' (one of \"function\", \"method\", \"macro\",
 \"class\", \"variable\", \"condition\", ...). Returns
 `{entries: [{kind, location: {file, line, ...}}, ...]}'."
-  :params (list (list :name "symbol" :type "string" :required t
+  :params (list (list :name "symbol" :type :string :required t
                       :description "Symbol name; matched case-insensitively.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Resolve `symbol' in this package.")
-                (list :name "kind" :type "string" :required nil
+                (list :name "kind" :type :string :required nil
                       :description "Filter to one definition kind."))
   :handler
   (lambda (server params id ctx)
@@ -3226,11 +3235,11 @@ DIRECTION is one of :callers, :callees, :references, :sets, :binds,
   :doc "Required: `symbol', `direction' (callers|callees|references|sets|binds|
 macroexpands|specializes). Returns
 `{entries: [{name, location}, ...]}'."
-  :params (list (list :name "symbol" :type "string" :required t
+  :params (list (list :name "symbol" :type :string :required t
                       :description "Symbol name.")
-                (list :name "direction" :type "string" :required t
+                (list :name "direction" :type :string :required t
                       :description "callers, callees, references, sets, binds, macroexpands, specializes.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Resolve `symbol' in this package."))
   :handler
   (lambda (server params id ctx)
@@ -3263,11 +3272,11 @@ macroexpands|specializes). Returns
   :summary "Expand a macro form once or fully."
   :doc "Required: `form' (Lisp source string). Optional: `recursive'
 (boolean, defaults to false). Returns `{form: <prin1>, expanded_p: bool}'."
-  :params (list (list :name "form" :type "string" :required t
+  :params (list (list :name "form" :type :string :required t
                       :description "Form to expand.")
-                (list :name "recursive" :type "boolean" :required nil
+                (list :name "recursive" :type :boolean :required nil
                       :description "Fully expand (macroexpand) vs one step.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Reader/expander package."))
   :handler
   (lambda (server params id ctx)
@@ -3341,7 +3350,7 @@ caller diff source-form strings."
   :doc "Required: `path' (absolute path to a .lisp file). Streams a
 `diagnostic' event per condition signaled during compilation. Terminal
 result carries `success', `output_truename', `warnings_p', `failure_p'."
-  :params (list (list :name "path" :type "string" :required t
+  :params (list (list :name "path" :type :string :required t
                       :description "Absolute path to the source file."))
   :handler
   (lambda (server params id ctx)
@@ -3448,9 +3457,9 @@ PKG is a package object or NIL (search all)."
 symbol -- internal and external -- across all packages, visited via
 its home package). Returns `{entries: [{name, package, kinds,
 external}, ...]}'."
-  :params (list (list :name "pattern" :type "string" :required t
+  :params (list (list :name "pattern" :type :string :required t
                       :description "Substring to match, case-insensitive.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Limit the search to one package."))
   :handler
   (lambda (server params id ctx)
@@ -3478,11 +3487,11 @@ external}, ...]}'."
   :doc "Required: `symbol', `type' (function|variable|type|structure|
 setf|method-combination|compiler-macro). Returns `{doc: <string or
 null>}'."
-  :params (list (list :name "symbol" :type "string" :required t
+  :params (list (list :name "symbol" :type :string :required t
                       :description "Symbol name.")
-                (list :name "type" :type "string" :required t
+                (list :name "type" :type :string :required t
                       :description "Documentation type.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Resolve `symbol' in this package."))
   :handler
   (lambda (server params id ctx)
@@ -3522,9 +3531,9 @@ null>}'."
 <prin1>, parsed: <list>}'. PARSED is a JSON array of strings, one per
 element of the lambda list (including lambda-list keywords like
 `&optional')."
-  :params (list (list :name "symbol" :type "string" :required t
+  :params (list (list :name "symbol" :type :string :required t
                       :description "Function-bound symbol name.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Resolve in this package."))
   :handler
   (lambda (server params id ctx)
@@ -3552,11 +3561,11 @@ element of the lambda list (including lambda-list keywords like
   :summary "List symbols whose name starts with PREFIX."
   :doc "Required: `prefix' (case-insensitive). Optional: `package'
 (otherwise external symbols across all packages), `limit' (default 50)."
-  :params (list (list :name "prefix" :type "string" :required t
+  :params (list (list :name "prefix" :type :string :required t
                       :description "Case-insensitive starts-with match.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Limit to one package.")
-                (list :name "limit" :type "integer" :required nil
+                (list :name "limit" :type :integer :required nil
                       :description "Maximum candidates (default 50)."))
   :handler
   (lambda (server params id ctx)
@@ -3597,7 +3606,7 @@ element of the lambda list (including lambda-list keywords like
   :summary "Describe a package: nicknames, use, used-by, exports."
   :doc "Required: `name'. Returns nicknames, use list, used-by list,
 external symbol count, and a small head of exported symbols."
-  :params (list (list :name "name" :type "string" :required t
+  :params (list (list :name "name" :type :string :required t
                       :description "Package name."))
   :handler
   (lambda (server params id ctx)
@@ -3633,9 +3642,9 @@ external symbol count, and a small head of exported symbols."
   :summary "Describe a CL class: supers, subs, precedence, slots."
   :doc "Required: `name' (symbol). Returns direct supers, direct subs,
 precedence list, slot specs (name, type, initform, accessors)."
-  :params (list (list :name "name" :type "string" :required t
+  :params (list (list :name "name" :type :string :required t
                       :description "Class symbol.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Resolve in this package."))
   :handler
   (lambda (server params id ctx)
@@ -3698,9 +3707,9 @@ precedence list, slot specs (name, type, initform, accessors)."
   :summary "Combined arglist, documentation, and known types for a function."
   :doc "Required: `symbol'. Returns arglist, function-type (if known),
 documentation, and inline-p."
-  :params (list (list :name "symbol" :type "string" :required t
+  :params (list (list :name "symbol" :type :string :required t
                       :description "Function-bound symbol.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Resolve in this package."))
   :handler
   (lambda (server params id ctx)
@@ -3739,9 +3748,9 @@ documentation, and inline-p."
   :summary "Capture the disassembly of a function."
   :doc "Required: `symbol'. Captures cl:disassemble's stdout into the
 response. Bounded by the daemon's 1 MB output cap."
-  :params (list (list :name "symbol" :type "string" :required t
+  :params (list (list :name "symbol" :type :string :required t
                       :description "Function symbol.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Resolve in this package."))
   :handler
   (lambda (server params id ctx)
@@ -3766,7 +3775,7 @@ response. Bounded by the daemon's 1 MB output cap."
   :summary "ASDF reflection: a system's components, deps, source root."
   :doc "Required: `name'. Returns the system's primary metadata as
 recorded by ASDF, plus its declared and resolved dependencies."
-  :params (list (list :name "name" :type "string" :required t
+  :params (list (list :name "name" :type :string :required t
                       :description "ASDF system name."))
   :handler
   (lambda (server params id ctx)
@@ -4197,7 +4206,7 @@ directory."
   :name "gc"
   :summary "Trigger a GC, return bytes_consed before and after."
   :doc "Optional: `full' (boolean) for a full GC."
-  :params (list (list :name "full" :type "boolean" :required nil
+  :params (list (list :name "full" :type :boolean :required nil
                       :description "Full GC (default: minor)."))
   :handler
   (lambda (server params id ctx)
@@ -4295,9 +4304,9 @@ directory."
 `package' (resolves all names in this package). Trace state is scoped to
 this daemon; another project daemon in the same host Lisp does not list or
 emit these traces."
-  :params (list (list :name "symbols" :type "array" :required t
+  :params (list (list :name "symbols" :type :array :required t
                       :description "Symbol names to trace.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Resolve names in this package."))
   :handler
   (lambda (server params id ctx)
@@ -4328,9 +4337,9 @@ emit these traces."
   :summary "Remove daemon-local tracing from symbols (or all if none given)."
   :doc "Optional: `symbols' (array). With no symbols, untraces
 everything traced by this daemon."
-  :params (list (list :name "symbols" :type "array" :required nil
+  :params (list (list :name "symbols" :type :array :required nil
                       :description "Symbol names; default: untrace all.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Resolve names in this package."))
   :handler
   (lambda (server params id ctx)
@@ -4373,11 +4382,11 @@ everything traced by this daemon."
   :doc "Required: `form'. Optional: `mutable' (boolean), `package'.
 Returns the initial inspection view including a `session' id used by
 subsequent inspect-* RPCs."
-  :params (list (list :name "form" :type "string" :required t
+  :params (list (list :name "form" :type :string :required t
                       :description "Form whose value is inspected.")
-                (list :name "mutable" :type "boolean" :required nil
+                (list :name "mutable" :type :boolean :required nil
                       :description "Allow inspect-mutate.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Reader package for FORM."))
   :handler
   (lambda (server params id ctx)
@@ -4406,9 +4415,9 @@ subsequent inspect-* RPCs."
   :name "inspect-into"
   :summary "Push the i-th part of the current focus onto the inspector stack."
   :doc "Required: `session', `i'. Returns the new view."
-  :params (list (list :name "session" :type "string" :required t
+  :params (list (list :name "session" :type :string :required t
                       :description "Inspector session id.")
-                (list :name "i" :type "integer" :required t
+                (list :name "i" :type :integer :required t
                       :description "Part index to descend into."))
   :handler
   (lambda (server params id ctx)
@@ -4435,7 +4444,7 @@ subsequent inspect-* RPCs."
   :summary "Pop one frame off the inspector stack."
   :doc "Required: `session'. Pops back to the previous focus. No-op
 when the stack already only has one frame; returns that frame."
-  :params (list (list :name "session" :type "string" :required t
+  :params (list (list :name "session" :type :string :required t
                       :description "Inspector session id."))
   :handler
   (lambda (server params id ctx)
@@ -4459,11 +4468,11 @@ when the stack already only has one frame; returns that frame."
 -- a single rendered value, not a new inspector view. The session is
 *not* automatically descended into the result; use `inspect' on the
 form again if you want to walk into it."
-  :params (list (list :name "session" :type "string" :required t
+  :params (list (list :name "session" :type :string :required t
                       :description "Inspector session id.")
-                (list :name "form" :type "string" :required t
+                (list :name "form" :type :string :required t
                       :description "Form to evaluate.")
-                (list :name "package" :type "string" :required nil
+                (list :name "package" :type :string :required nil
                       :description "Reader package for FORM."))
   :handler
   (lambda (server params id ctx)
@@ -4501,11 +4510,11 @@ form again if you want to walk into it."
   :summary "Set part i of the focus to the value of FORM."
   :doc "Required: `session', `i', `form'. Requires the session to have
 been opened with `mutable: true'. Returns the refreshed view."
-  :params (list (list :name "session" :type "string" :required t
+  :params (list (list :name "session" :type :string :required t
                       :description "Inspector session id.")
-                (list :name "i" :type "integer" :required t
+                (list :name "i" :type :integer :required t
                       :description "Part index to overwrite.")
-                (list :name "form" :type "string" :required t
+                (list :name "form" :type :string :required t
                       :description "Form whose value replaces the part."))
   :handler
   (lambda (server params id ctx)
@@ -4561,9 +4570,9 @@ been opened with `mutable: true'. Returns the refreshed view."
   :summary "Set the page offset for the inspector view."
   :doc "Required: `session', `offset' (integer >= 0). Returns the
 refreshed view."
-  :params (list (list :name "session" :type "string" :required t
+  :params (list (list :name "session" :type :string :required t
                       :description "Inspector session id.")
-                (list :name "offset" :type "integer" :required t
+                (list :name "offset" :type :integer :required t
                       :description "Starting index for the next page."))
   :handler
   (lambda (server params id ctx)
@@ -4586,7 +4595,7 @@ refreshed view."
   :name "inspect-close"
   :summary "Discard an inspector session."
   :doc "Required: `session'. Frees the server-side stack."
-  :params (list (list :name "session" :type "string" :required t
+  :params (list (list :name "session" :type :string :required t
                       :description "Inspector session id."))
   :handler
   (lambda (server params id ctx)
@@ -4606,7 +4615,7 @@ refreshed view."
   :doc "Required: `path'. Streams a `diagnostic' event per condition
 signaled during load. Terminal result carries `success' and the package
 active when load returned."
-  :params (list (list :name "path" :type "string" :required t
+  :params (list (list :name "path" :type :string :required t
                       :description "Absolute path to the file to load."))
   :handler
   (lambda (server params id ctx)

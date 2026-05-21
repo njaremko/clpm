@@ -34,6 +34,22 @@
   (when (and (consp a) (eq (car a) :array))
     (cadr a)))
 
+(defparameter +schema-param-types+
+  '(:any :string :integer :boolean :array :object :string-or-boolean))
+
+(format t "Test: method parameter types use a closed internal algebra~%")
+(dolist (entry clpm.repl::+method-registry+)
+  (let ((spec (cdr entry)))
+    (dolist (param (clpm.repl::method-spec-params spec))
+      (let ((type (getf param :type)))
+        (assert-true (and (keywordp type)
+                          (member type +schema-param-types+))
+                     "open param type ~S in method ~A param ~A"
+                     type
+                     (clpm.repl::method-spec-name spec)
+                     (getf param :name))))))
+(format t "  closed param types OK~%")
+
 (defun with-daemon (fn)
   (let* ((sock (format nil "/tmp/clpm-rb-methods-~A.sock" (random (expt 2 32))))
          (thread (sb-thread:make-thread
