@@ -213,8 +213,8 @@ your manifest.
 
 ### How resolution works
 
-CLPM uses a deterministic depth-first backtracking solver (not PubGrub,
-despite some legacy comments). The rules a user needs to know:
+CLPM uses a deterministic depth-first backtracking solver. The rules a user
+needs to know:
 
 1. **System pick order is alphabetical** by system id.
 2. **Within a system, candidates are ordered highest-version-first**,

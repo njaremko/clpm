@@ -1853,6 +1853,24 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - This is evidence hardening, not a semantic expansion.
 
+### Iteration 56: Remove Implementation-History Solver Aside
+
+- Commands deleted:
+  - No parser surface. The deleted surface is README prose about "legacy
+    comments" in the solver section.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - None.
+- Commands that survived and why:
+  - The deterministic depth-first solver description survives because it
+    explains observable resolution order.
+- Laws/protocol invariants added:
+  - User documentation describes current command semantics and observations,
+    not obsolete implementation commentary.
+- Remaining discomfort:
+  - None for solver prose.
+
 ## Constructors
 
 Terminal constructors:
@@ -2326,6 +2344,7 @@ Failed-counterexample regressions:
 - README documents the workspace, standalone project, and workspace-member
   `project new` constructor forms.
 - Tests pin the exact public exports of `CLPM.COMMANDS` and `CLPM`.
+- README solver prose no longer mentions implementation-history comments.
 - `clpm registry publish --git-commit ...` is rejected; publish does not run
   VCS commands.
 - `clpm repl eval FORM --pretty` is rejected; human output is the default and

@@ -34,6 +34,7 @@
   (assert-not-contains readme "find-definitions")
   (assert-not-contains readme "who-calls")
   (assert-not-contains readme "help --method eval")
+  (assert-not-contains readme "legacy comments")
   (assert-contains readme "Scoped options must appear before the command token.")
   (assert-contains readme "clpm project new <name> --workspace [--dir <path>]")
   (assert-contains readme "clpm project new <name> --bin\\|--lib --member-of <workspace-dir>")
