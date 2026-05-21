@@ -256,6 +256,14 @@ Returns (values base-url stop-fn)."
                         (format nil "quicklisp~Cquicklisp~C~A" #\Tab #\Tab pinned))
                   (split-lines stdout)))
 
+               ;; trust refresh is not an update option alias.
+               (multiple-value-bind (code stdout stderr)
+                   (run-cli-captured '("registry" "update" "--refresh-trust" "quicklisp"))
+                 (declare (ignore stdout))
+                 (assert-eql 1 code)
+                 (assert-true (search "Unknown option" stderr :test #'char-equal)
+                              "Expected update --refresh-trust rejection, got:~%~A" stderr))
+
                ;; trust set rejects permanent verification removal.
                (multiple-value-bind (code stdout stderr)
                    (run-cli-captured '("registry" "trust" "set" "main" "none"))

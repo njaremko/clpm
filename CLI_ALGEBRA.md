@@ -819,6 +819,32 @@ but output kind and machine-readable shape are semantic.
     operator/admin functionality. They still need a separate attack for
     whether the CLI should own all of those workflows.
 
+### Iteration 16: Attack Duplicate Trust Refresh
+
+- Commands deleted:
+  - `registry update --refresh-trust`.
+- Commands merged:
+  - Quicklisp pin refresh is only `registry trust refresh NAME`.
+- Commands derived instead of exposed:
+  - Updating registry snapshots and mutating trust pins are different state
+    transitions. `registry update` denotes snapshot refresh; it does not own
+    trust mutation flags.
+- Commands that survived and why:
+  - `registry update [name ...]` survives as the registry snapshot/cache
+    update operation.
+  - `registry trust refresh NAME` survives as the explicit Quicklisp
+    re-pinning operation.
+- Laws/protocol invariants added:
+  - Trust mutation is trust-scoped:
+    `parse ["registry", "update", "--refresh-trust", name] = Error`.
+  - Re-pinning uses the trust constructor:
+    `parse ["registry", "trust", "refresh", quicklispName] =
+     Right (registry (trustRefresh quicklispName))`.
+- Remaining discomfort:
+  - `registry key`, `registry init`, and `registry publish` remain broad
+    operator/admin functionality. `registry publish --git-commit` is the next
+    implementation-shaped side effect to remove.
+
 ## Constructors
 
 Terminal constructors:
@@ -1021,6 +1047,11 @@ Law: "trust values are kind-typed and non-clearing"
   parse ["registry", "trust", "set", name, "none"] = Error
   parse ["registry", "trust", "set", name, "nil"] = Error
 
+Law: "trust refresh is trust-scoped"
+  parse ["registry", "update", "--refresh-trust", name] = Error
+  parse ["registry", "trust", "refresh", quicklispName] =
+    Right (registry (trustRefresh quicklispName))
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -1215,6 +1246,8 @@ Failed-counterexample regressions:
 - `clpm registry trust set main none` and
   `clpm registry trust set main nil` are rejected; permanent trust clearing
   is not a CLI trust value.
+- `clpm registry update --refresh-trust quicklisp` is rejected; Quicklisp
+  pin refresh is `clpm registry trust refresh quicklisp`.
 
 Reference versus optimized equivalence:
 

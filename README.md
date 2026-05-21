@@ -71,7 +71,7 @@ clpm registry update quicklisp
 If Quicklisp changes and your pin no longer matches, refresh it explicitly:
 
 ```bash
-clpm registry update --refresh-trust quicklisp
+clpm registry trust refresh quicklisp
 ```
 
 Registry trust values are intentionally closed: signed git registries use

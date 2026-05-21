@@ -283,10 +283,10 @@ Returns (values base-url stop-fn)."
 
                  ;; With refresh, it succeeds and updates config pin.
                  (multiple-value-bind (code _stdout stderr)
-                     (run-cli-captured '("registry" "update" "--refresh-trust" "quicklisp"))
+                     (run-cli-captured '("registry" "trust" "refresh" "quicklisp"))
                    (declare (ignore _stdout))
                    (unless (eql code 0)
-                     (fail "registry update --refresh-trust failed: ~D~%stderr:~A" code stderr)))
+                     (fail "registry trust refresh failed: ~D~%stderr:~A" code stderr)))
 
                  (let* ((cfg (clpm.config:read-config))
                         (refs (clpm.config:config-registries cfg))

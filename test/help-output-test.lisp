@@ -156,6 +156,15 @@
   (assert-true (not (search "none" stdout :test #'char-equal))
                "trust set help still advertises clearing trust:~%~A" stdout))
 
+;; registry update: snapshot update only, not trust refresh.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "registry" "update"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm registry update")
+  (assert-true (not (search "--refresh-trust" stdout :test #'char-equal))
+               "registry update help still advertises trust refresh:~%~A" stdout))
+
 ;; repl umbrella: lists the three public commands.
 (multiple-value-bind (code stdout stderr)
     (run-cli-captured '("help" "repl"))
