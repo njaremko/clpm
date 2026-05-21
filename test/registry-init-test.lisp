@@ -61,6 +61,9 @@
     (unwind-protect
          (progn
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
+           (write-text (merge-pathnames (format nil "~A.pub" key-id)
+                                        (clpm.platform:keys-dir))
+                       pub-hex)
            (assert-eql
             0
             (clpm:run-cli (list "registry" "init"
@@ -77,7 +80,8 @@
              (assert-true (uiop:file-exists-p embedded) "Missing embedded pubkey: ~A" (namestring embedded))
              (assert-true (uiop:directory-exists-p packages) "Missing packages dir: ~A" (namestring packages))
 
-             ;; Verify via existing registry verification path, using embedded key.
+             ;; Verify via existing registry verification path, using the
+             ;; locally imported trusted key.
              (let ((digest (clpm.registry::verify-snapshot-signature reg-root
                                                                     (format nil "ed25519:~A" key-id))))
                (assert-true (and (stringp digest) (= (length digest) 64))

@@ -1956,6 +1956,30 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None.
 
+### Iteration 61: Reject Registry-Provided Trust Roots
+
+- Commands deleted:
+  - The implicit fallback from a missing local Ed25519 key to
+    `registry/keys/<key-id>.pub` in the registry being verified.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Embedded registry keys remain registry metadata for distribution and
+    inspection, but they do not denote trust by themselves.
+- Commands that survived and why:
+  - `registry key import` survives as the explicit operation that moves a
+    public key into the local trust root.
+  - Signed git registry verification survives as `trust key id + local public
+    key + valid detached signatures`.
+- Laws/protocol invariants added:
+  - `verify(snapshot, ed25519:k)` may read only local trusted key material for
+    `k`; it must not derive the verifying key from the untrusted registry
+    contents being checked.
+  - A registry that carries a valid self-signature with only an embedded public
+    key is still untrusted.
+- Remaining discomfort:
+  - None.
+
 ## Constructors
 
 Terminal constructors:

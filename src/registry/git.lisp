@@ -238,14 +238,11 @@ Modifies REGISTRY in place."
 
 (defun resolve-trust-key-path (repo-path trust-key)
   "Return (values key-id key-path) for TRUST-KEY and REPO-PATH."
+  (declare (ignore repo-path))
   (let* ((key-id-info (clpm.crypto.ed25519:parse-key-id trust-key))
          (key-id (cdr key-id-info))
          (key-path (merge-pathnames (format nil "~A.pub" key-id)
                                     (clpm.platform:keys-dir))))
-    (unless (uiop:file-exists-p key-path)
-      ;; Try embedded key in registry
-      (setf key-path (merge-pathnames (format nil "registry/keys/~A.pub" key-id)
-                                      repo-path)))
     (unless (uiop:file-exists-p key-path)
       (error 'clpm.errors:clpm-signature-error
              :message "Public key not found"

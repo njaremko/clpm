@@ -75,6 +75,9 @@
     (unwind-protect
          (progn
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
+           (write-text (merge-pathnames (format nil "~A.pub" key-id)
+                                        (clpm.platform:keys-dir))
+                       pub-hex)
 
            ;; Initialize registry.
            (assert-eql

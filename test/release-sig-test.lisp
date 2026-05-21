@@ -150,6 +150,8 @@ Returns snapshot signature SHA-256 hex."
          (progn
            ;; Isolate registry dir under temp CLPM_HOME.
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
+           (write-text (merge-pathnames "test.pub" (clpm.platform:keys-dir))
+                       "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
 
            ;; Create registries.
            (let ((good-snapshot-sig-sha256 (write-registry remote-good :valid-release-sig-p t))

@@ -81,6 +81,11 @@ Registry trust values are intentionally closed: signed git registries use
 mode; use scoped `--insecure` on verifier-bearing commands only for explicit
 debugging.
 
+For signed git registries, the trusted public key must already be present in
+CLPM's local keys directory, for example via `clpm registry key import`.
+Public keys embedded under `registry/keys/` are distributable metadata, not a
+trust root for the same registry.
+
 To inspect what CLPM actually used, run:
 
 ```bash
