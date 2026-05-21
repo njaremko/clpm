@@ -1645,9 +1645,40 @@ but output kind and machine-readable shape are semantic.
   - Hidden eval flags are parser bugs unless they are transport-private and
     rejected before command dispatch.
 - Remaining discomfort:
-  - The eval debug selector set still uses loose local variables rather than a
-    closed continuation-action type. That is an implementation-shape attack,
-    not a public help mismatch.
+  - Resolved by Iteration 48.
+
+### Iteration 48: Close Repl Eval Debug Continuation Selection
+
+- Commands deleted:
+  - `repl eval FORM --debug --frame N` without `--frame-eval`.
+  - `repl eval FORM --debug --frame-eval FORM2` without `--frame`.
+  - `repl eval FORM --debug --arg ARG` without `--restart`.
+  - Any `repl eval FORM --debug` invocation that selects more than one
+    continuation action among `--keep`, `--restart`, and
+    `--frame/--frame-eval`.
+- Commands merged:
+  - None. The surviving actions are distinct semantic continuations.
+- Commands derived instead of exposed:
+  - Plain `--debug` still derives "show the first stop, then abort" when no
+    explicit continuation action is selected.
+- Commands that survived and why:
+  - `--keep` survives because it persists the debugger stop for later
+    `debug-*` calls.
+  - `--restart NAME [--arg FORM]...` survives because it invokes a named
+    restart at the stop.
+  - `--frame N --frame-eval FORM` survives because it observes one frame-local
+    expression and then aborts the stop.
+- Laws/protocol invariants added:
+  - `DebugAction = AbortDefault | Keep | Restart name args | FrameEval n form`.
+  - `--arg` is meaningful only inside `Restart`.
+  - `--frame` and `--frame-eval` are a product constructor; neither component
+    is valid alone.
+  - `DebugAction` is single-valued: invocations selecting two actions fail at
+    parse time and do not contact the daemon.
+- Remaining discomfort:
+  - The implementation still represents the closed action as validated locals
+    rather than an explicit struct. The public algebra is closed; a future
+    internal cleanup can reify the type.
 
 ## Constructors
 
@@ -2078,6 +2109,10 @@ Failed-counterexample regressions:
   options must appear before the command token.
 - `clpm help repl eval` lists accepted debug selectors including
   `--break-on` and `--timeout-ms`.
+- `clpm repl eval FORM --debug` rejects incomplete or conflicting
+  continuation selectors: `--frame` without `--frame-eval`,
+  `--frame-eval` without `--frame`, `--arg` without `--restart`, and multiple
+  actions selected together.
 - `clpm --insecure help` is rejected; `--insecure` is not an inert
   pre-command global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes

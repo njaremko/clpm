@@ -219,6 +219,28 @@
                  (declare (ignore _stdout))
                  (assert-eql 1 rc)
                  (assert-contains stderr "Unknown eval option: --abort"))
+               (dolist (case '((("repl" "eval" "(error \"needs frame pair\")"
+                                  "--debug" "--frame" "1")
+                                 "--frame and --frame-eval")
+                                (("repl" "eval" "(error \"needs frame pair\")"
+                                  "--debug" "--frame-eval" "(+ 1 2)")
+                                 "--frame and --frame-eval")
+                                (("repl" "eval" "(error \"arg needs restart\")"
+                                  "--debug" "--arg" "42")
+                                 "--arg requires --restart")
+                                (("repl" "eval" "(error \"too many actions\")"
+                                  "--debug" "--restart" "USE-VALUE" "--keep")
+                                 "Choose only one debug continuation action")
+                                (("repl" "eval" "(error \"too many actions\")"
+                                  "--debug" "--restart" "USE-VALUE"
+                                  "--frame" "1" "--frame-eval" "x")
+                                 "Choose only one debug continuation action")))
+                 (destructuring-bind (args expected) case
+                   (multiple-value-bind (rc _stdout stderr)
+                       (run-cli-captured args)
+                     (declare (ignore _stdout))
+                     (assert-eql 1 rc)
+                     (assert-contains stderr expected))))
                (format t "  eval --debug OK~%")
 
                (format t "Test: kept debug sessions are managed through call~%")
