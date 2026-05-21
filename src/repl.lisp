@@ -757,6 +757,11 @@ KIND is one of :real-ms or :cons-bytes."))
 ;;; Worker thread
 ;;; --------------------------------------------------------------------------
 
+(defstruct repl-history
+  star star-star star-star-star
+  plus plus-plus plus-plus-plus
+  slash slash-slash slash-slash-slash)
+
 (defstruct worker
   "One eval thread. Most clients only ever touch the worker named
 \"default\"; named / concurrent workers (#170-#173) give the LLM a
@@ -781,6 +786,7 @@ package, and redefinition state may have been lost."
   last-eval-id
   (started-at (get-universal-time) :type integer)
   (last-active-at (get-universal-time) :type integer)
+  (history (make-repl-history))
   (redefinitions (make-hash-table :test 'equal))
   current-job
   (concurrent? nil :type boolean)
@@ -1225,42 +1231,55 @@ primary value of the last eval, `+' is the last form, `/' is the values
 list of the last eval; `**' / `++' / `//' are the prior, `***' / `+++' /
 `///' the one before that.")
 
-(defun %read-history-snapshot ()
-  "Capture the current values of the history symbols as a JSON-friendly
-alist (string-name . prin1'd-value-string). Caller must have arranged the
-right *package* so the lookups find CL: versions."
+(defun %history-symbols ()
   (let ((pkg (find-package "COMMON-LISP")))
     (loop for name in +history-symbols+
-          for sym = (find-symbol name pkg)
-          collect (cons name
-                        (if (and sym (boundp sym))
-                            (%safe-prin1 (symbol-value sym))
-                            "")))))
+          collect (find-symbol name pkg))))
 
-(defun %update-history! (last-form last-values)
-  "Shift the REPL history bindings: `*** ← **`, `** ← *`, `* ← primary`,
-likewise for `+` and `/`. Mutates `cl:*`, `cl:**`, `cl:***`, `cl:+`,
-`cl:++`, `cl:+++`, `cl:/`, `cl://`, `cl:///`."
-  (let* ((pkg (find-package "COMMON-LISP"))
-         (s* (find-symbol "*" pkg))
-         (s** (find-symbol "**" pkg))
-         (s*** (find-symbol "***" pkg))
-         (s+ (find-symbol "+" pkg))
-         (s++ (find-symbol "++" pkg))
-         (s+++ (find-symbol "+++" pkg))
-         (s/ (find-symbol "/" pkg))
-         (s// (find-symbol "//" pkg))
-         (s/// (find-symbol "///" pkg))
-         (primary (if (consp last-values) (first last-values) nil)))
-    (when (and s*** s** (boundp s**)) (setf (symbol-value s***) (symbol-value s**)))
-    (when (and s** s* (boundp s*)) (setf (symbol-value s**) (symbol-value s*)))
-    (when s* (setf (symbol-value s*) primary))
-    (when (and s+++ s++ (boundp s++)) (setf (symbol-value s+++) (symbol-value s++)))
-    (when (and s++ s+ (boundp s+)) (setf (symbol-value s++) (symbol-value s+)))
-    (when s+ (setf (symbol-value s+) last-form))
-    (when (and s/// s// (boundp s//)) (setf (symbol-value s///) (symbol-value s//)))
-    (when (and s// s/ (boundp s/)) (setf (symbol-value s//) (symbol-value s/)))
-    (when s/ (setf (symbol-value s/) (copy-list last-values)))))
+(defun %history-values (history)
+  (list (repl-history-star history)
+        (repl-history-star-star history)
+        (repl-history-star-star-star history)
+        (repl-history-plus history)
+        (repl-history-plus-plus history)
+        (repl-history-plus-plus-plus history)
+        (repl-history-slash history)
+        (repl-history-slash-slash history)
+        (repl-history-slash-slash-slash history)))
+
+(defmacro %with-repl-history ((history) &body body)
+  `(if ,history
+       (progv (%history-symbols) (%history-values ,history)
+         ,@body)
+       (progn ,@body)))
+
+(defun %read-history-snapshot (history)
+  "Capture WORKER-local history as a JSON-friendly alist."
+  (loop for name in +history-symbols+
+        for value in (%history-values history)
+        collect (cons name (%safe-prin1 value))))
+
+(defun %update-history! (history last-form last-values)
+  "Shift the worker-local REPL history bindings."
+  (let ((primary (if (consp last-values) (first last-values) nil)))
+    (setf (repl-history-star-star-star history)
+          (repl-history-star-star history)
+          (repl-history-star-star history)
+          (repl-history-star history)
+          (repl-history-star history)
+          primary
+          (repl-history-plus-plus-plus history)
+          (repl-history-plus-plus history)
+          (repl-history-plus-plus history)
+          (repl-history-plus history)
+          (repl-history-plus history)
+          last-form
+          (repl-history-slash-slash-slash history)
+          (repl-history-slash-slash history)
+          (repl-history-slash-slash history)
+          (repl-history-slash history)
+          (repl-history-slash history)
+          (copy-list last-values))))
 
 (defmacro %with-print-options (options &body body)
   "Bind *print-*' variables for the duration of BODY according to OPTIONS
@@ -1639,6 +1658,7 @@ sessions."
                       (and *current-worker* (worker-package *current-worker*))
                       (and *server* (server-current-package *server*))
                       (find-package "COMMON-LISP-USER")))
+         (history (and *current-worker* (worker-history *current-worker*)))
          (returned-values '())
          (code nil)
          (conditions '())
@@ -1685,7 +1705,8 @@ sessions."
                               (mapcar (lambda (v) (%safe-prin1 v)) returned-values))))
                      (history-snap
                        (and (null code)
-                            (handler-case (%read-history-snapshot)
+                            history
+                            (handler-case (%read-history-snapshot history)
                               (error () nil)))))
                  (make-eval-result
                   :code code
@@ -1720,96 +1741,97 @@ sessions."
                 (*standard-input* in-stream)
                 (*package* package))
             (setf redefined (%record-redefinition form package))
-            (let* ((record-signals? (getf options :record-signals))
-                   (debug? (and job (getf options :debug)))
-                   (handler-specs (%parse-handler-specs
-                                   (getf options :handlers)
-                                   package))
-                   (break-on-spec (getf options :break-on))
-                   (break-on-none? (eq break-on-spec :none))
-                   (break-on-type
-                     (cond
-                       (break-on-none? nil)
-                       ((stringp break-on-spec)
-                        (handler-case (read-from-string break-on-spec)
-                          (error () nil)))
-                       (t nil))))
-              (flet ((on-condition (c)
+            (%with-repl-history (history)
+              (let* ((record-signals? (getf options :record-signals))
+                     (debug? (and job (getf options :debug)))
+                     (handler-specs (%parse-handler-specs
+                                     (getf options :handlers)
+                                     package))
+                     (break-on-spec (getf options :break-on))
+                     (break-on-none? (eq break-on-spec :none))
+                     (break-on-type
                        (cond
-                         ((typep c 'user-interrupt) nil)
-                         ;; Resource-exhausted is fielded by the outer
-                         ;; handler-case which converts it into the
-                         ;; "resource-exhausted" eval-result code. Keep
-                         ;; it out of the declarative / record-signals
-                         ;; paths.
-                         ((typep c 'resource-exhausted) nil)
-                         ;; --handlers: non-interactive recovery. The
-                         ;; first matching spec invokes its restart and
-                         ;; transfers control; non-matching specs fall
-                         ;; through. A spec that matches by type but
-                         ;; has no such restart available records an
-                         ;; attempt in handler-attempts-cell so the
-                         ;; caller can see *why* recovery didn't fire.
-                         ((%try-declarative-handler
-                           c handler-specs handler-attempts-cell))
-                         ((typep c 'error)
-                          (unless error-snapshot
-                            (setf error-snapshot
-                                  (%capture-error-snapshot c)))
-                          ;; --debug: hand control to the interactive
-                          ;; debugger loop. It either invokes a restart
-                          ;; (unwinds out of this lambda) or returns NIL
-                          ;; (the condition propagates).
-                          (when debug?
-                            (%enter-debugger c job)))
-                         (record-signals?
-                          (push (%condition-json c) signaled)))))
-                (handler-bind ((condition #'on-condition))
-                  (let ((*break-on-signals*
-                          (cond
-                            (break-on-none? nil)
-                            (break-on-type)
-                            (t *break-on-signals*)))
-                        ;; --debug also intercepts `(break ...)`, which
-                        ;; calls invoke-debugger directly without going
-                        ;; through `signal'. ANSI says break nulls
-                        ;; *debugger-hook*, so we have to hook the SBCL-
-                        ;; specific *invoke-debugger-hook* (which break
-                        ;; leaves untouched). Setting it to our hook
-                        ;; replaces SBCL's --non-interactive quit hook
-                        ;; for the duration of the eval.
+                         (break-on-none? nil)
+                         ((stringp break-on-spec)
+                          (handler-case (read-from-string break-on-spec)
+                            (error () nil)))
+                         (t nil))))
+                (flet ((on-condition (c)
+                         (cond
+                           ((typep c 'user-interrupt) nil)
+                           ;; Resource-exhausted is fielded by the outer
+                           ;; handler-case which converts it into the
+                           ;; "resource-exhausted" eval-result code. Keep
+                           ;; it out of the declarative / record-signals
+                           ;; paths.
+                           ((typep c 'resource-exhausted) nil)
+                           ;; --handlers: non-interactive recovery. The
+                           ;; first matching spec invokes its restart and
+                           ;; transfers control; non-matching specs fall
+                           ;; through. A spec that matches by type but
+                           ;; has no such restart available records an
+                           ;; attempt in handler-attempts-cell so the
+                           ;; caller can see *why* recovery didn't fire.
+                           ((%try-declarative-handler
+                             c handler-specs handler-attempts-cell))
+                           ((typep c 'error)
+                            (unless error-snapshot
+                              (setf error-snapshot
+                                    (%capture-error-snapshot c)))
+                            ;; --debug: hand control to the interactive
+                            ;; debugger loop. It either invokes a restart
+                            ;; (unwinds out of this lambda) or returns NIL
+                            ;; (the condition propagates).
+                            (when debug?
+                              (%enter-debugger c job)))
+                           (record-signals?
+                            (push (%condition-json c) signaled)))))
+                  (handler-bind ((condition #'on-condition))
+                    (let ((*break-on-signals*
+                            (cond
+                              (break-on-none? nil)
+                              (break-on-type)
+                              (t *break-on-signals*)))
+                          ;; --debug also intercepts `(break ...)`, which
+                          ;; calls invoke-debugger directly without going
+                          ;; through `signal'. ANSI says break nulls
+                          ;; *debugger-hook*, so we have to hook the SBCL-
+                          ;; specific *invoke-debugger-hook* (which break
+                          ;; leaves untouched). Setting it to our hook
+                          ;; replaces SBCL's --non-interactive quit hook
+                          ;; for the duration of the eval.
+                          #+sbcl
+                          (sb-ext:*invoke-debugger-hook*
+                            (if debug?
+                                (lambda (c hook)
+                                  (declare (ignore hook))
+                                  (%enter-debugger c job))
+                                sb-ext:*invoke-debugger-hook*))
+                          #+sbcl
+                          (heartbeat-timer
+                           (and stream? ctx
+                                (%start-heartbeat-timer ctx start)))
+                          #+sbcl
+                          (cap-timer
+                           (%start-cap-timer
+                            sb-thread:*current-thread*
+                            options
+                            start
+                            (sb-ext:get-bytes-consed))))
+                      (declare (ignorable
+                                #+sbcl heartbeat-timer
+                                #+sbcl cap-timer))
+                      (unwind-protect
+                           (setf returned-values
+                                 (multiple-value-list (eval form)))
                         #+sbcl
-                        (sb-ext:*invoke-debugger-hook*
-                          (if debug?
-                              (lambda (c hook)
-                                (declare (ignore hook))
-                                (%enter-debugger c job))
-                              sb-ext:*invoke-debugger-hook*))
+                        (when heartbeat-timer
+                          (ignore-errors
+                           (sb-ext:unschedule-timer heartbeat-timer)))
                         #+sbcl
-                        (heartbeat-timer
-                         (and stream? ctx
-                              (%start-heartbeat-timer ctx start)))
-                        #+sbcl
-                        (cap-timer
-                         (%start-cap-timer
-                          sb-thread:*current-thread*
-                          options
-                          start
-                          (sb-ext:get-bytes-consed))))
-                    (declare (ignorable
-                              #+sbcl heartbeat-timer
-                              #+sbcl cap-timer))
-                    (unwind-protect
-                         (setf returned-values
-                               (multiple-value-list (eval form)))
-                      #+sbcl
-                      (when heartbeat-timer
-                        (ignore-errors
-                         (sb-ext:unschedule-timer heartbeat-timer)))
-                      #+sbcl
-                      (when cap-timer
-                        (ignore-errors
-                         (sb-ext:unschedule-timer cap-timer))))))))
+                        (when cap-timer
+                          (ignore-errors
+                           (sb-ext:unschedule-timer cap-timer)))))))))
             (setf package *package*)
             ;; History is updated *only* when no override was specified --
             ;; the override is per-call scoped. Persistent package state
@@ -1818,7 +1840,7 @@ sessions."
             (when (null override-pkg)
               (when *current-worker*
                 (setf (worker-package *current-worker*) *package*))
-              (handler-case (%update-history! form returned-values)
+              (handler-case (%update-history! history form returned-values)
                 (error () nil))))
         (user-interrupt ()
           (setf code "interrupted")

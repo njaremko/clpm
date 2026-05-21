@@ -105,6 +105,30 @@
 (format t "  default isolation OK~%")
 
 ;;; ----------------------------------------------------------------------------
+;;; Named workers don't share REPL history bindings.
+
+(format t "Test: named workers keep independent history~%")
+(with-daemon
+  (lambda (sock)
+    (do-rpc sock "eval"
+            (list (cons "form" "10")
+                  (cons "worker" "alpha")))
+    (do-rpc sock "eval"
+            (list (cons "form" "20")
+                  (cons "worker" "beta")))
+    (let* ((alpha (do-rpc sock "eval"
+                          (list (cons "form" "(values *)")
+                                (cons "worker" "alpha"))))
+           (beta (do-rpc sock "eval"
+                         (list (cons "form" "(values *)")
+                               (cons "worker" "beta"))))
+           (alpha-result (lookup alpha "result"))
+           (beta-result (lookup beta "result")))
+      (assert-equal-string "10" (lookup alpha-result "value"))
+      (assert-equal-string "20" (lookup beta-result "value")))))
+(format t "  named-worker history isolation OK~%")
+
+;;; ----------------------------------------------------------------------------
 ;;; #171: list-workers reports the workers we created.
 
 (format t "Test: list-workers shows default + alpha~%")

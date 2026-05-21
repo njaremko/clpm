@@ -45,8 +45,9 @@ Edge cases and failure modes:
 2. Offline source realization fails when a locked artifact is not already in
    the store.
 3. Registry trust updates must not silently weaken signature or hash checks.
-4. Kept repl debugger sessions, watches, traces, and throwaway workers
-   are observable repl state and must be explicitly cleaned up.
+4. Kept repl debugger sessions, watches, traces, worker histories, and
+   throwaway workers are observable repl state and must be explicitly cleaned
+   up or scoped to their owning project image.
 
 ## Carrier Types
 
@@ -67,6 +68,8 @@ data Store
 data Activation
 data Runtime
 data ReplImage
+data ReplWorkerName
+data ReplHistory
 ```
 
 Associated semantic types:
@@ -83,6 +86,17 @@ data World =
         , runtime    :: Runtime
         , repls      :: Map ProjectRoot ReplImage
         }
+
+data ReplImage =
+  ReplImage { workers :: Map ReplWorkerName ReplWorkerState
+            , traces  :: Set TraceSpec
+            }
+
+data ReplWorkerState =
+  ReplWorkerState { package :: PackageName
+                  , history :: ReplHistory
+                  , redefinitions :: Set Redefinition
+                  }
 
 data Outcome =
     Failed ExitCode Diagnostic
@@ -1484,6 +1498,33 @@ but output kind and machine-readable shape are semantic.
     debug eval options in a loose plist; that is a separate eval-option
     algebra problem.
 
+### Iteration 42: Make REPL History Worker-Local
+
+- Commands deleted:
+  - No command token. The cut deletes process-global CL history mutation as
+    the meaning of `repl eval`.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - The CL dynamic bindings `*`, `**`, `***`, `+`, `++`, `+++`, `/`, `//`,
+    and `///` are now a view of the selected worker's `ReplHistory` while the
+    form is evaluated.
+- Commands that survived and why:
+  - Named workers survive because they denote independent REPL sessions inside
+    one project daemon.
+  - The history payload in `repl eval` survives because it is a useful
+    observation of the selected worker's session state.
+- Laws/protocol invariants added:
+  - `eval(workerA, x); eval(workerB, y); eval(workerA, *) = x`.
+  - `history(eval(worker, form)) = worker.history after form`.
+  - No eval in one worker mutates another worker's package, history, or
+    redefinition log.
+  - Project daemon isolation is stronger than socket identity: foreground
+    daemons embedded in one host Lisp must not share worker histories.
+- Remaining discomfort:
+  - None for REPL history isolation. The remaining broad attack is the loose
+    eval options plist named in Iteration 41.
+
 ## Constructors
 
 Terminal constructors:
@@ -1879,6 +1920,8 @@ Denotation properties:
 - `deps sync --to lock` writes/refreshes `clpm.lock` and does not require
   activation.
 - `store gc --dry-run` does not mutate store reachability.
+- `repl eval` in one named worker does not affect another named worker's
+  history bindings.
 
 Observation properties:
 
@@ -1930,6 +1973,8 @@ Failed-counterexample regressions:
   has no flag alias.
 - `clpm run bare args` is rejected; entrypoint arguments require
   `clpm run -- bare args`.
+- A daemon that evaluates `10` in worker `alpha` and `20` in worker `beta`
+  must report `* = 10` when evaluating `(values *)` in worker `alpha`.
 
 Reference versus optimized equivalence:
 
