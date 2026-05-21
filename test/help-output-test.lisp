@@ -64,6 +64,7 @@
   (assert-contains stdout "deps")
   (assert-contains stdout "registry")
   (assert-contains stdout "run")
+  (assert-contains stdout "test")
   (assert-contains stdout "store")
   (assert-contains stdout "skill")
   (assert-contains stdout "repl")
@@ -110,6 +111,16 @@
   (assert-contains stdout "Commands:")
   (assert-contains stdout "Usage: clpm"))
 (format t "  bare `clpm` PASSED~%")
+
+(format t "Testing `clpm help test` output...~%")
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "test"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm test")
+  (assert-contains stdout "--lisp")
+  (assert-contains stdout "-p, --package"))
+(format t "  `clpm help test` PASSED~%")
 
 (format t "Testing `clpm help project new` output...~%")
 (multiple-value-bind (code stdout stderr)
@@ -495,7 +506,7 @@
 (format t "  Unknown help target PASSED~%")
 
 (format t "Testing removed top-level commands are not public...~%")
-(dolist (cmd '("add" "install" "keys" "publish" "test" "gc" "repl-bridge"))
+(dolist (cmd '("add" "install" "keys" "publish" "gc" "repl-bridge"))
   (multiple-value-bind (code stdout stderr)
       (run-cli-captured (list cmd))
     (declare (ignore stdout))

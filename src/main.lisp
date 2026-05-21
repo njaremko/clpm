@@ -29,6 +29,7 @@ Commands:
   deps ...         Manage, realize, and inspect dependencies
   registry ...     Manage registries, keys, trust, and publishing
   run ...          Run entrypoints, tests, scripts, or commands
+  test             Run project tests
   store ...        Clean project outputs and garbage collect the store
   skill            Print an agent SKILL.md for using clpm
   repl ...         Project Lisp REPL or persistent daemon
@@ -49,6 +50,7 @@ Examples:
   clpm project init myproject
   clpm deps add alexandria bordeaux-threads
   clpm deps sync
+  clpm test
   clpm repl
   clpm repl eval '(asdf:load-system \"myproject\")'
   clpm deps update alexandria
@@ -323,6 +325,7 @@ Returns (values command command-args options)."
      (let ((subcommand (first command-args)))
        (and (stringp subcommand)
             (string= subcommand "package"))))
+    (:test t)
     (:run
      (let ((subcommand (first command-args)))
        (cond
@@ -390,6 +393,7 @@ Returns (values command command-args options)."
       (:registry
        (and (stringp subcommand)
             (string= subcommand "publish")))
+      (:test t)
       (:run
        (or (null subcommand)
            (string= subcommand "--")
@@ -416,7 +420,7 @@ Returns (values command command-args options)."
              (not (workspace-target-command-p command command-args)))
     (clpm.errors:signal-error
      'clpm.errors:clpm-user-error
-     "workspace member target only applies to project-scoped commands: clpm project package, clpm deps ..., clpm registry publish, clpm run ..., clpm repl ..., or clpm store clean"))
+     "workspace member target only applies to project-scoped commands: clpm project package, clpm deps ..., clpm registry publish, clpm run ..., clpm test, clpm repl ..., or clpm store clean"))
   (when (and (option-present-p :insecure options)
              (not (registry-verification-command-p command command-args)))
     (clpm.errors:signal-error
@@ -436,7 +440,7 @@ Returns (values command command-args options)."
              (not (lisp-selection-command-p command command-args)))
     (clpm.errors:signal-error
      'clpm.errors:clpm-user-error
-     "--lisp only applies where CLPM selects a Lisp implementation: clpm deps sync --to build|active, clpm deps sync, clpm project package, clpm run ..., or clpm repl --interactive"))
+     "--lisp only applies where CLPM selects a Lisp implementation: clpm deps sync --to build|active, clpm deps sync, clpm project package, clpm run ..., clpm test, or clpm repl --interactive"))
   (when (and (option-present-p :with-optional options)
              (not (optional-dependency-command-p command command-args)))
     (clpm.errors:signal-error
@@ -533,6 +537,8 @@ This function must not call `sb-ext:exit` so it can be used from tests."
              (apply #'clpm.commands:cmd-registry command-args))
             (:run
              (apply #'clpm.commands:cmd-run command-args))
+            (:test
+             (apply #'clpm.commands:cmd-test command-args))
             (:store
              (apply #'clpm.commands:cmd-store command-args))
             (:skill

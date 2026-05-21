@@ -140,24 +140,27 @@
 (format t "  Unknown command PASSED~%")
 
 (format t "Testing nullary commands reject trailing args...~%")
-(multiple-value-bind (code _out err)
-    (run-cli-captured '("doctor" "extra"))
-  (declare (ignore _out))
-  (assert-eql 1 code)
-  (unless (search "Usage: clpm doctor" err)
-    (fail "Expected doctor trailing-arg rejection, got: ~A" err)))
+(dolist (case '((("doctor" "extra") "Usage: clpm doctor")
+                (("test" "extra") "Usage: clpm test")))
+  (destructuring-bind (args expected) case
+    (multiple-value-bind (code _out err)
+        (run-cli-captured args)
+      (declare (ignore _out))
+      (assert-eql 1 code)
+      (unless (search expected err)
+        (fail "Expected trailing-arg rejection ~S, got: ~A" expected err)))))
 (format t "  Nullary command arity PASSED~%")
 
 (format t "Testing public command handler exports...~%")
 (assert-equal '("CMD-DEPS" "CMD-DOCTOR" "CMD-HELP" "CMD-PROJECT"
                 "CMD-REGISTRY" "CMD-REPL" "CMD-RUN" "CMD-SKILL"
-                "CMD-STORE")
+                "CMD-STORE" "CMD-TEST")
               (external-symbol-names "CLPM.COMMANDS"))
 (assert-equal '("MAIN" "RUN-CLI")
               (external-symbol-names "CLPM"))
 (dolist (name '("CMD-PROJECT" "CMD-DEPS" "CMD-REGISTRY" "CMD-RUN"
                 "CMD-STORE" "CMD-REPL" "CMD-SKILL" "CMD-HELP"
-                "CMD-DOCTOR"))
+                "CMD-DOCTOR" "CMD-TEST"))
   (multiple-value-bind (_symbol status)
       (find-symbol name "CLPM.COMMANDS")
     (declare (ignore _symbol))
@@ -165,8 +168,8 @@
 (dolist (name '("CMD-INIT" "CMD-NEW" "CMD-ADD" "CMD-REMOVE"
                 "CMD-SEARCH" "CMD-INFO" "CMD-TREE" "CMD-WHY"
                 "CMD-RESOLVE" "CMD-FETCH" "CMD-BUILD" "CMD-INSTALL"
-                "CMD-UPDATE" "CMD-WORKSPACE" "CMD-EXEC" "CMD-TEST"
-                "CMD-PACKAGE" "CMD-CLEAN" "CMD-GC"
+                "CMD-UPDATE" "CMD-WORKSPACE" "CMD-EXEC" "CMD-PACKAGE"
+                "CMD-CLEAN" "CMD-GC"
                 "CMD-AUDIT" "CMD-SBOM" "CMD-KEYS" "CMD-PUBLISH"))
   (multiple-value-bind (_symbol status)
       (find-symbol name "CLPM.COMMANDS")
@@ -175,7 +178,7 @@
 (assert-no-symbol "CLPM.COMMANDS" "CMD-SCRIPTS")
 (assert-equal '("CMD-DEPS" "CMD-DOCTOR" "CMD-HELP" "CMD-PROJECT"
                 "CMD-REGISTRY" "CMD-REPL" "CMD-RUN" "CMD-SKILL"
-                "CMD-STORE")
+                "CMD-STORE" "CMD-TEST")
               (sorted-external-symbol-names "CLPM.COMMANDS"))
 (assert-equal '("MAIN" "RUN-CLI")
               (sorted-external-symbol-names "CLPM"))

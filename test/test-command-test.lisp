@@ -104,6 +104,8 @@
 
            (uiop:with-current-directory (project-root)
              (assert-eql 0 (clpm:run-cli '("run" "test"))))
+           (uiop:with-current-directory (project-root)
+             (assert-eql 0 (clpm:run-cli '("test"))))
 
            ;; Now include a failing test system as well.
            (clpm.io.sexp:write-canonical-sexp-to-file
@@ -122,7 +124,10 @@
 
            (uiop:with-current-directory (project-root)
              (assert-true (not (zerop (clpm:run-cli '("run" "test"))))
-                          "Expected `clpm run test` to fail when a test system fails"))))
+                          "Expected `clpm run test` to fail when a test system fails"))
+           (uiop:with-current-directory (project-root)
+             (assert-true (not (zerop (clpm:run-cli '("test"))))
+                          "Expected `clpm test` to fail when a test system fails"))))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME"))))

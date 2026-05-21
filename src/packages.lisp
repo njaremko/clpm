@@ -389,6 +389,7 @@
            #:cmd-repl
            #:cmd-skill
            #:cmd-run
+           #:cmd-test
            #:cmd-help
            #:cmd-doctor))
 

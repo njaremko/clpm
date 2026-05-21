@@ -3918,7 +3918,9 @@ Returns (values parsed-scripts exit-code)."
 
 Uses clpm.project :test metadata:
   :test (:systems (\"<test-system>\" ...))"
-  (declare (ignore args))
+  (when args
+    (log-error "Usage: clpm test")
+    (return-from cmd-test 1))
   (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
       (find-effective-project-root)
     (declare (ignore lock-path _workspace-path))
@@ -6257,7 +6259,7 @@ sub-subcommand=\"set\")."
              (apply #'format t (concatenate 'string fmt "~%") args)))
     (unless (member command
                     '(:help :doctor :project :deps :registry :run :store
-                      :skill :repl)
+                      :test :skill :repl)
                     :test #'eq)
       (log-error "Unknown command: ~A" command)
       (return-from print-command-help 1))
@@ -6427,6 +6429,15 @@ sub-subcommand=\"set\")."
        (p "")
        (p "Example:")
        (p "  clpm skill > SKILL.md")
+       0)
+      (:test
+       (p "Usage: clpm test")
+       (p "")
+       (p "Run project tests from clpm.project :test metadata.")
+       (p "")
+       (p "Scoped options:")
+       (p "  -p, --package <member>  Workspace member target from a workspace root.")
+       (p "  --lisp <impl>           Lisp implementation to use (sbcl|ccl|ecl).")
        0)
       (:registry
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
@@ -6741,6 +6752,7 @@ sub-subcommand=\"set\")."
                 (and (null ssub)
                      (member sub '("repl" "exec" "test" "script" "scripts")
                              :test #'string=))))
+           (:test (null sub))
            (:store
             (or (null sub)
                 (and (null ssub)
@@ -6761,7 +6773,7 @@ Accepts `clpm help <command> [subcommand [...]]` so chains like
       (unless (%help-selector-valid-p command sub-chain)
         (if (member command
                     '(:help :doctor :project :deps :registry :run :store
-                      :skill :repl)
+                      :test :skill :repl)
                     :test #'eq)
             (log-error "Unknown help target: clpm help ~A"
                        (format nil "~{~A~^ ~}" (cons cmd-name sub-chain)))
