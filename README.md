@@ -259,7 +259,7 @@ explicit resource operations.
 
 - `-v, --verbose` - Verbose output
 - `-j, --jobs N` - Parallel dependency realization jobs
-- `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for `run/test/repl`
+- `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for build, package, and run commands
 - `-p, --package <member>` - Workspace member to target from workspace root
 - `--offline` - Use cached artifacts for `deps sync` realization and `deps sbom`
 - `--insecure` - Skip signature verification for registry-loading commands

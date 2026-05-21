@@ -295,6 +295,9 @@ Bare `clpm [options]` denotes `clpm [options] help`.
 operation: `deps sync` beyond the lock stage and `deps sbom`.
 `--jobs` is accepted only where dependency realization can perform parallel
 source fetch or build work: `deps sync` beyond the lock stage.
+`--lisp` is accepted only where CLPM chooses a Lisp implementation: build or
+active dependency realization, project packaging, and `run` operations that
+execute Lisp entrypoints/tests/scripts.
 
 ## Current Surface Classification
 
@@ -553,6 +556,33 @@ source fetch or build work: `deps sync` beyond the lock stage.
   - `--lisp`, optional-dependency flags, and fetch tuning are still accepted
     as broad parser options. Each needs the same denotational audit.
 
+### Iteration 10: Attack Lisp-Selection Scope
+
+- Commands deleted:
+  - No commands. The cut removes inert `--lisp` placements.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - `--lisp` denotes Lisp implementation selection for commands where CLPM
+    constructs the Lisp process or build driver. It is not a REPL transport
+    option and not meaningful for source-only dependency realization.
+- Commands that survived and why:
+  - `--lisp deps sync`, `--lisp deps sync --to build|active`,
+    `--lisp project package`, and `--lisp run ...` survive because they choose
+    the Lisp used for dependency building, activation, packaging, tests,
+    scripts, or entrypoints.
+  - `--lisp deps sync --to source` is rejected because fetching sources does
+    not choose a Lisp.
+  - `--lisp help` and `--lisp repl` are rejected as inert parser decoration.
+- Laws/protocol invariants added:
+  - Lisp selection is process-constructor-scoped:
+    `parse ["--lisp", impl, "help"] = Error`.
+  - Source-only realization has no Lisp implementation:
+    `parse ["--lisp", impl, "deps", "sync", "--to", "source"] = Error`.
+- Remaining discomfort:
+  - Optional-dependency flags and fetch tuning are still accepted as broad
+    parser options. Each needs the same denotational audit.
+
 ### Iteration 7: Attack Eval-as-Raw-RPC Alias
 
 - Commands deleted:
@@ -747,6 +777,13 @@ Law: "jobs are realization-scoped"
   parse ["--jobs", n, "deps", "sync", "--to", "build"] =
     Right (deps (sync Build) with ParallelJobs n)
 
+Law: "lisp selection is process-constructor-scoped"
+  parse ["--lisp", impl, "help"] = Error
+  parse ["--lisp", impl, "repl"] = Error
+  parse ["--lisp", impl, "deps", "sync", "--to", "source"] = Error
+  parse ["--lisp", impl, "project", "package"] =
+    Right (project package with LispImplementation impl)
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -930,6 +967,9 @@ Failed-counterexample regressions:
 - `clpm --jobs 4 help`, `clpm -j 4 repl`, and
   `clpm --jobs 2 deps sync --to lock` are rejected; `--jobs` is only for
   parallel dependency realization.
+- `clpm --lisp sbcl help`, `clpm --lisp sbcl repl`, and
+  `clpm --lisp sbcl deps sync --to source` are rejected; `--lisp` is only for
+  CLPM-owned Lisp process construction.
 
 Reference versus optimized equivalence:
 

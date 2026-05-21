@@ -36,7 +36,7 @@ Commands:
 Options:
   -v, --verbose    Verbose output
   -j, --jobs N     Parallel jobs for dependency realization (default: 1)
-  --lisp <impl>    Lisp implementation (sbcl|ccl|ecl)
+  --lisp <impl>    Lisp for build/package/run commands (sbcl|ccl|ecl)
   -p, --package M  Workspace member to target
   --offline        Use cached artifacts for dependency realization/SBOM
   --insecure       Skip signature verification for registry-loading commands
@@ -217,6 +217,23 @@ Returns (values command command-args options)."
                        (and (stringp stage) (string= stage "lock"))))
         finally (return nil)))
 
+(defun sync-stage-option (command-args)
+  "Return the raw value passed to deps sync --to, or NIL when absent."
+  (loop for rest on command-args
+        for arg = (first rest)
+        when (and (stringp arg) (string= arg "--to"))
+          do (return (second rest))
+        finally (return nil)))
+
+(defun sync-build-stage-p (command-args)
+  "Return true when dependency sync may build with a selected Lisp."
+  (let ((stage (sync-stage-option command-args)))
+    (cond
+      ((null stage) t)
+      ((member stage '("build" "active") :test #'string=) t)
+      ((member stage '("lock" "source") :test #'string=) nil)
+      (t t))))
+
 (defun artifact-cache-command-p (command command-args)
   "Return true when COMMAND may consult artifact cache/offline realization."
   (case command
@@ -228,6 +245,29 @@ Returns (values command command-args options)."
           (not (sync-lock-stage-p command-args)))
          ((string= subcommand "sbom") t)
          (t nil))))
+    (t nil)))
+
+(defun lisp-selection-command-p (command command-args)
+  "Return true when COMMAND may choose a Lisp implementation."
+  (case command
+    (:deps
+     (let ((subcommand (first command-args)))
+       (and (stringp subcommand)
+            (string= subcommand "sync")
+            (sync-build-stage-p command-args))))
+    (:project
+     (let ((subcommand (first command-args)))
+       (and (stringp subcommand)
+            (string= subcommand "package"))))
+    (:run
+     (let ((subcommand (first command-args)))
+       (cond
+         ((null subcommand) t)
+         ((string= subcommand "--") t)
+         ((member subcommand '("exec" "scripts" "help" "--help" "repl")
+                  :test #'string=)
+          nil)
+         (t t))))
     (t nil)))
 
 (defun parallel-realization-command-p (command command-args)
@@ -256,7 +296,12 @@ Returns (values command command-args options)."
              (not (parallel-realization-command-p command command-args)))
     (clpm.errors:signal-error
      'clpm.errors:clpm-user-error
-     "--jobs only applies to parallel dependency realization: clpm deps sync --to source|build|active or clpm deps sync")))
+     "--jobs only applies to parallel dependency realization: clpm deps sync --to source|build|active or clpm deps sync"))
+  (when (and (option-present-p :lisp options)
+             (not (lisp-selection-command-p command command-args)))
+    (clpm.errors:signal-error
+     'clpm.errors:clpm-user-error
+     "--lisp only applies where CLPM selects a Lisp implementation: clpm deps sync --to build|active, clpm deps sync, clpm project package, or clpm run ...")))
 
 (defun apply-options (options)
   "Apply parsed options to global variables."
