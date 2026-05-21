@@ -34,6 +34,13 @@
   (unless x
     (apply #'fail fmt args)))
 
+(defun assert-contains (haystack needle)
+  (assert-true (and (stringp haystack)
+                    (search needle haystack :test #'char-equal))
+               "Expected output to contain ~S, got:~%~A"
+               needle
+               haystack))
+
 (defun split-lines (s)
   (let ((lines (uiop:split-string s :separator '(#\Newline))))
     (if (and lines (string= (car (last lines)) ""))
@@ -108,6 +115,13 @@
       (clpm.project:write-lock-file lock lock-path))
 
     (uiop:with-current-directory (project-root)
+      ;; tree --depth is a singleton value option.
+      (multiple-value-bind (code stdout stderr)
+          (run-cli-captured '("deps" "tree" "--depth" "1" "--depth" "2"))
+        (declare (ignore stdout))
+        (assert-eql 1 code)
+        (assert-contains stderr "Duplicate option: --depth"))
+
       ;; tree (default depth)
       (multiple-value-bind (code stdout stderr)
           (run-cli-captured '("deps" "tree"))
@@ -182,4 +196,3 @@
 (format t "  Tree/why command tests PASSED~%")
 (format t "~%Tree/why command tests PASSED!~%")
 (sb-ext:exit :code 0)
-

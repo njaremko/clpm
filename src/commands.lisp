@@ -1150,13 +1150,17 @@ manifest; root-level entries in that set are tagged \"(optional)\"."
              (apply #'log-error fmt fmt-args)
              (log-error "Usage: clpm [-p <member>] deps tree [--depth N]")
              (return-from cmd-tree 1)))
-    (let ((depth-limit nil))
+    (let ((depth-limit nil)
+          (depth-seen nil))
       ;; Parse args
       (let ((i 0))
         (loop while (< i (length args)) do
           (let ((arg (nth i args)))
             (cond
               ((string= arg "--depth")
+               (when depth-seen
+                 (usage-error "Duplicate option: --depth"))
+               (setf depth-seen t)
                (incf i)
                (when (>= i (length args))
                  (usage-error "Missing value for --depth"))
