@@ -139,6 +139,17 @@
       (fail "Expected inert --lisp to be rejected, got: ~A" err))))
 (format t "  Lisp option scope PASSED~%")
 
+(format t "Testing optional dependency option scope...~%")
+(dolist (args '(("--with-optional" "foo" "help")
+                ("--with-all-optional" "repl")))
+  (multiple-value-bind (code _out err)
+      (run-cli-captured args)
+    (declare (ignore _out))
+    (assert-eql 1 code)
+    (unless (search "optional dependency flags only apply" err)
+      (fail "Expected inert optional-dependency flag to be rejected, got: ~A" err))))
+(format t "  Optional dependency option scope PASSED~%")
+
 (format t "Testing run-program :timeout keyword...~%")
 (multiple-value-bind (output error-output exit-code)
     (clpm.platform:run-program (list "sh" "-c" "exit 0") :timeout 1)

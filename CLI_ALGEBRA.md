@@ -298,6 +298,8 @@ source fetch or build work: `deps sync` beyond the lock stage.
 `--lisp` is accepted only where CLPM chooses a Lisp implementation: build or
 active dependency realization, project packaging, and `run` operations that
 execute Lisp entrypoints/tests/scripts.
+Optional dependency flags are accepted only by dependency resolution:
+`deps sync` and `deps update`.
 
 ## Current Surface Classification
 
@@ -583,6 +585,31 @@ execute Lisp entrypoints/tests/scripts.
   - Optional-dependency flags and fetch tuning are still accepted as broad
     parser options. Each needs the same denotational audit.
 
+### Iteration 11: Attack Optional-Dependency Scope
+
+- Commands deleted:
+  - No commands. The cut removes inert optional-dependency flag placements.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - `--with-optional` and `--with-all-optional` denote a dependency
+    resolution input. They are not global project, help, run, or REPL options.
+- Commands that survived and why:
+  - `--with-optional SYS deps sync`, `--with-all-optional deps sync`, and the
+    same flags on `deps update` survive because they change the effective
+    optional dependency set during solving.
+  - `--with-optional SYS help` and `--with-all-optional repl` are rejected as
+    inert parser decoration.
+- Laws/protocol invariants added:
+  - Optional opt-ins are solve-scoped:
+    `parse ["--with-optional", sys, "help"] = Error`.
+  - Dependency sync carries the opt-in set:
+    `parse ["--with-optional", sys, "deps", "sync", "--to", "lock"] =
+     Right (deps (sync Lock) with OptionalOptIns {sys})`.
+- Remaining discomfort:
+  - Fetch tuning is still accepted as a broad parser option and needs the same
+    denotational audit.
+
 ### Iteration 7: Attack Eval-as-Raw-RPC Alias
 
 - Commands deleted:
@@ -784,6 +811,12 @@ Law: "lisp selection is process-constructor-scoped"
   parse ["--lisp", impl, "project", "package"] =
     Right (project package with LispImplementation impl)
 
+Law: "optional dependency flags are solve-scoped"
+  parse ["--with-optional", sys, "help"] = Error
+  parse ["--with-all-optional", "repl"] = Error
+  parse ["--with-optional", sys, "deps", "sync", "--to", "lock"] =
+    Right (deps (sync Lock) with OptionalOptIns {sys})
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -970,6 +1003,9 @@ Failed-counterexample regressions:
 - `clpm --lisp sbcl help`, `clpm --lisp sbcl repl`, and
   `clpm --lisp sbcl deps sync --to source` are rejected; `--lisp` is only for
   CLPM-owned Lisp process construction.
+- `clpm --with-optional foo help` and
+  `clpm --with-all-optional repl` are rejected; optional opt-ins are only for
+  dependency solving.
 
 Reference versus optimized equivalence:
 

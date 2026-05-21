@@ -265,8 +265,8 @@ explicit resource operations.
 - `--insecure` - Skip signature verification for registry-loading commands
 - `--fetch-retries N` - HTTP retry budget (default: 3, env: `CLPM_FETCH_RETRIES`)
 - `--fetch-timeout SECS` - Per-request timeout (default: 60, env: `CLPM_FETCH_TIMEOUT`)
-- `--with-optional <sys>` - Opt in to an optional dependency (repeatable)
-- `--with-all-optional` - Opt in to every optional dependency
+- `--with-optional <sys>` - Opt in to an optional dependency for `deps sync/update` (repeatable)
+- `--with-all-optional` - Opt in to every optional dependency for `deps sync/update`
 
 ## Registry Format
 

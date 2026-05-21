@@ -42,6 +42,8 @@ Options:
   --insecure       Skip signature verification for registry-loading commands
   --fetch-retries N      Retry budget for HTTP fetches (default: 3, env: CLPM_FETCH_RETRIES)
   --fetch-timeout SECS   Per-request timeout for HTTP fetches (default: 60, env: CLPM_FETCH_TIMEOUT)
+  --with-optional SYS    Include optional dependency in deps sync/update
+  --with-all-optional    Include all optional dependencies in deps sync/update
   -h, --help       Show this help
   --version        Show version
 
@@ -270,6 +272,15 @@ Returns (values command command-args options)."
          (t t))))
     (t nil)))
 
+(defun optional-dependency-command-p (command command-args)
+  "Return true when COMMAND may change optional dependency resolution."
+  (case command
+    (:deps
+     (let ((subcommand (first command-args)))
+       (and (stringp subcommand)
+            (member subcommand '("sync" "update") :test #'string=))))
+    (t nil)))
+
 (defun parallel-realization-command-p (command command-args)
   "Return true when COMMAND may use the parallel dependency job budget."
   (case command
@@ -301,7 +312,12 @@ Returns (values command command-args options)."
              (not (lisp-selection-command-p command command-args)))
     (clpm.errors:signal-error
      'clpm.errors:clpm-user-error
-     "--lisp only applies where CLPM selects a Lisp implementation: clpm deps sync --to build|active, clpm deps sync, clpm project package, or clpm run ...")))
+     "--lisp only applies where CLPM selects a Lisp implementation: clpm deps sync --to build|active, clpm deps sync, clpm project package, or clpm run ..."))
+  (when (and (option-present-p :with-optional options)
+             (not (optional-dependency-command-p command command-args)))
+    (clpm.errors:signal-error
+     'clpm.errors:clpm-user-error
+     "optional dependency flags only apply to dependency resolution: clpm deps sync or clpm deps update")))
 
 (defun apply-options (options)
   "Apply parsed options to global variables."
