@@ -215,9 +215,31 @@
                                                                      (project-root-id project-b))))))
                  (ignore-errors (sb-thread:terminate-thread second))
                  (fail "second project daemon started in the same Lisp image"))
-               (assert-eql :errored second-done)
-               (assert-contains (princ-to-string second-error)
-                                "separate Lisp process"))
+             (assert-eql :errored second-done)
+             (assert-contains (princ-to-string second-error)
+                              "separate Lisp process"))
+             (with-open-file (s (merge-pathnames ".clpm/asdf-config.lisp"
+                                                 project-b)
+                                :direction :output
+                                :if-exists :supersede
+                                :external-format :utf-8)
+               (write-string "(setf (symbol-value (intern \"*PROJECT-B-LOAD-LEAK*\" \"COMMON-LISP-USER\")) :loaded)"
+                             s))
+             (multiple-value-bind (rc _stdout stderr)
+                 (run-cli-captured '("repl" "daemon")
+                                   :directory project-b)
+               (declare (ignore _stdout))
+               (assert-eql 1 rc)
+               (assert-contains stderr "separate Lisp process"))
+             (multiple-value-bind (rc stdout stderr)
+                 (run-cli-captured
+                  '("repl" "eval"
+                    "(let ((sym (find-symbol \"*PROJECT-B-LOAD-LEAK*\" \"COMMON-LISP-USER\"))) (if (and sym (boundp sym)) (symbol-value sym) :absent))"
+                    "--no-autostart")
+                  :directory project-a)
+               (declare (ignore stderr))
+               (assert-eql 0 rc)
+               (assert-contains stdout "=> :ABSENT"))
              (multiple-value-bind (rc _stdout stderr)
                  (run-cli-captured '("repl" "eval"
                                      "(error \"project-a-only\")"

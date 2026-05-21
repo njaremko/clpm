@@ -352,6 +352,7 @@
 (defpackage #:clpm.repl
   (:use #:cl #:clpm.log #:clpm.errors)
   (:export #:start-server
+           #:call-with-project-server-reservation
            #:send-request
            #:open-connection
            #:close-connection

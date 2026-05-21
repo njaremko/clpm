@@ -2371,6 +2371,69 @@ but output kind and machine-readable shape are semantic.
   - Existing raw in-process test daemons still exist for protocol tests. They
     remain outside the project CLI algebra unless they carry the project proof.
 
+### Iteration 76: Reserve Project Image Before Load
+
+- Commands deleted:
+  - The accidental foreground path where `clpm repl daemon` for project B could
+    load B's `.clpm/asdf-config.lisp` or declared systems into a Lisp image
+    already hosting project A before the daemon isolation check fired.
+- Commands merged:
+  - Project preload and socket listening are one daemon-construction
+    transaction. Loading project code is already REPL image mutation, so it
+    belongs behind the same single-project gate as the listener.
+- Commands that survived and why:
+  - `clpm repl daemon` still starts a foreground daemon for the selected
+    project, but it reserves that project identity before any project-local
+    load side effects run.
+  - `clpm repl daemon --detach` still launches a separate executable process;
+    the child takes the reservation before loading.
+- Laws/protocol invariants added:
+  - `startDaemon(root)` must reserve `root` in the host Lisp image before
+    `loadProject(root)`.
+  - If any project root is already active or reserved in the image, then
+    `startDaemon(otherRoot)` fails before reading `otherRoot/.clpm`.
+  - The only valid public observation after such a failure is the existing
+    daemon's state; no bindings, ASDF systems, packages, workers, traces, or
+    debugger sessions from `otherRoot` may appear in the active daemon.
+- Remaining discomfort:
+  - ASDF and packages are process-global. The algebra therefore keeps the hard
+    rule: a process may host at most one project REPL daemon.
+
+### Iteration 77: Separate Endpoint Errors From Eval Errors
+
+- Commands deleted:
+  - The accidental behavior where an authenticated `eval` response whose user
+    error message mentioned `token` or `project_root` could be treated as a
+    transport/auth failure and cause daemon lifecycle files to be cleaned.
+  - Raw private project package names in eval condition observations.
+  - Endpoint capability writes that followed symlinks into another project's
+    token or TCP port advertisement file.
+- Commands merged:
+  - Endpoint authority is proved before dispatch. After that proof, a method
+    response denotes method execution, not daemon identity.
+- Commands that survived and why:
+  - `repl eval` still reports Lisp conditions, including user text, but it
+    renders CLPM-owned private package names through the public
+    `COMMON-LISP-USER` view.
+  - `repl call ping` and lifecycle preflight remain the only places where
+    missing/invalid token or project-root errors classify endpoint state.
+  - Unix token files and TCP port files are still ordinary per-project
+    lifecycle files, but they are written by replacing the endpoint path, not
+    by writing through a pre-existing link.
+- Laws/protocol invariants added:
+  - If `preflight(root, endpoint) = Running`, then
+    `dispatch(method).error.message` is not reinterpreted as endpoint state.
+  - `evalError.message`, `evalError.report`, and fallback condition payloads
+    are passed through the same public package-name projection as eval values
+    and inspector output.
+  - `writeEndpointCapability(path, payload)` must not mutate the referent of a
+    symlink at `path`; after the write, `path` denotes the selected project's
+    own regular capability file.
+- Remaining discomfort:
+  - A caller with direct filesystem access to another project's endpoint token
+    can still intentionally address that endpoint outside the CLI-selected
+    project algebra.
+
 ## Constructors
 
 Terminal constructors:

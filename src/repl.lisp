@@ -485,30 +485,46 @@ within the longer string)."
                                                 (char-code (char b i))))))
        (zerop diff)))))
 
+(defun %write-endpoint-capability-file (path writer)
+  "Write PATH through a temporary file and atomic rename.
+
+Endpoint capability files live under project directories. Renaming a fresh
+regular file over PATH replaces a symlink at PATH instead of writing through it
+into another project's endpoint state."
+  (let* ((target (namestring (pathname path)))
+         (tmp (format nil "~A.tmp.~D.~A"
+                      target
+                      (clpm.repl.compat:getpid)
+                      (%random-token))))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist target)
+           (with-open-file (s tmp :direction :output
+                                  :if-exists :error
+                                  :if-does-not-exist :create
+                                  :external-format :utf-8)
+             (funcall writer s))
+           #+sbcl (sb-posix:chmod tmp #o600)
+           #+sbcl (sb-posix:rename tmp target)
+           #-sbcl (rename-file tmp target)
+           #+sbcl (sb-posix:chmod target #o600))
+      (ignore-errors (delete-file tmp)))))
+
 (defun %write-port-file (path port token)
-  (with-open-file (s path :direction :output
-                          :if-exists :supersede
-                          :if-does-not-exist :create
-                          :external-format :utf-8)
-    (format s "~D~%~A~%" port token))
-  ;; Restrict the port file to the owner: it leaks the auth token. POSIX
-  ;; mode bits are a no-op on Windows; we attempt the call only where
-  ;; sb-posix is available.
-  #+sbcl (handler-case (sb-posix:chmod path #o600) (error () nil))
-  #-sbcl path)
+  (%write-endpoint-capability-file
+   path
+   (lambda (s)
+     (format s "~D~%~A~%" port token))))
 
 (defun %unix-token-path (socket-path)
   "Return the token-file path paired with SOCKET-PATH."
   (concatenate 'string socket-path ".token"))
 
 (defun %write-token-file (path token)
-  (with-open-file (s path :direction :output
-                          :if-exists :supersede
-                          :if-does-not-exist :create
-                          :external-format :utf-8)
-    (format s "~A~%" token))
-  #+sbcl (handler-case (sb-posix:chmod path #o600) (error () nil))
-  #-sbcl path)
+  (%write-endpoint-capability-file
+   path
+   (lambda (s)
+     (format s "~A~%" token))))
 
 (defun %read-token-file (path)
   "Read a 32-hex endpoint token from PATH, or signal an error."
@@ -664,9 +680,15 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
 (defvar *active-project-server-roots-mutex*
   (clpm.repl.compat:make-mutex :name "clpm.repl.project-roots"))
 
+(defvar *reserved-project-server-root* nil
+  "Project root reserved by the current daemon-start dynamic extent.")
+
+(defun %project-root-string-p (project-root)
+  (and (stringp project-root) (plusp (length project-root))))
+
 (defun %register-active-project-server (project-root)
   "Register PROJECT-ROOT as the only project daemon in this Lisp image."
-  (when (and (stringp project-root) (plusp (length project-root)))
+  (when (%project-root-string-p project-root)
     (clpm.repl.compat:with-mutex (*active-project-server-roots-mutex*)
       (when *active-project-server-roots*
         (error "A project REPL daemon is already active in this Lisp image; start each project daemon in a separate Lisp process for isolation."))
@@ -674,11 +696,31 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
       t)))
 
 (defun %unregister-active-project-server (project-root)
-  (when (and (stringp project-root) (plusp (length project-root)))
+  (when (%project-root-string-p project-root)
     (clpm.repl.compat:with-mutex (*active-project-server-roots-mutex*)
       (setf *active-project-server-roots*
             (remove project-root *active-project-server-roots*
                     :test #'string=)))))
+
+(defun %reserved-project-server-root-p (project-root)
+  (and (%project-root-string-p project-root)
+       (%project-root-string-p *reserved-project-server-root*)
+       (string= project-root *reserved-project-server-root*)))
+
+(defun call-with-project-server-reservation (project-root thunk)
+  "Run THUNK after reserving PROJECT-ROOT as this Lisp image's daemon owner."
+  (cond
+    ((not (%project-root-string-p project-root))
+     (funcall thunk))
+    (t
+     (let ((registered nil))
+       (unwind-protect
+            (progn
+              (setf registered (%register-active-project-server project-root))
+              (let ((*reserved-project-server-root* project-root))
+                (funcall thunk)))
+         (when registered
+           (%unregister-active-project-server project-root)))))))
 
 (defun %server-default-pathname-defaults (server)
   "Return the pathname defaults that belong to SERVER's project image."
@@ -1288,13 +1330,15 @@ with names, args, source locations, and locals. Falls back to plain
 strings on every internal failure -- a buggy print-object on a slot
 must not block the eval response."
   (let* ((type (string (type-of condition)))
-         (msg (handler-case (princ-to-string condition)
-                (error () "<condition message unavailable>")))
-         (report (handler-case
-                     (with-output-to-string (s)
-                       (let ((*print-pretty* t))
-                         (format s "~A" condition)))
-                   (error () msg)))
+         (msg (%public-package-text
+               (handler-case (princ-to-string condition)
+                 (error () "<condition message unavailable>"))))
+         (report (%public-package-text
+                  (handler-case
+                      (with-output-to-string (s)
+                        (let ((*print-pretty* t))
+                          (format s "~A" condition)))
+                    (error () msg))))
          (slot-values (%condition-slot-values condition))
          (restarts (mapcar #'%restart-json (compute-restarts condition)))
          (entries
@@ -1558,8 +1602,9 @@ caller still gets *something* to attach to the eval result."
             (list (cons "type" (handler-case (string (type-of condition))
                                  (error () "?")))
                   (cons "message"
-                        (handler-case (princ-to-string condition)
-                          (error () "<unprintable>"))))))))
+                        (%public-package-text
+                         (handler-case (princ-to-string condition)
+                           (error () "<unprintable>")))))))))
 
 #+sbcl
 (defun %capture-frames (&key (max +max-backtrace-frames+))
@@ -5132,8 +5177,9 @@ raw test/tooling servers do not enforce a project-root guard.
 
 Each daemon thread binds `*server*' and project-root pathname defaults
 dynamically to its own SERVER. Connection and worker threads inherit that
-identity explicitly so multiple project daemons can coexist in one host Lisp
-process."
+identity explicitly. A host Lisp process may own at most one project daemon;
+different projects need separate Lisp processes so ASDF, packages, workers,
+debugger sessions, and other process-global state cannot bleed across roots."
   (let* ((kind (or transport-kind (%default-transport-kind)))
          (advertise (ecase kind
                       (:unix (or socket-path
@@ -5154,8 +5200,9 @@ process."
             (%server-default-pathname-defaults server)))
       (unwind-protect
            (progn
-             (setf registered-project?
-                   (%register-active-project-server project-root))
+             (unless (%reserved-project-server-root-p project-root)
+               (setf registered-project?
+                     (%register-active-project-server project-root)))
              (%open-listener transport)
              (setf (server-socket server) (transport-listener transport))
              (%log-event (server-event-log server) "start"

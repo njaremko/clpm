@@ -223,6 +223,19 @@
                  (assert-true (not (search "\"eval\"" stdout))
                               "ping method_counts leaked hidden eval method: ~A"
                               stdout))
+               (multiple-value-bind (rc stdout stderr)
+                   (run-cli-captured '("repl" "eval"
+                                       "(error \"token\")"
+                                       "--no-autostart"))
+                 (declare (ignore stderr))
+                 (assert-eql 1 rc)
+                 (assert-contains stdout "token")
+                 (assert-true (probe-file sock)
+                              "eval error mentioning token removed daemon socket"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl" "call" "ping"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "\"pid\""))
                (format t "  eval OK~%")
 
                (format t "Test: eval machine output mode is not debug output~%")
@@ -349,8 +362,24 @@
                  (assert-not-contains stdout "CLPM.REPL.USER."))
                (run-cli-captured '("repl" "eval"
                                    "(defun package-leak-sentinel () 42)"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl" "eval"
+                                       "(format t \"~A\" (package-name *package*))"
+                                       "--json"))
+                 (assert-eql 0 rc)
+                 (assert-contains stdout "COMMON-LISP-USER")
+                 (assert-not-contains stdout "CLPM.REPL.USER."))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl" "eval"
+                                       "(error \"pkg ~S\" *package*)"
+                                       "--json"))
+                 (assert-eql 1 rc)
+                 (assert-contains stdout "COMMON-LISP-USER")
+                 (assert-not-contains stdout "CLPM.REPL.USER."))
                (dolist (case '(("apropos" ("--pattern" "PACKAGE-LEAK-SENTINEL"))
                                ("function-info" ("--symbol" "PACKAGE-LEAK-SENTINEL"))
+                               ("function-info" ("--symbol" "PACKAGE-LEAK-SENTINEL"
+                                                 "--package" "COMMON-LISP-USER"))
                                ("describe" ("--symbol" "PACKAGE-LEAK-SENTINEL"))))
                  (destructuring-bind (method args) case
                    (multiple-value-bind (rc stdout)

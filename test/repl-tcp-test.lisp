@@ -51,6 +51,38 @@
        (ignore-errors
          (uiop:delete-directory-tree ,var :validate t)))))
 
+(format t "Test: endpoint capability writers do not follow symlinks~%")
+(with-short-temp-dir (tmp)
+  (let* ((target (merge-pathnames "target.txt" tmp))
+         (token-path (merge-pathnames "repl.sock.token" tmp))
+         (port-path (merge-pathnames "repl.port" tmp))
+         (write-token (find-symbol "%WRITE-TOKEN-FILE"
+                                   (find-package "CLPM.REPL")))
+         (write-port (find-symbol "%WRITE-PORT-FILE"
+                                  (find-package "CLPM.REPL"))))
+    (assert-true write-token "missing %WRITE-TOKEN-FILE")
+    (assert-true write-port "missing %WRITE-PORT-FILE")
+    (with-open-file (s target :direction :output :if-exists :supersede
+                              :external-format :utf-8)
+      (write-string "original" s))
+    (sb-posix:symlink (namestring target) (namestring token-path))
+    (funcall write-token (namestring token-path)
+             "0123456789abcdef0123456789abcdef")
+    (assert-true (string= "original" (uiop:read-file-string target))
+                 "token writer followed symlink into target")
+    (assert-true (search "0123456789abcdef0123456789abcdef"
+                         (uiop:read-file-string token-path))
+                 "token file did not receive replacement content")
+    (ignore-errors (delete-file port-path))
+    (sb-posix:symlink (namestring target) (namestring port-path))
+    (funcall write-port (namestring port-path) 4242
+             "abcdef0123456789abcdef0123456789")
+    (assert-true (string= "original" (uiop:read-file-string target))
+                 "port writer followed symlink into target")
+    (assert-true (search "4242" (uiop:read-file-string port-path))
+                 "port file did not receive replacement content")))
+(format t "  endpoint capability writer symlink isolation OK~%")
+
 ;;; ----------------------------------------------------------------------------
 ;;; #024 acceptance: cmd-repl detects the OS and uses the right
 ;;; transport. We can't *change* OSes inside a single test run, so we assert

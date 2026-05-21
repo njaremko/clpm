@@ -1997,36 +1997,46 @@ because the daemon couldn't come up."
                 (log-error "Daemon failed to bind socket within 5s (see ~A)" log)
                 1)))))
         (t
-         (let ((previous-cwd (ignore-errors (sb-posix:getcwd))))
-           (unwind-protect
-                (progn
-                  (sb-posix:chdir (namestring project-root))
-                  (uiop:with-current-directory (project-root)
-                    (ensure-directories-exist sock)
-                    (%bridge-write-pidfile pid)
-                    (unless no-load
-                      (%bridge-load-project project-root))
-                    (unwind-protect
-                         (handler-case
-                             (let ((tcp-p (%bridge-windows-p)))
-                               (if tcp-p
-                                   (clpm.repl:start-server
-                                    :transport-kind :tcp
-                                    :port-path sock
-                                    :log-path log
-                                    :project-root (%bridge-project-root-id project-root))
-                                   (clpm.repl:start-server
-                                    :transport-kind :unix
-                                    :socket-path sock
-                                    :log-path log
-                                    :project-root (%bridge-project-root-id project-root)))
-                               0)
-                           (error (c)
-                             (format *error-output* "daemon crashed: ~A~%" c)
-                             1))
-                      (ignore-errors (delete-file pid)))))
-             (when previous-cwd
-               (ignore-errors (sb-posix:chdir previous-cwd))))))))))
+         (handler-case
+             (clpm.repl:call-with-project-server-reservation
+              (%bridge-project-root-id project-root)
+              (lambda ()
+                (let ((previous-cwd (ignore-errors (sb-posix:getcwd))))
+                  (unwind-protect
+                       (progn
+                         (sb-posix:chdir (namestring project-root))
+                         (uiop:with-current-directory (project-root)
+                           (ensure-directories-exist sock)
+                           (%bridge-write-pidfile pid)
+                           (unless no-load
+                             (%bridge-load-project project-root))
+                           (unwind-protect
+                                (handler-case
+                                    (let ((tcp-p (%bridge-windows-p)))
+                                      (if tcp-p
+                                          (clpm.repl:start-server
+                                           :transport-kind :tcp
+                                           :port-path sock
+                                           :log-path log
+                                           :project-root
+                                           (%bridge-project-root-id project-root))
+                                          (clpm.repl:start-server
+                                           :transport-kind :unix
+                                           :socket-path sock
+                                           :log-path log
+                                           :project-root
+                                           (%bridge-project-root-id project-root)))
+                                      0)
+                                  (error (c)
+                                    (format *error-output*
+                                            "daemon crashed: ~A~%" c)
+                                    1))
+                             (ignore-errors (delete-file pid)))))
+                    (when previous-cwd
+                      (ignore-errors (sb-posix:chdir previous-cwd)))))))
+           (error (c)
+             (format *error-output* "daemon crashed: ~A~%" c)
+             1)))))))
 
 (defvar *bridge-cli-json* nil
   "When set, CLI subcommands print raw JSON instead of human text.")
@@ -2242,14 +2252,7 @@ absent for this project."
                (log-error "No daemon running for this project. Start one with `clpm repl daemon --detach`.")
                nil)
              (verified-send ()
-               (let ((resp (send-once 5)))
-                 (cond
-                   ((%bridge-project-root-error-p resp)
-                    (%bridge-clean-lifecycle-files sock pid)
-                    (if autostart
-                        (start-and-send)
-                        (no-daemon)))
-                   (t resp))))
+               (send-once 5))
              (start-and-send ()
                (let ((rc (%bridge-daemon-start (list "--detach"))))
                  (if (zerop rc)
