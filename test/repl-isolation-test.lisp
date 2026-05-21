@@ -157,6 +157,33 @@
                                    :directory project-b)
                (assert-eql 0 rc)
                (assert-not-contains stdout "project-a-only"))
+             (run-cli-captured '("repl" "eval"
+                                 "(defun trace-shared-target (x) (1+ x))"
+                                 "--worker" "trace-isolation"
+                                 "--no-autostart")
+                               :directory project-a)
+             (multiple-value-bind (rc stdout stderr)
+                 (run-cli-captured
+                  '("repl" "call" "trace" "--symbols" "[\"trace-shared-target\"]")
+                  :directory project-a)
+               (declare (ignore stdout stderr))
+               (assert-eql 0 rc))
+             (multiple-value-bind (rc stdout)
+                 (run-cli-captured '("repl" "call" "list-traced")
+                                   :directory project-b)
+               (assert-eql 0 rc)
+               (assert-not-contains stdout "TRACE-SHARED-TARGET"))
+             (multiple-value-bind (rc stdout stderr)
+                 (run-cli-captured '("repl" "eval"
+                                     "(trace-shared-target 41)"
+                                     "--no-autostart")
+                                   :directory project-b)
+               (assert-eql 0 rc)
+               (assert-not-contains stdout "TRACE-SHARED-TARGET")
+               (assert-not-contains stderr "TRACE-SHARED-TARGET"))
+             (run-cli-captured
+              '("repl" "call" "untrace" "--symbols" "[\"trace-shared-target\"]")
+              :directory project-a)
              (write-pidfile project-b (sb-posix:getpid))
              (point-socket-at project-b sock-a)
              (multiple-value-bind (rc stdout stderr)

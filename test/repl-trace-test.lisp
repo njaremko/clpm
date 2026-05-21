@@ -80,6 +80,14 @@
       (assert-true (find "TRACE-TARGET" entries
                           :test (lambda (s e) (search s e :test #'char-equal)))
                    "list-traced should mention TRACE-TARGET: ~S" entries))
+    (let* ((call (do-rpc sock "eval"
+                         (list (cons "form" "(trace-target 41)"))))
+           (result (lookup call "result"))
+           (output (and result (lookup result "output"))))
+      (assert-true result "traced call returned error: ~S" call)
+      (assert-true (and (stringp output)
+                        (search "TRACE-TARGET" output :test #'char-equal))
+                   "traced call did not emit trace output: ~S" output))
     (let ((un (do-rpc sock "untrace"
                        (list (cons "symbols"
                                     (list :array (list "trace-target")))))))

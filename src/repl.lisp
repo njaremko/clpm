@@ -618,6 +618,8 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
                              :name "clpm.repl.watches")
                   :reader server-watches-mutex)
    (watch-counter :initform 0 :accessor server-watch-counter)
+   (traces :initform (make-hash-table :test 'eq)
+           :reader server-traces)
    (debug-sessions :initform (make-hash-table :test 'eql)
                    :reader server-debug-sessions)
    (debug-sessions-mutex :initform (clpm.repl.compat:make-mutex
@@ -723,6 +725,21 @@ is NIL."
 This is a special binding, not process identity. A host Lisp may run more
 than one project daemon, so every accept/connection/worker thread must bind
 it to the server that owns that thread.")
+
+(defstruct local-trace-entry
+  original
+  servers)
+
+(defvar *local-trace-registry* (make-hash-table :test 'eq)
+  "Process-global wrapper registry keyed by function symbol.
+
+Each entry may be enabled for several SERVER instances. The installed
+wrapper emits only when the dynamically-bound `*server*' is one of those
+servers, so foreground daemons hosted in one Lisp image do not observe each
+other's trace state.")
+
+(defvar *local-trace-registry-mutex*
+  (clpm.repl.compat:make-mutex :name "clpm.repl.local-trace"))
 
 (define-condition user-interrupt () ()
   (:documentation "Signaled inside the worker thread when the client closes
@@ -4197,28 +4214,85 @@ directory."
 ;;; Trace (#160-#162)
 ;;; ----------------------------------------------------------------------------
 
+(defun %local-trace-enabled-p (entry server)
+  (and entry server (gethash server (local-trace-entry-servers entry))))
+
+(defun %local-trace-call (sym original args)
+  (let ((enabled? nil)
+        (server *server*))
+    (clpm.repl.compat:with-mutex (*local-trace-registry-mutex*)
+      (setf enabled?
+            (%local-trace-enabled-p
+             (gethash sym *local-trace-registry*)
+             server)))
+    (when enabled?
+      (format *trace-output* "~&~S <=~{ ~S~}~%" sym args)
+      (force-output *trace-output*))
+    (apply original args)))
+
+(defun %all-server-traces (server)
+  (clpm.repl.compat:with-mutex (*local-trace-registry-mutex*)
+    (let ((symbols '()))
+      (maphash (lambda (sym _enabled)
+                 (declare (ignore _enabled))
+                 (push sym symbols))
+               (server-traces server))
+      (sort symbols #'string< :key #'%safe-prin1))))
+
 (defun %trace-symbol (sym-name pkg-name &key (server *server*))
-  "Resolve SYM-NAME in PKG-NAME and call cl:trace on it. Returns T on
-success, NIL when the symbol isn't fbound. Errors propagate."
+  "Resolve SYM-NAME in PKG-NAME and trace it for SERVER only."
   (let ((sym (%symbol-from-string sym-name pkg-name :server server)))
     (cond
       ((or (null sym) (not (fboundp sym))) nil)
-      (t (eval `(trace ,sym)) t))))
+      ((null server) nil)
+      (t
+       (clpm.repl.compat:with-mutex (*local-trace-registry-mutex*)
+         (let ((entry (gethash sym *local-trace-registry*)))
+           (unless entry
+             (let ((original (fdefinition sym)))
+               (setf entry
+                     (make-local-trace-entry
+                      :original original
+                      :servers (make-hash-table :test 'eq)))
+               (setf (gethash sym *local-trace-registry*) entry)
+               (setf (fdefinition sym)
+                     (let ((captured-original original))
+                       (lambda (&rest args)
+                         (%local-trace-call sym captured-original args))))))
+           (setf (gethash server (local-trace-entry-servers entry)) t)
+           (setf (gethash sym (server-traces server)) t)))
+       t))))
 
 (defun %untrace-symbol (sym-name pkg-name &key (server *server*))
   (let ((sym (%symbol-from-string sym-name pkg-name :server server)))
     (cond
-      ((null sym) nil)
-      (t (eval `(untrace ,sym)) t))))
+      ((or (null sym) (null server)) nil)
+      (t
+       (clpm.repl.compat:with-mutex (*local-trace-registry-mutex*)
+         (let ((entry (gethash sym *local-trace-registry*)))
+           (cond
+             ((null entry) nil)
+             (t
+              (remhash server (local-trace-entry-servers entry))
+              (remhash sym (server-traces server))
+              (when (zerop (hash-table-count (local-trace-entry-servers entry)))
+                (setf (fdefinition sym) (local-trace-entry-original entry))
+                (remhash sym *local-trace-registry*))
+              t))))))))
+
+(defun %untrace-all-for-server (server)
+  (dolist (sym (%all-server-traces server))
+    (%untrace-symbol (symbol-name sym) (package-name (symbol-package sym))
+                     :server server)))
 
 (%register-method
  (make-method-spec
   :name "trace"
-  :summary "Install cl:trace on one or more symbols."
+  :summary "Trace one or more functions in this daemon."
   :doc "Required: `symbols' (array of symbol names). Optional:
-`package' (resolves all names in this package). Traced output is
-written to *trace-output*; when the eval that runs the traced function
-opts into `stream: true', the lines are emitted as event:stdout."
+`package' (resolves all names in this package). Trace state is scoped to
+this daemon; another project daemon in the same host Lisp does not list or
+emit these traces."
   :params (list (list :name "symbols" :type "array" :required t
                       :description "Symbol names to trace.")
                 (list :name "package" :type "string" :required nil
@@ -4249,9 +4323,9 @@ opts into `stream: true', the lines are emitted as event:stdout."
 (%register-method
  (make-method-spec
   :name "untrace"
-  :summary "Remove cl:trace from symbols (or all if none given)."
+  :summary "Remove daemon-local tracing from symbols (or all if none given)."
   :doc "Optional: `symbols' (array). With no symbols, untraces
-everything (cl:untrace with no arguments)."
+everything traced by this daemon."
   :params (list (list :name "symbols" :type "array" :required nil
                       :description "Symbol names; default: untrace all.")
                 (list :name "package" :type "string" :required nil
@@ -4264,7 +4338,7 @@ everything (cl:untrace with no arguments)."
            (pkg-name (%json-getf params "package")))
       (cond
         ((null names)
-         (eval '(untrace))
+         (%untrace-all-for-server server)
          (%success-response id (%json-object "untraced_all" t)))
         (t
          (let ((untraced '()))
@@ -4279,16 +4353,14 @@ everything (cl:untrace with no arguments)."
 (%register-method
  (make-method-spec
   :name "list-traced"
-  :summary "Return the names of currently-traced functions."
+  :summary "Return this daemon's traced functions."
   :doc "No parameters."
   :params nil
   :handler
   (lambda (server params id ctx)
-    (declare (ignore server params ctx))
+    (declare (ignore params ctx))
     (let ((entries
-            (mapcar (lambda (sym) (%safe-prin1 sym))
-                    (handler-case (eval '(trace))
-                      (error () nil)))))
+            (mapcar #'%safe-prin1 (%all-server-traces server))))
       (%success-response id
                          (%json-object "entries" (%json-array entries)))))))
 
@@ -4877,6 +4949,8 @@ process."
                      (loop-finish))))))
         ;; Stop every watcher first so its polling threads tear down
         ;; before the workers it might be loading code into.
+        (handler-case (%untrace-all-for-server server)
+          (error () nil))
         (dolist (w (%all-watches server))
           (handler-case (%stop-watch w) (error () nil))
           (when (clpm.repl.compat:thread-alive-p (watch-thread w))

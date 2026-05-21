@@ -1151,8 +1151,8 @@ but output kind and machine-readable shape are semantic.
   - Every public arbitrary-form evaluation must route through `repl eval`.
   - `method in {"time-eval","profile-eval"} => Failed unknown-method`.
 - Remaining discomfort:
-  - `trace` still uses CL global trace state. It is useful, but should remain
-    under suspicion because it is process-wide rather than worker-local.
+  - Trace state must remain daemon-local even in embedded hosts that run more
+    than one project daemon in one Lisp image.
 
 ### Iteration 29: Delete Duplicate Debug Abort Flag
 
@@ -1383,9 +1383,34 @@ but output kind and machine-readable shape are semantic.
     clean the selected project's stale lifecycle files and do not mutate the
     other daemon or its process.
 - Remaining discomfort:
-  - `trace` still uses CL global trace state inside one Lisp image. Real
-    detached project daemons are separate processes; embedded multi-daemon
-    hosts still deserve a future server-local trace implementation or a cut.
+  - Trace state still needs an isolation pass.
+
+### Iteration 38: Make Trace State Server-Local
+
+- Commands deleted:
+  - No command token. The cut removes delegation to process-global
+    implementation trace state.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - `repl call trace`, `untrace`, and `list-traced` now operate on the
+    selected daemon's trace set, not the host Lisp's global trace list.
+- Commands that survived and why:
+  - `trace` survives because a debugger can need call observation without
+    evaluating a second arbitrary form.
+  - `list-traced` survives because daemon-local trace state is observable REPL
+    state, just like watches and debugger sessions.
+- Laws/protocol invariants added:
+  - `trace(rootA, sym)` does not add `sym` to `traces(rootB)`.
+  - `list-traced(root)` returns only traces owned by `root`'s daemon.
+  - `eval(rootB, call(sym))` does not emit trace output from
+    `trace(rootA, sym)`.
+  - Shutting down a daemon removes that daemon's trace registrations without
+    untracing symbols still registered by another daemon.
+- Remaining discomfort:
+  - None for REPL trace isolation. The trace wrapper is intentionally simpler
+    than implementation-native tracing; it records calls, not implementation
+    internals.
 
 ## Constructors
 
