@@ -1806,6 +1806,32 @@ but output kind and machine-readable shape are semantic.
     not as refresh. That is a separate trust operation and remains outside
     this constructor.
 
+### Iteration 54: Expose All `project new` Constructors in README
+
+- Commands deleted:
+  - No parser surface. The deleted surface is README table compression that
+    hid workspace and workspace-member constructors.
+- Commands merged:
+  - None. Workspace creation, standalone project creation, and workspace
+    member creation are distinct constructors.
+- Commands derived instead of exposed:
+  - None.
+- Commands that survived and why:
+  - `project new <name> --workspace [--dir <path>]` survives as the workspace
+    resource constructor.
+  - `project new <name> --bin|--lib [--dir <path>]` survives as standalone
+    project scaffolding.
+  - `project new <name> --bin|--lib --member-of <workspace-dir>` survives as
+    project scaffolding plus workspace membership mutation.
+- Laws/protocol invariants added:
+  - Public command tables must enumerate distinct constructor shapes when
+    their effects differ.
+  - README must contain every accepted `project new` constructor class from
+    the target grammar.
+- Remaining discomfort:
+  - The README table is still maintained by hand. Tests pin the high-risk
+    constructor rows so drift is at least observable.
+
 ## Constructors
 
 Terminal constructors:
@@ -2276,6 +2302,8 @@ Failed-counterexample regressions:
   not "every RPC" or full internal wire-registry discovery.
 - `clpm help registry trust refresh` states that only Quicklisp registries
   support trust refresh and does not describe a no-op for git registries.
+- README documents the workspace, standalone project, and workspace-member
+  `project new` constructor forms.
 - `clpm registry publish --git-commit ...` is rejected; publish does not run
   VCS commands.
 - `clpm repl eval FORM --pretty` is rejected; human output is the default and
