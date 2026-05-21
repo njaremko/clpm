@@ -113,6 +113,26 @@
                (assert-true (integerp (lookup result "pid"))
                             "ping result missing pid: ~S" result)))
 
+           (let ((events '()))
+             (let ((resp (clpm.repl:send-request
+                          port-path
+                          "ping"
+                          :params (list :object (list (cons "explain" t)))
+                          :on-event (lambda (frame)
+                                      (push frame events)
+                                      nil))))
+               (assert-true (lookup resp "result")
+                            "TCP explain ping failed: ~S" resp)
+               (let ((plan (find-if (lambda (frame)
+                                      (string= "plan" (lookup frame "event")))
+                                    events)))
+                 (assert-true plan "no TCP explain plan event: ~S" events)
+                 (let ((params (lookup plan "params")))
+                   (assert-true (not (lookup params "token"))
+                                "plan leaked TCP auth token: ~S" plan)
+                   (assert-true (not (lookup params "explain"))
+                                "plan leaked explain dispatch param: ~S" plan)))))
+
            ;; eval round-trip.
            (let* ((resp (clpm.repl:send-request
                          port-path "eval"

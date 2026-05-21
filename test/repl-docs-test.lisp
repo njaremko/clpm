@@ -114,7 +114,8 @@
   (lambda (sock)
     (let* ((events '())
            (resp (do-rpc sock "ping"
-                          (list (cons "explain" t))
+                          (list (cons "explain" t)
+                                (cons "project_root" "/tmp/not-a-method-param"))
                           :on-event (lambda (frame)
                                       (push frame events)
                                       nil))))
@@ -124,7 +125,12 @@
                            events)))
         (assert-true plan "no plan event observed: ~S" events)
         (assert-true (string= "ping" (lookup plan "method"))
-                     "plan should echo method: ~S" plan)))))
+                     "plan should echo method: ~S" plan)
+        (let ((params (lookup plan "params")))
+          (assert-true (not (lookup params "explain"))
+                       "plan leaked explain dispatch param: ~S" plan)
+          (assert-true (not (lookup params "project_root"))
+                       "plan leaked project_root transport param: ~S" plan))))))
 (format t "  explain OK~%")
 
 (format t "~%REPL docs tests PASSED!~%")

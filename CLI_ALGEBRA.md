@@ -2026,6 +2026,28 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None.
 
+### Iteration 64: Explain Events Expose Method Params Only
+
+- Commands deleted:
+  - The accidental observation that `repl` explain plan frames echoed
+    transport and dispatch fields (`project_root`, `token`, `explain`).
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Transport authentication and project routing are CLPM-owned envelopes;
+    they are not part of a method's user parameter algebra.
+- Commands that survived and why:
+  - `repl call <method> --explain true` survives as a method-plan
+    observation.
+  - TCP REPL transport survives with token authentication, but tokens remain
+    unobservable in explain output.
+- Laws/protocol invariants added:
+  - `plan.params` is the original request params minus
+    `+implicit-method-params+`.
+  - `project_root`, `token`, and `explain` never appear in `plan.params`.
+- Remaining discomfort:
+  - None.
+
 ## Constructors
 
 Terminal constructors:

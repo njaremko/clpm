@@ -2203,6 +2203,16 @@ the method-local schema.")
 (defun %implicit-method-param-p (name)
   (member name +implicit-method-params+ :test #'string=))
 
+(defun %method-local-params (params)
+  "Return PARAMS without transport/dispatch fields."
+  (let ((alist (%json-object-alist params)))
+    (if alist
+        (list :object
+              (loop for entry in alist
+                    unless (%implicit-method-param-p (car entry))
+                      collect entry))
+        (%json-object))))
+
 (defun %decode-method-params (spec params id)
   "Validate PARAMS against SPEC. Returns (values PARAMS NIL) on success,
 or (values NIL ERROR-RESPONSE) on failure."
@@ -5310,7 +5320,7 @@ Used by both the inline path and the threaded path."
                          (when explain?
                            (%emit-event ctx "plan"
                                         "method" method
-                                        "params" (or params (%json-object))))
+                                        "params" (%method-local-params params)))
                          (%dispatch-method server method params id ctx))
                      (error (c)
                        (%error-response id "protocol-error"
