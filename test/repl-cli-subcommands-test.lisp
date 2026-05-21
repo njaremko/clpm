@@ -196,6 +196,12 @@
                    (run-cli-captured '("repl" "eval" "*cli-x*"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "=> 41"))
+               (multiple-value-bind (rc stdout)
+                   (run-cli-captured '("repl" "call" "ping"))
+                 (assert-eql 0 rc)
+                 (assert-true (not (search "\"eval\"" stdout))
+                              "ping method_counts leaked hidden eval method: ~A"
+                              stdout))
                (format t "  eval OK~%")
 
                (format t "Test: eval --debug handles debugger continuations~%")

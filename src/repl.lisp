@@ -2284,14 +2284,15 @@ error."
 ;;; Registered methods
 
 (defun %method-counts-json (server)
-  "Snapshot of `{method: {total, errors}}' for ping's observability
-payload."
+  "Snapshot public callable method counters for ping's observability payload."
   (clpm.repl.compat:with-mutex ((server-method-counts-mutex server))
     (let* ((tbl (server-method-counts server))
            (pairs (loop for m being the hash-keys of tbl using (hash-value v)
-                        collect (cons m (list :object
-                                              (list (cons "total" (car v))
-                                                    (cons "errors" (cdr v))))))))
+                        for spec = (%lookup-method m)
+                        when (and spec (%discoverable-method-spec-p spec))
+                          collect (cons m (list :object
+                                                (list (cons "total" (car v))
+                                                      (cons "errors" (cdr v))))))))
       (list :object pairs))))
 
 (%register-method
@@ -2302,9 +2303,10 @@ payload."
 Useful for confirming the connection works and for detecting daemon restarts
 via the `pid' and `eval_count' fields.
 
-The response includes per-method counters (`method_counts': method name ->
-{total, errors}) and a `recent_error_count' running total since startup,
-so clients can spot a misbehaving RPC without scraping the event log."
+The response includes public callable method counters (`method_counts':
+method name -> {total, errors}) and a `recent_error_count' running total
+since startup, so clients can spot a misbehaving RPC without scraping the
+event log."
   :params nil
   :handler
   (lambda (server params id ctx)

@@ -1935,6 +1935,27 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None.
 
+### Iteration 60: Keep Ping Method Counts in the Public RPC Algebra
+
+- Commands deleted:
+  - No method is removed. The deleted observation is hidden wire-method names
+    leaking through `ping.method_counts`.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Raw eval traffic remains observable through `eval_count`, not through the
+    callable RPC method-count map.
+- Commands that survived and why:
+  - `repl call ping` survives as liveness and health observation.
+  - `method_counts` survives as counters over the same public callable method
+    domain as `repl call methods`.
+- Laws/protocol invariants added:
+  - `keys(ping.method_counts) subset keys(repl call methods)`.
+  - Hidden transport or lifecycle methods (`eval`, `shutdown`,
+    `query-response`) are not observations of the public call algebra.
+- Remaining discomfort:
+  - None.
+
 ## Constructors
 
 Terminal constructors:

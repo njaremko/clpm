@@ -65,20 +65,21 @@
                                   :on-event on-event))
 
 ;;; ----------------------------------------------------------------------------
-;;; #213: ping reports per-method counters.
+;;; #213: ping reports public per-method counters and separate eval count.
 
-(format t "Test: ping returns method_counts after eval~%")
+(format t "Test: ping keeps method_counts public after eval~%")
 (with-daemon
   (lambda (sock)
     (do-rpc sock "eval" (list (cons "form" "(+ 1 2)")))
     (do-rpc sock "eval" (list (cons "form" "(+ 3 4)")))
     (let* ((resp (do-rpc sock "ping"))
-           (counts (lookup (lookup resp "result") "method_counts"))
-           (eval-cell (lookup counts "eval")))
+           (result (lookup resp "result"))
+           (counts (lookup result "method_counts")))
       (assert-true (consp counts) "method_counts missing: ~S" resp)
-      (assert-true eval-cell "no entry for eval in counts: ~S" counts)
-      (assert-true (>= (lookup eval-cell "total") 2)
-                   "expected >=2 evals, got ~A" (lookup eval-cell "total")))))
+      (assert-true (not (lookup counts "eval"))
+                   "method_counts leaked hidden eval method: ~S" counts)
+      (assert-true (>= (lookup result "eval_count") 2)
+                   "expected >=2 evals, got ~A" (lookup result "eval_count")))))
 (format t "  method_counts OK~%")
 
 ;;; ----------------------------------------------------------------------------
