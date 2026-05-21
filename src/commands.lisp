@@ -2379,6 +2379,37 @@ server-owned session for later `call debug-* ...' requests."
                  (%bridge-pretty-print resp *standard-output*)))
               (if (assoc "error" (cadr resp) :test #'string=) 1 0)))))))))
 
+(defun %bridge-project-root-error-p (resp)
+  (let* ((err (%bridge-err resp))
+         (message (%bridge-field err "message")))
+    (and (stringp message)
+         (search "project_root" message :test #'char-equal))))
+
+(defun %bridge-clean-lifecycle-files (sock pid)
+  (ignore-errors (delete-file pid))
+  (ignore-errors (delete-file sock)))
+
+(defun %bridge-ping-daemon (sock project-root)
+  "Return (values STATE RESPONSE RESULT) for PROJECT-ROOT's daemon endpoint."
+  (let ((project-id (%bridge-project-root-id project-root))
+        (ping (clpm.repl:send-request sock "ping"
+                                      :params (%bridge-params-with-project-root
+                                               nil project-root)
+                                      :connect-timeout 1)))
+    (cond
+      ((%bridge-obj ping)
+       (let* ((result (%bridge-obj ping))
+              (reported (%bridge-field result "project_root")))
+         (cond
+           ((and (stringp reported) (string= reported project-id))
+            (values :running ping result))
+           (t
+            (values :project-mismatch ping result)))))
+      ((%bridge-project-root-error-p ping)
+       (values :project-mismatch ping nil))
+      (t
+       (values :unresponsive ping nil)))))
+
 (defun %bridge-status (args)
   (declare (ignore args))
   (multiple-value-bind (project-root sock pid log)
@@ -2399,41 +2430,41 @@ server-owned session for later `call debug-* ...' requests."
                (format t "not running~%"))
            0)
           ((not (%bridge-pid-alive-p existing))
-           (ignore-errors (delete-file pid))
-           (ignore-errors (delete-file sock))
+           (%bridge-clean-lifecycle-files sock pid)
            (if *bridge-cli-json*
                (emit-json "stale")
                (format t "stale pidfile (cleaned)~%"))
            0)
           (t
-           (let ((ping (clpm.repl:send-request sock "ping"
-                                               :params (%bridge-params-with-project-root
-                                                        nil project-root)
-                                               :connect-timeout 1)))
+           (multiple-value-bind (state _ping obj)
+               (%bridge-ping-daemon sock project-root)
+             (declare (ignore _ping))
              (cond
-               ((consp ping)
-                (let* ((result (cdr (assoc "result" (cadr ping)
-                                           :test #'string=)))
-                       (obj (and result (cadr result)))
-                       (uptime (and obj (cdr (assoc "uptime_ms" obj
-                                                      :test #'string=))))
-                       (lisp (and obj (cdr (assoc "lisp" obj :test #'string=))))
-                       (evals (and obj (cdr (assoc "eval_count" obj
-                                                    :test #'string=)))))
+               ((eq state :running)
+                (let* ((reported-pid (or (%bridge-field obj "pid") existing))
+                       (uptime (%bridge-field obj "uptime_ms"))
+                       (lisp (%bridge-field obj "lisp"))
+                       (evals (%bridge-field obj "eval_count")))
                   (cond
                     (*bridge-cli-json*
                      (emit-json "running"
-                                "pid" existing
+                                "pid" reported-pid
                                 "uptime_ms" uptime
                                 "lisp" lisp
                                 "eval_count" evals))
                     (t
-                     (format t "running (pid ~D)~%" existing)
+                     (format t "running (pid ~D)~%" reported-pid)
                      (format t "  socket: ~A~%" sock)
                      (format t "  log:    ~A~%" log)
                      (when uptime (format t "  uptime: ~,1Fs~%" (/ uptime 1000.0)))
                      (when lisp (format t "  lisp:   ~A~%" lisp))
                      (when evals (format t "  evals:  ~D~%" evals)))))
+                0)
+               ((eq state :project-mismatch)
+                (%bridge-clean-lifecycle-files sock pid)
+                (if *bridge-cli-json*
+                    (emit-json "stale" "reason" "project-mismatch")
+                    (format t "stale daemon state (cleaned)~%"))
                 0)
                (t
                 (cond
@@ -2465,42 +2496,42 @@ are dropped, matching `%bridge-make-params'."
          (format t "not running~%")
          0)
         ((not (%bridge-pid-alive-p existing))
-         (ignore-errors (delete-file pid))
-         (ignore-errors (delete-file sock))
+         (%bridge-clean-lifecycle-files sock pid)
          (format t "cleaned stale pidfile~%")
          0)
         (t
-         ;; Graceful shutdown: send the request and wait for the socket file
-         ;; to disappear (start-server deletes it from its unwind-protect once
-         ;; the accept loop exits). The socket is the authoritative signal --
-         ;; the pid may legitimately belong to a long-lived host process (e.g.
-         ;; an editor) that hosts the daemon as one of many threads, so we
-         ;; can't safely SIGTERM on pid-liveness alone.
-         (handler-case
-             (clpm.repl:send-request sock "shutdown"
-                                     :params (%bridge-params-with-project-root
-                                              nil project-root)
-                                     :connect-timeout 1)
-           (error () nil))
-         ;; Poll for the socket file going away. `probe-file' isn't safe here
-         ;; because on macOS it can fault on a Unix-socket path during the
-         ;; brief window when the daemon's unwind-protect is unlinking it;
-         ;; `uiop:file-exists-p' uses lstat-based checks that don't truename.
-         (loop for i from 0 below 50
-               while (uiop:file-exists-p sock)
-               do (sleep 0.1))
-         (when (uiop:file-exists-p sock)
-           ;; Daemon ignored the shutdown request; only escalate to SIGTERM
-           ;; if the pid file still names a live process.
-           (when (%bridge-pid-alive-p existing)
-             (handler-case (sb-posix:kill existing 15) (error () nil))
-             (loop for i from 0 below 20
-                   while (uiop:file-exists-p sock)
-                   do (sleep 0.1))))
-         (ignore-errors (delete-file pid))
-         (ignore-errors (delete-file sock))
-         (format t "stopped~%")
-         0)))))
+         (multiple-value-bind (state _ping obj)
+             (%bridge-ping-daemon sock project-root)
+           (declare (ignore _ping obj))
+           (cond
+             ((eq state :project-mismatch)
+              (%bridge-clean-lifecycle-files sock pid)
+              (format t "stale daemon state (cleaned)~%")
+              0)
+             ((not (eq state :running))
+              (format t "running but unresponsive (pid ~D)~%" existing)
+              (format t "  try removing stale files under .clpm/ after checking the process~%")
+              1)
+             (t
+              ;; Graceful shutdown: send the request and wait for the socket file
+              ;; to disappear. The socket is the authoritative signal: the pid may
+              ;; belong to a long-lived host process that hosts more than one daemon.
+              (handler-case
+                  (clpm.repl:send-request sock "shutdown"
+                                          :params (%bridge-params-with-project-root
+                                                   nil project-root)
+                                          :connect-timeout 1)
+                (error () nil))
+              ;; Poll for the socket file going away. `probe-file' isn't safe here
+              ;; because on macOS it can fault on a Unix-socket path during the
+              ;; brief window when the daemon's unwind-protect is unlinking it;
+              ;; `uiop:file-exists-p' uses lstat-based checks that don't truename.
+              (loop for i from 0 below 50
+                    while (uiop:file-exists-p sock)
+                    do (sleep 0.1))
+              (%bridge-clean-lifecycle-files sock pid)
+              (format t "stopped~%")
+              0))))))))
 
 (defun %bridge-daemon (args)
   "Lifecycle command for the repl daemon.

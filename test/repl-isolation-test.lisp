@@ -83,6 +83,20 @@
    (clpm.workspace:make-workspace :format 1 :members members)
    (merge-pathnames "clpm.workspace" workspace-root)))
 
+(defun write-pidfile (project-root pid)
+  (let ((pidfile (merge-pathnames ".clpm/repl.pid" project-root)))
+    (ensure-directories-exist pidfile)
+    (with-open-file (s pidfile :direction :output :if-exists :supersede
+                               :if-does-not-exist :create
+                               :external-format :utf-8)
+      (format s "~D~%" pid))))
+
+(defun point-socket-at (project-root target)
+  (let ((socket (merge-pathnames ".clpm/repl.sock" project-root)))
+    (ensure-directories-exist socket)
+    (ignore-errors (delete-file socket))
+    (sb-posix:symlink target (namestring socket))))
+
 (defun start-daemon-thread (directory name &optional (args '("repl" "daemon")))
   (sb-thread:make-thread
    (lambda ()
@@ -143,6 +157,37 @@
                                    :directory project-b)
                (assert-eql 0 rc)
                (assert-not-contains stdout "project-a-only"))
+             (write-pidfile project-b (sb-posix:getpid))
+             (point-socket-at project-b sock-a)
+             (multiple-value-bind (rc stdout stderr)
+                 (run-cli-captured '("repl" "daemon" "--status")
+                                   :directory project-b)
+               (declare (ignore stderr))
+               (assert-eql 0 rc)
+               (assert-contains stdout "stale daemon state")
+               (assert-not-contains stdout "running (pid"))
+             (let ((sleeper (uiop:launch-program
+                             '("sleep" "30")
+                             :output nil :error-output nil :input nil)))
+               (unwind-protect
+                    (progn
+                      (write-pidfile project-b (uiop:process-info-pid sleeper))
+                      (point-socket-at project-b sock-a)
+                      (multiple-value-bind (rc stdout stderr)
+                          (run-cli-captured '("repl" "daemon" "--stop")
+                                            :directory project-b)
+                        (declare (ignore stderr))
+                        (assert-eql 0 rc)
+                        (assert-contains stdout "stale daemon state"))
+                      (assert-true (uiop:process-alive-p sleeper)
+                                   "stop killed an unrelated pid from another project")
+                      (multiple-value-bind (rc stdout)
+                          (run-cli-captured '("repl" "call" "ping")
+                                            :directory project-a)
+                        (assert-eql 0 rc)
+                        (assert-contains stdout "\"project_root\"")))
+                 (when (uiop:process-alive-p sleeper)
+                   (ignore-errors (uiop:terminate-process sleeper)))))
              (format t "  project session isolation OK~%"))
         (stop-daemon project-a)
         (stop-daemon project-b)

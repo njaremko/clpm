@@ -1358,6 +1358,35 @@ but output kind and machine-readable shape are semantic.
   - None for registry add trust. Future attacks should check whether README
     examples reintroduce redundant `trust set quicklisp tofu` flows.
 
+### Iteration 37: Bind Daemon Lifecycle to Project Identity
+
+- Commands deleted:
+  - No command token. The cut removes a false observation: a pid/socket pair
+    under one project no longer proves that project's daemon exists.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - `repl daemon --status` and `repl daemon --stop` derive daemon identity
+    from the selected project root, then validate the endpoint by `ping`
+    before reporting or stopping it.
+- Commands that survived and why:
+  - `repl daemon --status` survives as lifecycle observation, but only when
+    the daemon reports the same canonical `project_root`.
+  - `repl daemon --stop` survives as lifecycle mutation, but it refuses to
+    signal a pid unless the endpoint first proves it belongs to the selected
+    project image.
+- Laws/protocol invariants added:
+  - `status(root)` may report running only if
+    `ping(socket(root)).project_root == canonical(root)`.
+  - `stop(root)` may send shutdown only after the same identity proof.
+  - If pid/socket files point at another project's daemon, status and stop
+    clean the selected project's stale lifecycle files and do not mutate the
+    other daemon or its process.
+- Remaining discomfort:
+  - `trace` still uses CL global trace state inside one Lisp image. Real
+    detached project daemons are separate processes; embedded multi-daemon
+    hosts still deserve a future server-local trace implementation or a cut.
+
 ## Constructors
 
 Terminal constructors:
