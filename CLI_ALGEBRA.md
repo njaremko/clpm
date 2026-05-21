@@ -1153,6 +1153,32 @@ but output kind and machine-readable shape are semantic.
   - `trace` still uses CL global trace state. It is useful, but should remain
     under suspicion because it is process-wide rather than worker-local.
 
+### Iteration 29: Delete Duplicate Debug Abort Flag
+
+- Commands deleted:
+  - `repl eval FORM --debug --abort`.
+- Commands merged:
+  - Plain `repl eval FORM --debug` already observes the first debugger stop
+    and aborts it when no restart, frame action, or keep request is supplied.
+- Commands derived instead of exposed:
+  - Abort is the default terminal action of the debug observation path, not a
+    separate CLI constructor.
+- Commands that survived and why:
+  - `--keep` survives because it changes the denotation: the debugger stop is
+    retained as server-owned session state for later `repl call debug-*`
+    operations.
+  - `--restart`, `--frame`, and `--frame-eval` survive because each selects a
+    different continuation action at the observed stop.
+- Laws/protocol invariants added:
+  - `debug(form)` with no selected continuation denotes `debugStop(form)`
+    followed by `debugAbort`.
+  - `debug(form, keep)` denotes `debugStop(form)` plus retained session state;
+    it must not be equivalent to abort.
+- Remaining discomfort:
+  - The debug option parser still accumulates loosely related selectors in a
+    plist. A future pass should split the selected continuation into a closed
+    state before dispatch.
+
 ## Constructors
 
 Terminal constructors:

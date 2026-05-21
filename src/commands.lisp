@@ -2239,7 +2239,6 @@ server-owned session for later `call debug-* ...' requests."
         (restart-args '())
         (frame nil)
         (frame-eval nil)
-        (abort nil)
         (keep nil)
         (break-on nil)
         (timeout-ms nil)
@@ -2297,7 +2296,6 @@ server-owned session for later `call debug-* ...' requests."
              (log-error "Missing value for --frame-eval")
              (return-from %bridge-eval 1)))
           ((string= arg "--keep") (setf debug t keep t))
-          ((string= arg "--abort") (setf debug t abort t))
           ((string= arg "--break-on")
            (setf debug t
                  break-on (pop args))
@@ -2344,7 +2342,6 @@ server-owned session for later `call debug-* ...' requests."
                                 :arg (nreverse restart-args)
                                 :frame frame
                                 :frame-eval frame-eval
-                                :abort abort
                                 :keep keep
                                 :break-on break-on
                                 :timeout-ms timeout-ms
@@ -2818,11 +2815,6 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
                        (setf kept t
                              resolved :kept)
                        :stop)
-                      ((getf opts :abort)
-                       (clpm.repl:send-continuation-on-connection
-                        conn eval-id "debug-abort"
-                        :params (project-params nil))
-                       (setf resolved :aborted))
                       (t
                        (clpm.repl:send-continuation-on-connection
                         conn eval-id "debug-abort"

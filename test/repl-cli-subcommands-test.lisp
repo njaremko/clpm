@@ -191,6 +191,13 @@
                                        "--arg" "42"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "=> 42"))
+               (multiple-value-bind (rc _stdout stderr)
+                   (run-cli-captured '("repl" "eval"
+                                       "(error \"abort duplicate\")"
+                                       "--debug" "--abort"))
+                 (declare (ignore _stdout))
+                 (assert-eql 1 rc)
+                 (assert-contains stderr "Unknown eval option: --abort"))
                (format t "  eval --debug OK~%")
 
                (format t "Test: kept debug sessions are managed through call~%")
