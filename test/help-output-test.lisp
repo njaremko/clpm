@@ -275,6 +275,7 @@
   (assert-eql 0 code)
   (assert-contains stdout "Usage: clpm repl eval")
   (assert-contains stdout "--package")
+  (assert-contains stdout "  --json")
   (assert-contains stdout "--break-on")
   (assert-contains stdout "--timeout-ms")
   (assert-contains stdout "--no-autostart"))

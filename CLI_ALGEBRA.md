@@ -1891,6 +1891,26 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None.
 
+### Iteration 58: Name REPL Eval Machine Observation in Leaf Help
+
+- Commands deleted:
+  - No executable surface. The deleted surface is an undocumented accepted
+    output mode in the `clpm help repl eval` Options list.
+- Commands merged:
+  - None. `--json` remains the single machine-readable eval observation; the
+    human mode still has no `--pretty` alias.
+- Commands derived instead of exposed:
+  - Human rendering remains the default derived presentation of the same eval
+    response.
+- Commands that survived and why:
+  - `repl eval FORM --json` survives because it exposes the typed daemon eval
+    response for tools.
+- Laws/protocol invariants added:
+  - Every accepted leaf-local output mode with a distinct observation must be
+    named by the corresponding leaf help page.
+- Remaining discomfort:
+  - None.
+
 ## Constructors
 
 Terminal constructors:
