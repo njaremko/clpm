@@ -185,8 +185,15 @@
            ;; Output file mode.
            (let ((out-json (merge-pathnames "sbom.json" proj-root)))
              (uiop:with-current-directory (proj-root)
+               (multiple-value-bind (code _stdout stderr)
+                   (run-cli-captured (list "deps" "sbom" "--format" "cyclonedx-json"
+                                           "--output" (namestring out-json)))
+                 (declare (ignore _stdout))
+                 (assert-eql 1 code)
+                 (assert-contains stderr "Unknown option: --output")))
+             (uiop:with-current-directory (proj-root)
                (assert-eql 0 (clpm:run-cli (list "deps" "sbom" "--format" "cyclonedx-json"
-                                                 "--output" (namestring out-json)))))
+                                                 "--out" (namestring out-json)))))
              (assert-true (uiop:file-exists-p out-json)
                           "Expected output file to exist: ~A" (namestring out-json))
              (let ((text (uiop:read-file-string out-json)))

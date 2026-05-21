@@ -5306,7 +5306,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
         (output nil))
     (labels ((usage-error (fmt &rest fmt-args)
                (apply #'log-error fmt fmt-args)
-               (log-error "Usage: clpm deps sbom --format <~{~A~^|~}> [--output <path>]"
+               (log-error "Usage: clpm deps sbom --format <~{~A~^|~}> [--out <path>]"
                           *sbom-supported-formats*)
                (return-from cmd-sbom 1))
              (nonempty-string (s)
@@ -5315,7 +5315,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
       (loop while args do
         (let ((arg (pop args)))
           (cond
-            ((or (string= arg "--output") (string= arg "--out"))
+            ((string= arg "--out")
              (setf output (pop args))
              (unless (nonempty-string output)
                (usage-error "Missing value for ~A" arg)))

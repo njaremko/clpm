@@ -1680,6 +1680,25 @@ but output kind and machine-readable shape are semantic.
     rather than an explicit struct. The public algebra is closed; a future
     internal cleanup can reify the type.
 
+### Iteration 49: Delete Duplicate SBOM Output Spelling
+
+- Commands deleted:
+  - `deps sbom --output PATH`.
+- Commands merged:
+  - The duplicate file-output spelling is merged into `deps sbom --out PATH`.
+- Commands derived instead of exposed:
+  - None. `--out` is the single file observation constructor.
+- Commands that survived and why:
+  - `deps sbom --out PATH` survives because SBOMs are often consumed as files
+    by scanners and release tooling.
+  - Omitting `--out` survives as the stdout observation.
+- Laws/protocol invariants added:
+  - `parse ["deps", "sbom", "--format", fmt, "--output", path] = Error`.
+  - The usage text for `deps sbom` advertises only `--out`.
+  - `--out` remains unique to SBOM file output; it is not an alias family.
+- Remaining discomfort:
+  - None for SBOM output spelling.
+
 ## Constructors
 
 Terminal constructors:
@@ -2113,6 +2132,8 @@ Failed-counterexample regressions:
   continuation selectors: `--frame` without `--frame-eval`,
   `--frame-eval` without `--frame`, `--arg` without `--restart`, and multiple
   actions selected together.
+- `clpm deps sbom --output PATH` is rejected; `--out` is the only SBOM
+  file-output spelling.
 - `clpm --insecure help` is rejected; `--insecure` is not an inert
   pre-command global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes
