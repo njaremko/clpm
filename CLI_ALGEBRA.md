@@ -340,6 +340,54 @@ operations: `deps sync`, `deps update`, `deps search`, `deps info`,
 | `gc` | Store cleanup | `store gc` | Garbage-collects unreachable store entries. |
 | `repl` | Primitive carrier | `repl` | Persistent image has independent lifecycle state. |
 
+## Output Contract Inventory
+
+Semantic equality includes exit status, stdout/stderr class, files written,
+and persisted state. Exact human wording is semantic only where tests lock it,
+but output kind and machine-readable shape are semantic.
+
+| Surface | Success stdout | Success stderr | File/state effects | Machine mode | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| `help`, bare `clpm`, `--help` | Human command schema | Empty | None | None | `test/help-output-test.lisp`, `test/cli-test.lisp` |
+| `doctor` | Human `ok/warn/error` checks and final status | Empty in normal checks | None | None | `test/doctor-test.lisp` |
+| `skill` | SKILL.md markdown | Empty | None | None | `test/skill-command-test.lisp` |
+| `project new` | Human creation lines | Errors only | Creates project/workspace files | None | `test/new-command-test.lisp`, `test/workspace-new-test.lisp` |
+| `project init` | Human creation lines | Errors only | Writes `clpm.project` | None | `test/project-roundtrip-test.lisp` |
+| `project workspace init/add/remove` | Human mutation lines | Errors only | Writes `clpm.workspace` | None | `test/workspace-commands-test.lisp` |
+| `project workspace list` | Sorted member names, one per line | Errors only | None | None | `test/workspace-subcommand-test.lisp` |
+| `project package` | Human packaging lines | Errors/child failures | Writes distributable executable and metadata | None | `test/package-command-test.lisp` |
+| `deps add/remove` | Human mutation lines | Errors only | Rewrites `clpm.project` dependency intent | None | `test/add-remove-test.lisp` |
+| `deps sync --to lock` | Human resolver lines | Errors only | Writes `clpm.lock` | None | `test/resolve-short-circuit-test.lisp`, `test/update-selective-test.lisp` |
+| `deps sync --to source` | Human resolver/fetch lines | Errors only | Writes lock/source hashes and store sources | None | `test/path-dep-test.lisp`, `test/git-dep-test.lisp` |
+| `deps sync --to build` | Human resolver/fetch/build lines | Errors/build log pointers | Writes build store entries | None | `test/build-parallel-test.lisp` |
+| `deps sync --to active` / default | Human resolver/fetch/build/activation lines | Errors only | Writes activation config under `.clpm/` | None | `test/example-workflow-test.lisp` |
+| `deps update [system...]` | Human update lines | Errors only | Rewrites lockfile for unlock set | None | `test/update-selective-test.lisp` |
+| `deps search` | Tab-separated human rows | Errors only | None | `--json` array/object rows | `test/search-command-test.lisp` |
+| `deps info` | Human selected/candidate sections | Errors only | None | `--json` object | `test/info-command-test.lisp` |
+| `deps tree` | Human dependency tree lines | Errors only | None | None | `test/tree-why-test.lisp` |
+| `deps why` | Human reachability path lines | Errors only | None | None | `test/tree-why-test.lisp` |
+| `deps audit` | Human audit report | Errors only | None | `--json` object | `test/audit-command-test.lisp` |
+| `deps sbom` | SBOM document when `--out` absent | Errors only | Writes `--out` path when supplied | `cyclonedx-json`, `cyclonedx-xml`, `spdx-json` formats | `test/sbom-command-test.lisp` |
+| `registry add/list/update` | Human registry rows/status | Errors only | Updates config and/or registry snapshots | None | `test/registry-cmd-test.lisp`, `test/registry-init-test.lisp` |
+| `registry trust list/set/refresh` | Human trust rows/status | Errors only | Updates trust config/pins | None | `test/registry-trust-cmd-test.lisp`, `test/quicklisp-trust-tofu-test.lisp` |
+| `registry key generate/import` | Human key file lines | Errors only | Writes key files | None | `test/keys-subcommand-test.lisp` |
+| `registry key list` | Human key/fingerprint rows | Errors only | None | None | `test/keys-subcommand-test.lisp` |
+| `registry key verify` | Human verification status | Errors only | None | None | `test/keys-subcommand-test.lisp` |
+| `registry init` | Human generated file lines | Errors only | Writes registry snapshot/signature/key files | None | `test/registry-init-test.lisp` |
+| `registry publish` | Human tarball/release/snapshot lines | Errors only | Writes tarball/release/snapshot/signature files | None | `test/publish-command-test.lisp` |
+| `run` | Child/project entrypoint stdout | Child/project stderr/errors | May realize activation before running | Child process/lisp exit status | `test/run-exec-test.lisp` |
+| `run exec` | Child stdout | Child stderr/errors | May realize activation before running | Child exit status | `test/run-exec-test.lisp` |
+| `run test` | Human test/load lines from test driver | Errors only | May realize activation before testing | Lisp test outcome exit status | `test/test-command-test.lisp` |
+| `run script` | Script stdout | Script stderr/errors | May realize activation before running | Script outcome exit status | `test/scripts-command-test.lisp` |
+| `run scripts` | Script names, one per line | Errors only | None | None | `test/scripts-command-test.lisp` |
+| `store clean` | Human deletion/untracking lines | Errors only | Removes `.clpm/`, `dist/`, optional store entries, and GC roots | None | `test/clean-command-test.lisp` |
+| `store gc` | Human deletion summary | Errors only | Deletes unreachable store entries unless `--dry-run` | Dry-run is human observation only | `test/gc-roots-test.lisp` |
+| `repl daemon` | Foreground server blocks; detach returns status line | Launch errors only | Writes pid/socket/log lifecycle files | None | `test/repl-cli-test.lisp` |
+| `repl daemon --status` | Human status | Errors only | Cleans stale pid/socket files | `--json` status object | `test/repl-cli-test.lisp` |
+| `repl daemon --stop` | Human stop/not-running status | Errors only | Removes daemon lifecycle state | None | `test/repl-cli-test.lisp` |
+| `repl eval` | Human `=> value` plus captured output | Debug/errors on stderr | Mutates persistent image/worker state | `--json` raw eval response | `test/repl-cli-test.lisp`, `test/repl-cli-subcommands-test.lisp` |
+| `repl call` | Raw JSON response/event frames | Transport/usage errors | Mutates only the called method's REPL resource | Always JSON | `test/repl-cli-subcommands-test.lisp`, `test/repl-methods-test.lisp` |
+
 ## Hostile Reduction Ledger
 
 ### Iteration 1: Inventory as Denotation
@@ -704,6 +752,73 @@ operations: `deps sync`, `deps update`, `deps search`, `deps info`,
     human text versus JSON versus file writes must be classified for every
     surviving observation.
 
+### Iteration 14: Attack Output-Contract Ambiguity
+
+- Commands deleted:
+  - No commands. The cut is semantic: every surviving command now has an
+    explicit output class instead of inheriting accidental stdout/stderr
+    behavior from its implementation function.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - Machine output is a leaf observation, never an ambient top-level mode.
+    `--json` remains scoped to `deps search`, `deps info`, `deps audit`,
+    `repl daemon --status`, and `repl eval`; `repl call` is JSON by
+    construction; SBOM machine formats are selected by `--format`.
+- Commands that survived and why:
+  - Human status outputs survive for mutating commands because they are the
+    only direct observation of successful file/state effects.
+  - JSON survives where the command denotes a structured observation consumed
+    by tools.
+  - `--out` survives only for SBOM because that command's denotation is a
+    document artifact, not ordinary status text.
+- Laws/protocol invariants added:
+  - Each public command has a single default output class listed in the
+    Output Contract Inventory.
+  - Machine-readable output is explicit and leaf-scoped.
+  - Success diagnostics go to stdout; usage/semantic failures go to stderr.
+- Remaining discomfort:
+  - Registry operator surface remains broad. The next attack is whether
+    `registry trust`, `registry key`, `registry init`, and `registry publish`
+    all have independent user stories or whether some should become
+    lower-level/manual operations.
+
+### Iteration 15: Attack Permanent Trust Weakening
+
+- Commands deleted:
+  - No command tokens. The cut removes `none`/`nil` as values denoted by
+    `registry trust set`.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - Permanent "no verification" registry state is not a CLI trust mode.
+    One-run debugging remains available through scoped `--insecure` on
+    verifier-bearing commands.
+- Commands that survived and why:
+  - `registry trust set NAME ed25519:<key-id>` survives for signed git
+    registries because it changes the public-key capability used to verify
+    registry snapshots and releases.
+  - `registry trust set NAME tofu` and
+    `registry trust set NAME sha256:<64-hex-digest>` survive for Quicklisp
+    registries because Quicklisp lacks signatures and needs an explicit pin
+    or first-use pinning protocol.
+  - `registry trust list` survives as the observation of configured trust.
+  - `registry trust refresh NAME` survives only for Quicklisp pins; it is an
+    explicit re-pin operation for changed distinfo contents.
+- Laws/protocol invariants added:
+  - Trust values are kind-typed:
+    `GitTrust = Ed25519 KeyId`,
+    `QuicklispTrust = Tofu | Sha256 Digest`.
+  - There is no CLI constructor for `NoTrust`:
+    `parse ["registry", "trust", "set", name, "none"] = Error`.
+  - Failed trust changes are non-mutating:
+    `denote (registry (trustSet name invalidTrust)) ctx world =
+     Failed 1 diagnostic` and the registry config in `world` is unchanged.
+- Remaining discomfort:
+  - `registry key`, `registry init`, and `registry publish` remain broad
+    operator/admin functionality. They still need a separate attack for
+    whether the CLI should own all of those workflows.
+
 ## Constructors
 
 Terminal constructors:
@@ -898,6 +1013,14 @@ Law: "fetch tuning is fetch-scoped"
   parse ["--fetch-timeout", n, "registry", "update"] =
     Right (registry update with FetchTimeout n)
 
+Law: "trust values are kind-typed and non-clearing"
+  parse ["registry", "trust", "set", gitName, "ed25519:key"] =
+    Right (registry (trustSet gitName (GitTrust (Ed25519 "key"))))
+  parse ["registry", "trust", "set", quicklispName, "tofu"] =
+    Right (registry (trustSet quicklispName QuicklispTofu))
+  parse ["registry", "trust", "set", name, "none"] = Error
+  parse ["registry", "trust", "set", name, "nil"] = Error
+
 Law: "help is schema projection"
 forall selector ctx world.
   denote (help selector) ctx world =
@@ -1089,6 +1212,9 @@ Failed-counterexample regressions:
   dependency solving.
 - `clpm --fetch-retries 2 help` and `clpm --fetch-timeout 3 repl` are
   rejected; fetch tuning is only for CLPM-managed fetch operations.
+- `clpm registry trust set main none` and
+  `clpm registry trust set main nil` are rejected; permanent trust clearing
+  is not a CLI trust value.
 
 Reference versus optimized equivalence:
 

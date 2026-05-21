@@ -3897,6 +3897,40 @@ Default: remove the project's .clpm/ activation cache.
 
 ;;; registry command
 
+(defun %hex-string-p (s &key length)
+  (and (stringp s)
+       (or (null length) (= (length s) length))
+       (every (lambda (c) (digit-char-p c 16)) s)))
+
+(defun %ed25519-trust-string-p (trust)
+  (when (stringp trust)
+    (let ((parsed (clpm.crypto.ed25519:parse-key-id trust)))
+      (and (string= (car parsed) "ed25519")
+           (search ":" trust)
+           (%key-id-valid-p (cdr parsed))))))
+
+(defun %sha256-trust-string-p (trust)
+  (and (stringp trust)
+       (let ((prefix "sha256:"))
+         (and (<= (length prefix) (length trust))
+              (string= prefix trust :end2 (length prefix))
+              (%hex-string-p (subseq trust (length prefix))
+                             :length 64)))))
+
+(defun %valid-registry-trust-p (kind trust)
+  (case kind
+    (:git (%ed25519-trust-string-p trust))
+    (:quicklisp
+     (or (and (stringp trust) (string-equal trust "tofu"))
+         (%sha256-trust-string-p trust)))
+    (t nil)))
+
+(defun %registry-trust-description (kind)
+  (case kind
+    (:git "ed25519:<key-id>")
+    (:quicklisp "tofu or sha256:<64-hex-digest>")
+    (t "a supported trust string")))
+
 (defun cmd-registry (&rest args)
   "Manage global registries in config.sxp."
   (let ((subcommand (first args))
@@ -3923,67 +3957,68 @@ Default: remove the project's .clpm/ activation cache.
 	             (url nil)
 	             (trust nil)
 	             (kind :git))
-	         (labels ((normalize-trust-arg (s)
-	                    (cond
-	                      ((null s) nil)
-	                      ((or (string= s "none") (string= s "nil")) nil)
-	                      (t s))))
-	           (loop while rest do
-	             (let ((arg (pop rest)))
-	               (cond
-	                 ((string= arg "--name") (setf name (pop rest)))
-	                 ((string= arg "--url") (setf url (pop rest)))
-	                 ((string= arg "--trust") (setf trust (normalize-trust-arg (pop rest))))
-	                 ((string= arg "--quicklisp") (setf kind :quicklisp))
-	                 (t
-	                  (log-error "Unknown option: ~A" arg)
-	                  (return-from cmd-registry 1)))))
+	         (loop while rest do
+	           (let ((arg (pop rest)))
+	             (cond
+	               ((string= arg "--name") (setf name (pop rest)))
+	               ((string= arg "--url") (setf url (pop rest)))
+	               ((string= arg "--trust") (setf trust (pop rest)))
+	               ((string= arg "--quicklisp") (setf kind :quicklisp))
+	               (t
+	                (log-error "Unknown option: ~A" arg)
+	                (return-from cmd-registry 1)))))
 
-	           (when (eq kind :quicklisp)
-	             (unless name
-	               (setf name "quicklisp"))
-	             (unless url
-	               (setf url "https://beta.quicklisp.org/dist/quicklisp.txt"))
-	             (unless trust
-	               ;; Safer default: pin distinfo digest on first use (TOFU).
-	               (setf trust "tofu")))
+	         (when (eq kind :quicklisp)
+	           (unless name
+	             (setf name "quicklisp"))
+	           (unless url
+	             (setf url "https://beta.quicklisp.org/dist/quicklisp.txt"))
+	           (unless trust
+	             (setf trust "tofu")))
 
-	           (case kind
-	             (:git
-	              (unless (and name url trust)
-	                (log-error "Missing required options: --name, --url, --trust")
-	                (return-from cmd-registry 1)))
-	             (:quicklisp
-	              (unless (and name url)
-	                (log-error "Missing required options: --name, --url")
-	                (return-from cmd-registry 1)))
-	             (t
-	              (log-error "Unknown registry kind: ~S" kind)
+	         (case kind
+	           (:git
+	            (unless (and name url trust)
+	              (log-error "Missing required options: --name, --url, --trust")
 	              (return-from cmd-registry 1)))
+	           (:quicklisp
+	            (unless (and name url trust)
+	              (log-error "Missing required options: --name, --url")
+	              (return-from cmd-registry 1)))
+	           (t
+	            (log-error "Unknown registry kind: ~S" kind)
+	            (return-from cmd-registry 1)))
+	         (unless (%valid-registry-trust-p kind trust)
+	           (log-error "Invalid trust for ~A registry ~A: ~A (expected ~A)"
+	                      (string-downcase (symbol-name kind))
+	                      (or name "<unnamed>")
+	                      trust
+	                      (%registry-trust-description kind))
+	           (return-from cmd-registry 1))
 
-	           (clpm.config:update-config
-	            (lambda (cfg)
-	              (let* ((regs (clpm.config:config-registries cfg))
-	                     (existing (find name regs
-	                                     :key #'clpm.project:registry-ref-name
-	                                     :test #'string=)))
-	                (if existing
-	                    (progn
-	                      (setf (clpm.project:registry-ref-kind existing) kind
-	                            (clpm.project:registry-ref-url existing) url
-	                            (clpm.project:registry-ref-trust existing) trust)
-	                      (log-info "Updated registry: ~A" name))
-	                    (progn
-	                      (push (clpm.project::make-registry-ref
-	                             :kind kind
-	                             :name name
-	                             :url url
-	                             :trust trust)
-	                            regs)
-	                      (setf (clpm.config:config-registries cfg) regs)
-	                      (log-info "Added registry: ~A" name)))
-	                cfg)))
-	           0)))
+	         (clpm.config:update-config
+	          (lambda (cfg)
+	            (let* ((regs (clpm.config:config-registries cfg))
+	                   (existing (find name regs
+	                                   :key #'clpm.project:registry-ref-name
+	                                   :test #'string=)))
+	              (if existing
+	                  (progn
+	                    (setf (clpm.project:registry-ref-kind existing) kind
+	                          (clpm.project:registry-ref-url existing) url
+	                          (clpm.project:registry-ref-trust existing) trust)
+	                    (log-info "Updated registry: ~A" name))
+	                  (progn
+	                    (push (clpm.project::make-registry-ref
+	                           :kind kind
+	                           :name name
+	                           :url url
+	                           :trust trust)
+	                          regs)
+	                    (setf (clpm.config:config-registries cfg) regs)
+	                    (log-info "Added registry: ~A" name)))
+	              cfg)))
+	         0))
 
       ((string= subcommand "init")
        (let ((dir nil)
@@ -4130,12 +4165,7 @@ Default: remove the project's .clpm/ activation cache.
                     (log-error "Usage: clpm registry trust <list|set|refresh> [args]")
                     (return-from cmd-registry 1))
                   (kind->string (k)
-                    (string-downcase (symbol-name k)))
-                  (normalize-trust-arg (s)
-                    (cond
-                      ((null s) nil)
-                      ((or (string= s "none") (string= s "nil")) nil)
-                      (t s))))
+                    (string-downcase (symbol-name k))))
            (cond
              ((or (null action) (string= action "help"))
               (usage-error "Missing trust subcommand"))
@@ -4161,15 +4191,21 @@ Default: remove the project's .clpm/ activation cache.
                 (unless (and (stringp name) (plusp (length name))
                              (stringp trust-raw) (plusp (length trust-raw)))
                   (usage-error "Usage: clpm registry trust set <name> <trust>"))
-                (let ((trust (normalize-trust-arg trust-raw))
-                      (found nil))
+                (let ((found nil))
                   (clpm.config:update-config
                    (lambda (cfg)
                      (let ((ref (find name (clpm.config:config-registries cfg)
                                       :key #'clpm.project:registry-ref-name
                                       :test #'string=)))
                        (when ref
-                         (setf (clpm.project:registry-ref-trust ref) trust)
+                         (let ((kind (clpm.project:registry-ref-kind ref)))
+                           (unless (%valid-registry-trust-p kind trust-raw)
+                             (usage-error "Invalid trust for ~A registry ~A: ~A (expected ~A)"
+                                          (kind->string kind)
+                                          name
+                                          trust-raw
+                                          (%registry-trust-description kind)))
+                           (setf (clpm.project:registry-ref-trust ref) trust-raw))
                          (setf found t))
                        cfg)))
                   (unless found
@@ -5386,7 +5422,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "clpm registry key import --pub registry.pub --id main"
     "```"
     ""
-    "If resolution or fetch fails, inspect registry configuration and trust before weakening integrity checks."
+    "If resolution or fetch fails, inspect registry configuration and trust before using scoped `--insecure`; do not clear persistent registry trust."
     ""
     "## REPL"
     ""
@@ -5712,10 +5748,11 @@ sub-subcommand=\"set\")."
                 ((and ssub (string= ssub "set"))
                  (p "Usage: clpm registry trust set <name> <trust>")
                  (p "")
-                 (p "Set the trust string for the registry named <name>. Pass `none`")
-                 (p "or `nil` to clear the trust setting (no signature verification).")
-                 (p "For Ed25519 registries, the trust string is typically")
-                 (p "`ed25519:<key-id>`.")
+                 (p "Set the trust string for the registry named <name>.")
+                 (p "Git registries require `ed25519:<key-id>`.")
+                 (p "Quicklisp registries require `tofu` or `sha256:<64-hex-digest>`.")
+                 (p "Use one-run `--insecure` on verifier-bearing commands for debugging")
+                 (p "instead of permanently clearing registry trust.")
                  0)
                 ((and ssub (string= ssub "refresh"))
                  (p "Usage: clpm registry trust refresh <name>")

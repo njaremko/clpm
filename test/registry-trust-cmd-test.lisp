@@ -256,19 +256,36 @@ Returns (values base-url stop-fn)."
                         (format nil "quicklisp~Cquicklisp~C~A" #\Tab #\Tab pinned))
                   (split-lines stdout)))
 
-               ;; trust set clears trust via 'none'
-               (multiple-value-bind (code _stdout stderr)
+               ;; trust set rejects permanent verification removal.
+               (multiple-value-bind (code stdout stderr)
                    (run-cli-captured '("registry" "trust" "set" "main" "none"))
-                 (declare (ignore _stdout))
-                 (unless (eql code 0)
-                   (fail "registry trust set main none failed: ~D~%stderr:~A" code stderr)))
+                 (declare (ignore stdout))
+                 (assert-eql 1 code)
+                 (assert-true (search "Invalid trust" stderr :test #'char-equal)
+                              "Expected invalid trust error, got:~%~A" stderr))
                (multiple-value-bind (code stdout stderr)
                    (run-cli-captured '("registry" "trust" "list"))
                  (declare (ignore stderr))
                  (unless (eql code 0)
                    (fail "registry trust list (after set) failed: ~D~%stdout:~A~%stderr:~A" code stdout stderr))
                  (assert-equal
-                  (list (format nil "main~Cgit~C-" #\Tab #\Tab)
+                  (list (format nil "main~Cgit~Ced25519:deadbeef" #\Tab #\Tab)
+                        (format nil "quicklisp~Cquicklisp~C~A" #\Tab #\Tab pinned))
+                  (split-lines stdout)))
+
+               ;; trust set accepts a verified trust mode for the registry kind.
+               (multiple-value-bind (code _stdout stderr)
+                   (run-cli-captured '("registry" "trust" "set" "main" "ed25519:rotated"))
+                 (declare (ignore _stdout))
+                 (unless (eql code 0)
+                   (fail "registry trust set main ed25519:rotated failed: ~D~%stderr:~A" code stderr)))
+               (multiple-value-bind (code stdout stderr)
+                   (run-cli-captured '("registry" "trust" "list"))
+                 (declare (ignore stderr))
+                 (unless (eql code 0)
+                   (fail "registry trust list (after valid set) failed: ~D~%stdout:~A~%stderr:~A" code stdout stderr))
+                 (assert-equal
+                  (list (format nil "main~Cgit~Ced25519:rotated" #\Tab #\Tab)
                         (format nil "quicklisp~Cquicklisp~C~A" #\Tab #\Tab pinned))
                   (split-lines stdout)))
 

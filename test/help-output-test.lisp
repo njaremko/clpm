@@ -152,7 +152,9 @@
   (declare (ignore stderr))
   (assert-eql 0 code)
   (assert-contains stdout "Usage: clpm registry trust set")
-  (assert-contains stdout "none"))
+  (assert-contains stdout "ed25519")
+  (assert-true (not (search "none" stdout :test #'char-equal))
+               "trust set help still advertises clearing trust:~%~A" stdout))
 
 ;; repl umbrella: lists the three public commands.
 (multiple-value-bind (code stdout stderr)

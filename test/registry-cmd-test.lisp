@@ -27,6 +27,16 @@
   (unless x
     (apply #'fail fmt args)))
 
+(defun run-cli-captured (args)
+  (let ((out (make-string-output-stream))
+        (err (make-string-output-stream)))
+    (let ((*standard-output* out)
+          (*error-output* err))
+      (let ((code (clpm:run-cli args)))
+        (values code
+                (get-output-stream-string out)
+                (get-output-stream-string err))))))
+
 (format t "Testing registry CLI commands...~%")
 
 (clpm.store:with-temp-dir (tmp)
@@ -36,6 +46,19 @@
     (unwind-protect
          (progn
            (sb-posix:setenv "CLPM_HOME" (namestring clpm-home) 1)
+           (multiple-value-bind (code stdout stderr)
+               (run-cli-captured '("registry" "add"
+                                   "--name" "bad"
+                                   "--url" "https://example.invalid/bad.git"
+                                   "--trust" "none"))
+             (declare (ignore stdout))
+             (assert-true (= code 1)
+                          "Expected registry add --trust none to fail")
+             (assert-true (search "Invalid trust" stderr :test #'char-equal)
+                          "Expected invalid trust error, got:~%~A" stderr)
+             (let ((cfg (clpm.config:read-config)))
+               (assert-true (null (clpm.config:config-registries cfg))
+                            "Invalid registry trust should not mutate config")))
            (let ((args '("registry" "add"
                          "--name" "main"
                          "--url" "https://example.invalid/registry.git"
@@ -66,4 +89,3 @@
 (format t "  Registry command tests PASSED~%")
 (format t "~%Registry CLI tests PASSED!~%")
 (sb-ext:exit :code 0)
-

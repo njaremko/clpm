@@ -74,6 +74,12 @@ If Quicklisp changes and your pin no longer matches, refresh it explicitly:
 clpm registry update --refresh-trust quicklisp
 ```
 
+Registry trust values are intentionally closed: signed git registries use
+`ed25519:<key-id>`, and Quicklisp registries use `tofu` or
+`sha256:<64-hex-digest>`. The CLI does not provide a persistent "no trust"
+mode; use scoped `--insecure` on verifier-bearing commands only for explicit
+debugging.
+
 To inspect what CLPM actually used, run:
 
 ```bash
