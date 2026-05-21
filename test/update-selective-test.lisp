@@ -185,6 +185,22 @@
                  (fail "expected non-zero rc for unknown system, got ~S" rc))))
            (format t "ok~%")
 
+           ;; Registry refresh failures abort before lockfile rewrite.
+           (format t "Registry update failure aborts... ")
+           (let* ((lock-path (merge-pathnames "clpm.lock" proj))
+                  (before (uiop:read-file-string lock-path))
+                  (git-dir (merge-pathnames ".git/"
+                                            (clpm.registry::registry-local-path "main"))))
+             (uiop:delete-directory-tree git-dir :validate t)
+             (uiop:with-current-directory (proj)
+               (let ((rc (clpm:run-cli '("deps" "update"))))
+                 (unless (and (integerp rc) (not (zerop rc)))
+                   (fail "expected non-zero rc for registry update failure, got ~S" rc))))
+             (let ((after (uiop:read-file-string lock-path)))
+               (assert-true (string= before after)
+                            "deps update rewrote clpm.lock after registry update failure")))
+           (format t "ok~%")
+
            ;; Forced-bump scenario: c@2 depends on b@^2, c@1 doesn't.
            ;; Lock at c@1 + b@1, then publish c@2 (requires b@^2) and
            ;; `clpm deps update c` -> b must also move even though it's unlocked.

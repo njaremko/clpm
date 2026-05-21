@@ -1584,7 +1584,8 @@ deps don't churn)."
             (clpm.registry:update-registry reg)
           (error (c)
             (log-error "Failed to update registry ~A: ~A"
-                       (clpm.registry:registry-name reg) c))))
+                       (clpm.registry:registry-name reg) c)
+            (return-from cmd-update 1))))
       (let* ((persisted (and existing-lock
                               (clpm.project:lockfile-opted-in-optionals existing-lock)))
              (with-optional (%merge-optional-sets persisted *with-optional*)))
