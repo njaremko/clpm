@@ -66,6 +66,7 @@
   (assert-contains stdout "store")
   (assert-contains stdout "skill")
   (assert-contains stdout "repl")
+  (assert-contains stdout "Scoped options must appear before the command token.")
   (dolist (scoped-option '("-j, --jobs"
                            "--lisp"
                            "-p, --package"

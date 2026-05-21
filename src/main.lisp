@@ -38,6 +38,7 @@ Options:
   -h, --help       Show this help
   --version        Show version
 
+Scoped options must appear before the command token.
 Command-scoped options are documented on the commands that accept them.
 Use `clpm help <command> [subcommand]` before passing scoped options.
 

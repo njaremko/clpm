@@ -1601,8 +1601,28 @@ but output kind and machine-readable shape are semantic.
   - `--help` after a command is resource-local selector syntax and must be the
     final token.
 - Remaining discomfort:
-  - None for global option placement. The next broad attack is documenting the
-    prefix-only rule consistently across command help and examples.
+  - Resolved by Iteration 46.
+
+### Iteration 46: Document Prefix-Only Scoped Options
+
+- Commands deleted:
+  - No command tokens. The deleted behavior is ambiguous documentation that
+    left scoped root options looking like command-local flags.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - None.
+- Commands that survived and why:
+  - Prefix scoped options survive as invocation-context constructors.
+  - Command-local options survive as resource-operation parameters documented
+    under their owning command.
+- Laws/protocol invariants added:
+  - Root help, README, and generated `clpm skill` output all state the same
+    placement rule: scoped options must appear before the command token.
+  - No docs may imply that `clpm deps sync --offline` is equivalent to
+    `clpm --offline deps sync`.
+- Remaining discomfort:
+  - None for prefix-only option documentation.
 
 ## Constructors
 
@@ -2029,6 +2049,8 @@ Failed-counterexample regressions:
   `clpm deps sync --jobs 4`, and `clpm run --lisp sbcl` are rejected by the
   owning command parser; global options cannot be placed after the command
   token.
+- Root help, README, and generated `clpm skill` output state that scoped
+  options must appear before the command token.
 - `clpm --insecure help` is rejected; `--insecure` is not an inert
   pre-command global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes

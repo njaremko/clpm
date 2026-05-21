@@ -274,6 +274,9 @@ explicit resource operations.
 
 ### Command-Scoped Options
 
+Scoped options must appear before the command token. Command-local options
+remain after the command and are documented in `clpm help <command>`.
+
 - `-p, --package <member>` - Workspace member target before project-scoped commands from a workspace root
 - `-j, --jobs N` - Parallel dependency realization for `deps sync` beyond the lock stage
 - `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for build/package/run commands

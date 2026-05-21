@@ -34,6 +34,7 @@
   (assert-not-contains readme "find-definitions")
   (assert-not-contains readme "who-calls")
   (assert-not-contains readme "help --method eval")
+  (assert-contains readme "Scoped options must appear before the command token.")
   (format t "  README REPL docs PASSED~%"))
 
 (format t "~%README docs tests PASSED!~%")

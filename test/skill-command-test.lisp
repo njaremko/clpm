@@ -62,6 +62,7 @@
   (assert-contains stdout "clpm repl call debug-abort --session 1")
   (assert-contains stdout "Do not leave kept debug sessions")
   (assert-contains stdout "scoped `-p <member>`")
+  (assert-contains stdout "Scoped options must appear before the command token.")
   (assert-contains stdout "clpm skill")
   (assert-true (not (search "global `-p" stdout :test #'char-equal))
                "skill output still describes workspace targeting as global:~%~A"
