@@ -4255,6 +4255,12 @@ Default: remove the project's .clpm/ activation cache.
     (:quicklisp "tofu or sha256:<64-hex-digest>")
     (t "a supported trust string")))
 
+(defun %emit-registry-trust-usage (emit)
+  (funcall emit "Usage:")
+  (funcall emit "  clpm registry trust list")
+  (funcall emit "  clpm registry trust set <name> <trust>")
+  (funcall emit "  clpm registry trust refresh <name>"))
+
 (defun cmd-registry (&rest args)
   "Manage global registries in config.sxp."
   (let ((subcommand (first args))
@@ -4543,7 +4549,7 @@ Default: remove the project's .clpm/ activation cache.
              (rest (rest rest)))
          (labels ((usage-error (fmt &rest fmt-args)
                     (apply #'log-error fmt fmt-args)
-                    (log-error "Usage: clpm registry trust <list|set|refresh> [args]")
+                    (%emit-registry-trust-usage #'log-error)
                     (return-from cmd-registry 1))
                   (kind->string (k)
                     (string-downcase (symbol-name k))))
@@ -6270,7 +6276,7 @@ sub-subcommand=\"set\")."
                  (p "  --fetch-timeout SECS   Per-request fetch timeout.")
                  0)
                 (t
-                 (p "Usage: clpm registry trust <list|set|refresh> [args]")
+                 (%emit-registry-trust-usage #'p)
                  (p "")
                  (p "Subcommands:")
                  (p "  list                 List registries and trust settings")

@@ -56,6 +56,7 @@
     (run-cli-captured '("--help"))
   (declare (ignore stderr))
   (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm [options] [command [args]]")
   (assert-contains stdout "Commands:")
   (assert-contains stdout "help [cmd ...]")
   (assert-contains stdout "doctor")
@@ -73,6 +74,9 @@
                        stdout)
   (assert-not-contains stdout "help [cmd]      "
                        "top-level help under-advertises nested help selectors:~%~A"
+                       stdout)
+  (assert-not-contains stdout "Usage: clpm [options] <command> [args]"
+                       "top-level help still requires a command even though bare clpm is valid:~%~A"
                        stdout)
   (dolist (scoped-option '("-j, --jobs"
                            "--lisp"
@@ -255,6 +259,18 @@
 
 ;; registry trust set: leaf page (drills two levels).
 (multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "registry" "trust"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage:")
+  (assert-contains stdout "  clpm registry trust list")
+  (assert-contains stdout "  clpm registry trust set <name> <trust>")
+  (assert-contains stdout "  clpm registry trust refresh <name>")
+  (assert-not-contains stdout "[args]"
+                       "registry trust umbrella help still exposes an untyped residual args slot:~%~A"
+                       stdout))
+
+(multiple-value-bind (code stdout stderr)
     (run-cli-captured '("help" "registry" "trust" "set"))
   (declare (ignore stderr))
   (assert-eql 0 code)
@@ -283,6 +299,19 @@
   (assert-contains stdout "Usage: clpm registry update")
   (assert-true (not (search "--refresh-trust" stdout :test #'char-equal))
                "registry update help still advertises trust refresh:~%~A" stdout))
+
+;; registry trust missing subcommand: error text mirrors the same closed forms.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("registry" "trust"))
+  (declare (ignore stdout))
+  (assert-eql 1 code)
+  (assert-contains stderr "Usage:")
+  (assert-contains stderr "  clpm registry trust list")
+  (assert-contains stderr "  clpm registry trust set <name> <trust>")
+  (assert-contains stderr "  clpm registry trust refresh <name>")
+  (assert-not-contains stderr "[args]"
+                       "registry trust arity error still exposes an untyped residual args slot:~%~A"
+                       stderr))
 
 ;; registry add: Quicklisp add accepts explicit trust, so help must say so.
 (multiple-value-bind (code stdout stderr)

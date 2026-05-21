@@ -20,7 +20,7 @@
   (format t "~
 clpm ~A - Common Lisp Package Manager
 
-Usage: clpm [options] <command> [args]
+Usage: clpm [options] [command [args]]
 
 Commands:
   help [cmd ...]  Show help for a command or subcommand

@@ -2533,6 +2533,35 @@ but output kind and machine-readable shape are semantic.
     leaves. A future parser combinator could encode "required value flag" once
     and eliminate this repetition.
 
+### Iteration 81: Usage Text Is an Observation, Not Decoration
+
+- Commands deleted:
+  - Documentation-only language that claimed `clpm [options] <command> [args]`
+    even though `clpm` with no command is a valid root-help invocation.
+  - `registry trust <list|set|refresh> [args]` as an umbrella shape with an
+    untyped residual payload slot.
+- Commands merged:
+  - Bare `clpm`, `clpm --help`, and `clpm help` now share the same advertised
+    optional-command shape.
+  - `registry trust` help and missing-subcommand errors now print the same
+    closed constructor set.
+- Commands derived instead of exposed:
+  - `registry trust` is only a selector over `list`, `set`, and `refresh`; it
+    is not itself a command that accepts arbitrary tail arguments.
+- Commands that survived and why:
+  - `registry trust list` survives as the nullary trust observation.
+  - `registry trust set <name> <trust>` survives as the exact trust mutation.
+  - `registry trust refresh <name>` survives as the Quicklisp pin refresh.
+- Laws/protocol invariants added:
+  - Help text and usage errors are public observations of the parser algebra.
+    They must describe a subset equal to the accepted constructor language, not
+    a larger language with residual `[args]` buckets.
+  - If `parse [] = help Root`, then root usage must make the command optional.
+- Remaining discomfort:
+  - Other umbrella usage strings still use compact metavariables where the
+    accepted leaves are numerous. They are acceptable only while every leaf has
+    a focused help page and strict arity tests.
+
 ## Constructors
 
 Terminal constructors:
