@@ -46,6 +46,12 @@
       (push (symbol-name sym) names))
     (sort names #'string<)))
 
+(defun assert-internal-symbol (package-name symbol-name)
+  (multiple-value-bind (_symbol status)
+      (find-symbol symbol-name package-name)
+    (declare (ignore _symbol))
+    (assert-eql :internal status)))
+
 (defun run-cli-captured (args)
   (let ((out (make-string-output-stream))
         (err (make-string-output-stream)))
@@ -151,6 +157,16 @@
 (assert-equal '("MAIN" "RUN-CLI")
               (sorted-external-symbol-names "CLPM"))
 (format t "  Public handler exports PASSED~%")
+
+(format t "Testing implementation-only package exports stay internal...~%")
+(dolist (case '(("CLPM.BUILD" "BUILD-SPEC")
+                ("CLPM.REPL" "USER-INTERRUPT")
+                ("CLPM.FETCH" "*FETCH-BACKOFF-BASE*")
+                ("CLPM.FETCH" "*FETCH-SLEEP-FN*")
+                ("CLPM.FETCH" "*TEST-FETCHER*")))
+  (destructuring-bind (package-name symbol-name) case
+    (assert-internal-symbol package-name symbol-name)))
+(format t "  Internal package surface PASSED~%")
 
 (format t "Testing JSON option scope...~%")
 (dolist (args '(("repl" "--json")

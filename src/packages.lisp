@@ -356,8 +356,7 @@
            #:open-connection
            #:close-connection
            #:send-on-connection
-           #:send-continuation-on-connection
-           #:user-interrupt))
+           #:send-continuation-on-connection))
 
 (defpackage #:clpm.fetch
   (:use #:cl #:clpm.platform #:clpm.store #:clpm.crypto.sha256 #:clpm.errors)
@@ -369,16 +368,12 @@
            #:verify-and-store
            #:fetch-lockfile-deps
            #:*fetch-retries*
-           #:*fetch-timeout*
-           #:*fetch-backoff-base*
-           #:*fetch-sleep-fn*
-           #:*test-fetcher*))
+           #:*fetch-timeout*))
 
 (defpackage #:clpm.build
   (:use #:cl #:clpm.platform #:clpm.store #:clpm.errors)
   (:export #:build-release
            #:build-all
-           #:build-spec
            #:generate-asdf-config
            #:activate-project
            #:check-native-deps))

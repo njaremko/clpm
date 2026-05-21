@@ -2671,6 +2671,13 @@ Law: "package/export schema"
 Law: "root/export schema"
   exportedSymbols(clpm) = { main, run-cli }
 
+Law: "implementation hooks are not public exports"
+  status("CLPM.BUILD", "BUILD-SPEC") = internal
+  status("CLPM.REPL", "USER-INTERRUPT") = internal
+  status("CLPM.FETCH", "*FETCH-BACKOFF-BASE*") = internal
+  status("CLPM.FETCH", "*FETCH-SLEEP-FN*") = internal
+  status("CLPM.FETCH", "*TEST-FETCHER*") = internal
+
 Law: "skill guidance does not widen option scope"
   "global `-p" notin skillText
   "scoped `-p <member>`" in skillText
@@ -2885,6 +2892,8 @@ Failed-counterexample regressions:
 - README documents the workspace, standalone project, and workspace-member
   `project new` constructor forms.
 - Tests pin the exact public exports of `CLPM.COMMANDS` and `CLPM`.
+- `clpm.build:build-spec`, `clpm.repl:user-interrupt`, and fetch test hooks
+  are not exported; they are implementation surfaces with no CLI denotation.
 - `clpm.project:lockfile-project` is not exported; the surviving lockfile
   project observations are the backed accessors `lockfile-project-name` and
   `lockfile-project-sha256`.

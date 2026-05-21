@@ -34,7 +34,7 @@
 (let* ((tmp (clpm.platform:expand-path "/tmp/clpm-fetch-retry-test"))
        (dest (merge-pathnames "ok.bin" (uiop:ensure-directory-pathname tmp)))
        (attempts 0)
-       (clpm.fetch:*test-fetcher*
+       (clpm.fetch::*test-fetcher*
          (lambda (url dest-path)
            (incf attempts)
            (cond
@@ -50,7 +50,7 @@
                                            :if-exists :supersede)
                 (write-sequence #(1 2 3 4) s))))))
        (clpm.fetch:*fetch-retries* 3)
-       (clpm.fetch:*fetch-backoff-base* 0))  ; no real waits in tests
+       (clpm.fetch::*fetch-backoff-base* 0))  ; no real waits in tests
   (ensure-directories-exist (uiop:ensure-directory-pathname tmp))
   (clpm.fetch:fetch-url "https://example.invalid/x.bin" dest :progress nil)
   (assert-eql 3 attempts)
@@ -62,7 +62,7 @@
 (format t "Testing permanent failures exhaust the retry budget...~%")
 
 (let* ((attempts 0)
-       (clpm.fetch:*test-fetcher*
+       (clpm.fetch::*test-fetcher*
          (lambda (url dest-path)
            (declare (ignore dest-path))
            (incf attempts)
@@ -71,7 +71,7 @@
                   :url url
                   :status 22)))
        (clpm.fetch:*fetch-retries* 3)
-       (clpm.fetch:*fetch-backoff-base* 0))
+       (clpm.fetch::*fetch-backoff-base* 0))
   (handler-case
       (progn
         (clpm.fetch:fetch-url "https://example.invalid/y.bin"
@@ -93,7 +93,7 @@
        (progn
          (sb-posix:setenv "CLPM_FETCH_RETRIES" "5" 1)
          (let* ((attempts 0)
-                (clpm.fetch:*test-fetcher*
+                (clpm.fetch::*test-fetcher*
                   (lambda (url dest-path)
                     (declare (ignore dest-path))
                     (incf attempts)
@@ -102,7 +102,7 @@
                            :url url
                            :status 7)))
                 (clpm.fetch:*fetch-retries* nil)
-                (clpm.fetch:*fetch-backoff-base* 0))
+                (clpm.fetch::*fetch-backoff-base* 0))
            (handler-case
                (clpm.fetch:fetch-url "https://example.invalid/z.bin"
                                      "/tmp/clpm-fetch-retry-test/z.bin"
@@ -118,7 +118,7 @@
 
 (format t "Testing retries=1 (no retry)...~%")
 (let* ((attempts 0)
-       (clpm.fetch:*test-fetcher*
+       (clpm.fetch::*test-fetcher*
          (lambda (url dest-path)
            (declare (ignore dest-path))
            (incf attempts)
@@ -127,7 +127,7 @@
                   :url url
                   :status 7)))
        (clpm.fetch:*fetch-retries* 1)
-       (clpm.fetch:*fetch-backoff-base* 0))
+       (clpm.fetch::*fetch-backoff-base* 0))
   (handler-case
       (clpm.fetch:fetch-url "https://example.invalid/once.bin"
                             "/tmp/clpm-fetch-retry-test/once.bin"
@@ -140,14 +140,14 @@
 
 (format t "Testing backoff schedule...~%")
 (let* ((delays '())
-       (clpm.fetch:*test-fetcher*
+       (clpm.fetch::*test-fetcher*
          (lambda (url dest-path)
            (declare (ignore dest-path url))
            (error 'clpm.errors:clpm-fetch-error
                   :message "fail" :url "x" :status 7)))
        (clpm.fetch:*fetch-retries* 4)
-       (clpm.fetch:*fetch-backoff-base* 1)
-       (clpm.fetch:*fetch-sleep-fn*
+       (clpm.fetch::*fetch-backoff-base* 1)
+       (clpm.fetch::*fetch-sleep-fn*
          (lambda (s) (push s delays))))
   (handler-case
       (clpm.fetch:fetch-url "https://example.invalid/b.bin"
