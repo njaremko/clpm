@@ -248,8 +248,8 @@ explicit resource operations.
 | `clpm deps update [sys...]` | Update dependencies |
 | `clpm deps search <query> [--limit N] [--json]` | Search configured registries |
 | `clpm deps info <system> [--json] [--all]` | Show system details |
-| `clpm deps tree [--package <member>] [--depth N]` | Show dependency tree |
-| `clpm deps why <system> [--package <member>]` | Explain why a system is included |
+| `clpm [-p <member>] deps tree [--depth N]` | Show dependency tree |
+| `clpm [-p <member>] deps why <system>` | Explain why a system is included |
 | `clpm deps audit [--json]` | Provenance report |
 | `clpm deps sbom --format <cyclonedx-json\|cyclonedx-xml\|spdx-json> [--out <path>]` | SBOM export |
 | `clpm registry <add\|list\|update\|trust\|init\|key\|publish> ...` | Manage registries, keys, trust, and publishing |
@@ -270,7 +270,7 @@ explicit resource operations.
 
 ### Command-Scoped Options
 
-- `-p, --package <member>` - Workspace member to target from a workspace root
+- `-p, --package <member>` - Workspace member target before project-scoped commands from a workspace root
 - `-j, --jobs N` - Parallel dependency realization for `deps sync` beyond the lock stage
 - `--lisp <impl>` - Lisp implementation (`sbcl|ccl|ecl`) for build/package/run commands
 - `--offline` - Use cached artifacts for `deps sync` realization and `deps sbom`

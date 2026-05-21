@@ -265,8 +265,8 @@ clpm [options] deps sync [--to lock|source|build|active]
 clpm [options] deps update [system ...]
 clpm [options] deps search <query> [--limit N] [--json]
 clpm [options] deps info <system> [--json] [--all]
-clpm [options] deps tree [--package <member>] [--depth N]
-clpm [options] deps why <system> [--package <member>]
+clpm [options] deps tree [--depth N]
+clpm [options] deps why <system>
 clpm [options] deps audit [--json]
 clpm [options] deps sbom --format <format> [--out <path>]
 
@@ -1008,7 +1008,7 @@ but output kind and machine-readable shape are semantic.
 - Commands deleted:
   - README omissions that hid surviving public forms such as `run scripts`,
     `store clean --store`, `store gc --dry-run`, `deps search --json`, and
-    `deps tree --package`.
+    workspace-targeted dependency observations.
   - Agent skill wording that described `-p/--package` as a global option.
 - Commands merged:
   - README and `clpm skill` now describe the same scoped-option model as root
@@ -1026,6 +1026,36 @@ but output kind and machine-readable shape are semantic.
   - README is still hand-maintained Markdown rather than generated from the
     command schema. Tests pin the highest-risk generated skill drift; README
     needs continued manual review after each CLI cut.
+
+### Iteration 24: Attack Duplicate Workspace Selectors
+
+- Commands deleted:
+  - `clpm deps tree --package <member>`.
+  - `clpm deps why <system> --package <member>`.
+- Commands merged:
+  - Workspace member selection is expressed only by the scoped pre-command
+    `-p/--package <member>` option.
+- Commands derived instead of exposed:
+  - Dependency graph observations use the same `ProjectTarget` context as
+    every other project-scoped operation. They do not get local selector
+    syntax.
+- Commands that survived and why:
+  - `clpm -p <member> deps tree [--depth N]` and
+    `clpm -p <member> deps why <system>` survive because they observe a
+    selected member's lockfile graph from a workspace root.
+  - `repl eval --package <name>` survives because it denotes a Common Lisp
+    package override, not a workspace member selector.
+- Laws/protocol invariants added:
+  - Workspace target has one spelling:
+    `parse ["deps", "tree", "--package", member] = Error`.
+  - Lisp package overrides are not project targets:
+    `parse ["repl", "eval", form, "--package", pkg] =
+     Right (repl (eval form with LispPackage pkg))`.
+- Remaining discomfort:
+  - The shared word "package" still carries two concepts depending on
+    position. The parser boundary keeps them distinct, but help must keep
+    explaining the pre-command workspace selector separately from
+    `repl eval --package`.
 
 ## Constructors
 
