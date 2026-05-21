@@ -57,7 +57,7 @@
   (declare (ignore stderr))
   (assert-eql 0 code)
   (assert-contains stdout "Commands:")
-  (assert-contains stdout "help")
+  (assert-contains stdout "help [cmd ...]")
   (assert-contains stdout "doctor")
   (assert-contains stdout "project")
   (assert-contains stdout "deps")
@@ -67,6 +67,9 @@
   (assert-contains stdout "skill")
   (assert-contains stdout "repl")
   (assert-contains stdout "Scoped options must appear before the command token.")
+  (assert-not-contains stdout "help [cmd]      "
+                       "top-level help under-advertises nested help selectors:~%~A"
+                       stdout)
   (dolist (scoped-option '("-j, --jobs"
                            "--lisp"
                            "-p, --package"

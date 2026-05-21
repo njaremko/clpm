@@ -23,7 +23,7 @@ clpm ~A - Common Lisp Package Manager
 Usage: clpm [options] <command> [args]
 
 Commands:
-  help [cmd]      Show help for a command
+  help [cmd ...]  Show help for a command or subcommand
   doctor          Check your environment
   project ...      Create projects, workspaces, and packages
   deps ...         Manage, realize, and inspect dependencies

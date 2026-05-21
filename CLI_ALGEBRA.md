@@ -1871,6 +1871,26 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None for solver prose.
 
+### Iteration 57: Advertise Nested Help Selectors at Root
+
+- Commands deleted:
+  - No parser surface. The deleted surface is the root-help row
+    `help [cmd]`, which under-described nested help selectors.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Resource-local `COMMAND ... --help` remains derived from the same help
+    selector algebra.
+- Commands that survived and why:
+  - `help [cmd ...]` survives as the schema observation for command and
+    subcommand help.
+- Laws/protocol invariants added:
+  - Root help must advertise nested selectors because
+    `help project workspace add`, `help registry trust refresh`, and other
+    leaf pages are public observations.
+- Remaining discomfort:
+  - None.
+
 ## Constructors
 
 Terminal constructors:
@@ -2345,6 +2365,7 @@ Failed-counterexample regressions:
   `project new` constructor forms.
 - Tests pin the exact public exports of `CLPM.COMMANDS` and `CLPM`.
 - README solver prose no longer mentions implementation-history comments.
+- Root help advertises `help [cmd ...]` rather than only `help [cmd]`.
 - `clpm registry publish --git-commit ...` is rejected; publish does not run
   VCS commands.
 - `clpm repl eval FORM --pretty` is rejected; human output is the default and
