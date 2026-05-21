@@ -3413,12 +3413,9 @@ Returns an integer exit code."
          (return-from cmd-run 1))
        (cmd-test))
       ((string= sub "script")
-       (apply #'cmd-scripts (cons "run" rest)))
+       (apply #'cmd-run-script rest))
       ((string= sub "scripts")
-       (when rest
-         (log-error "Usage: clpm run scripts")
-         (return-from cmd-run 1))
-       (cmd-scripts "list"))
+       (apply #'cmd-run-scripts rest))
       ((string= sub "--help")
        (%log-run-usage)
        1)
@@ -3603,88 +3600,88 @@ Returns (values parsed-scripts exit-code)."
            (push script parsed)))
        (values (nreverse parsed) 0)))))
 
-(defun cmd-scripts (&rest args)
-  "List and run project scripts defined in clpm.project."
-  (let ((sub (and (first args) (string-downcase (first args)))))
-    (when (and (stringp sub) (string= sub "run"))
-      (let ((name (second args)))
-        (unless (and (stringp name) (plusp (length name)))
-          (log-error "Usage: clpm run script <name> [-- <args...>]")
-          (return-from cmd-scripts 1)))))
+(defun %load-project-scripts ()
+  "Return project root, project, parsed scripts, and exit code."
   (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
       (find-effective-project-root)
     (declare (ignore lock-path _workspace-path))
     (unless manifest-path
       (when (null workspace-root)
         (log-no-project-found))
-      (return-from cmd-scripts 1))
+      (return-from %load-project-scripts (values nil nil nil 1)))
     (let* ((project (clpm.project:read-project-file manifest-path))
            (scripts (clpm.project:project-scripts project)))
       (multiple-value-bind (parsed rc)
           (parse-project-scripts scripts)
-        (unless (zerop rc)
-          (return-from cmd-scripts rc))
-        (let ((sub (and (first args) (string-downcase (first args)))))
-          (cond
-            ((or (null sub) (string= sub "help") (string= sub "--help"))
-             (log-info "Usage:")
-             (log-info "  clpm run scripts")
-             (log-info "  clpm run script <name> [-- <args...>]")
-             0)
-            ((string= sub "list")
-             (dolist (name (sort (mapcar (lambda (s) (getf s :name)) parsed) #'string<))
-               (format t "~A~%" name))
-             0)
-            ((string= sub "run")
-             (let ((name (second args)))
-               (unless (and (stringp name) (plusp (length name)))
-                 (log-error "Usage: clpm run script <name> [-- <args...>]")
-                 (return-from cmd-scripts 1))
-               (let* ((rest (cddr args))
-                      (forward (cond
-                                 ((null rest) nil)
-                                 ((string= (first rest) "--") (rest rest))
-                                 (t
-                                  (log-error "Usage: clpm run script <name> [-- <args...>]")
-                                  (return-from cmd-scripts 1))))
-                      (script (find name parsed :test #'string= :key (lambda (s) (getf s :name)))))
-                 (unless script
-                   (log-error "Unknown script: ~A" name)
-                   (return-from cmd-scripts 1))
-                 (multiple-value-bind (config-path act-rc)
-                     (ensure-project-activated project-root)
-                   (unless (zerop act-rc)
-                     (return-from cmd-scripts act-rc))
-                   (case (getf script :type)
-                     (:shell
-                      (let* ((cmd (append (getf script :command) forward))
-                             (env (clpm.platform:which "env"))
-                             (cmd-with-env
-                               (if env
-                                   (cons env
-                                         (cons (format nil "CLPM_PROJECT_ROOT=~A" (namestring project-root))
-                                               cmd))
-                                   cmd)))
-                        (multiple-value-bind (output error-output exit-code)
-                            (clpm.platform:run-program cmd-with-env
-                                                       :directory project-root
-                                                       :output :interactive
-                                                       :error-output :interactive)
-                          (declare (ignore output error-output))
-                          exit-code)))
-                     (:lisp
-                      (let* ((system (getf script :system))
-                             (fn-spec (getf script :function))
-                             (deps (project-dependency-system-ids project '(:depends)))
-                             (kind (effective-lisp-kind project)))
-                        (log-info "Running script ~A (~A)..." name fn-spec)
-                        (run-lisp-entrypoint kind project-root config-path deps system fn-spec forward)))
+        (values project-root project parsed rc)))))
+
+(defun cmd-run-scripts (&rest args)
+  "List project scripts defined in clpm.project."
+  (when args
+    (log-error "Usage: clpm run scripts")
+    (return-from cmd-run-scripts 1))
+  (multiple-value-bind (project-root project parsed rc)
+      (%load-project-scripts)
+    (declare (ignore project-root project))
+    (unless (zerop rc)
+      (return-from cmd-run-scripts rc))
+    (dolist (name (sort (mapcar (lambda (s) (getf s :name)) parsed) #'string<))
+      (format t "~A~%" name))
+    0))
+
+(defun cmd-run-script (&rest args)
+  "Run one project script defined in clpm.project."
+  (let ((name (first args))
+        (rest (rest args)))
+    (unless (and (stringp name) (plusp (length name)))
+      (log-error "Usage: clpm run script <name> [-- <args...>]")
+      (return-from cmd-run-script 1))
+    (let ((forward (cond
+                     ((null rest) nil)
+                     ((string= (first rest) "--") (rest rest))
                      (t
-                      (log-error "Unsupported script type: ~S" (getf script :type))
-                      1))))))
-            (t
-             (log-error "Usage: clpm run <scripts|script> [args]")
-             1)))))))
+                      (log-error "Usage: clpm run script <name> [-- <args...>]")
+                      (return-from cmd-run-script 1)))))
+      (multiple-value-bind (project-root project parsed rc)
+          (%load-project-scripts)
+        (unless (zerop rc)
+          (return-from cmd-run-script rc))
+        (let ((script (find name parsed :test #'string=
+                            :key (lambda (s) (getf s :name)))))
+          (unless script
+            (log-error "Unknown script: ~A" name)
+            (return-from cmd-run-script 1))
+          (multiple-value-bind (config-path act-rc)
+              (ensure-project-activated project-root)
+            (unless (zerop act-rc)
+              (return-from cmd-run-script act-rc))
+            (case (getf script :type)
+              (:shell
+               (let* ((cmd (append (getf script :command) forward))
+                      (env (clpm.platform:which "env"))
+                      (cmd-with-env
+                        (if env
+                            (cons env
+                                  (cons (format nil "CLPM_PROJECT_ROOT=~A" (namestring project-root))
+                                        cmd))
+                            cmd)))
+                 (multiple-value-bind (output error-output exit-code)
+                     (clpm.platform:run-program cmd-with-env
+                                                :directory project-root
+                                                :output :interactive
+                                                :error-output :interactive)
+                   (declare (ignore output error-output))
+                   exit-code)))
+              (:lisp
+               (let* ((system (getf script :system))
+                      (fn-spec (getf script :function))
+                      (deps (project-dependency-system-ids project '(:depends)))
+                      (kind (effective-lisp-kind project)))
+                 (log-info "Running script ~A (~A)..." name fn-spec)
+                 (run-lisp-entrypoint kind project-root config-path deps system fn-spec forward)))
+              (t
+               (log-error "Unsupported script type: ~S" (getf script :type))
+               1))))))))
 
 ;;; test command
 

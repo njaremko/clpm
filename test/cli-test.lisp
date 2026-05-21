@@ -53,6 +53,12 @@
     (declare (ignore _symbol))
     (assert-eql :internal status)))
 
+(defun assert-no-symbol (package-name symbol-name)
+  (multiple-value-bind (_symbol status)
+      (find-symbol symbol-name package-name)
+    (declare (ignore _symbol))
+    (assert-eql nil status)))
+
 (defun run-cli-captured (args)
   (let ((out (make-string-output-stream))
         (err (make-string-output-stream)))
@@ -160,12 +166,13 @@
                 "CMD-SEARCH" "CMD-INFO" "CMD-TREE" "CMD-WHY"
                 "CMD-RESOLVE" "CMD-FETCH" "CMD-BUILD" "CMD-INSTALL"
                 "CMD-UPDATE" "CMD-WORKSPACE" "CMD-EXEC" "CMD-TEST"
-                "CMD-PACKAGE" "CMD-CLEAN" "CMD-GC" "CMD-SCRIPTS"
+                "CMD-PACKAGE" "CMD-CLEAN" "CMD-GC"
                 "CMD-AUDIT" "CMD-SBOM" "CMD-KEYS" "CMD-PUBLISH"))
   (multiple-value-bind (_symbol status)
       (find-symbol name "CLPM.COMMANDS")
     (declare (ignore _symbol))
     (assert-eql :internal status)))
+(assert-no-symbol "CLPM.COMMANDS" "CMD-SCRIPTS")
 (assert-equal '("CMD-DEPS" "CMD-DOCTOR" "CMD-HELP" "CMD-PROJECT"
                 "CMD-REGISTRY" "CMD-REPL" "CMD-RUN" "CMD-SKILL"
                 "CMD-STORE")

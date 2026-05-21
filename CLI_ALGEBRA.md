@@ -2562,6 +2562,36 @@ but output kind and machine-readable shape are semantic.
     accepted leaves are numerous. They are acceptable only while every leaf has
     a focused help page and strict arity tests.
 
+### Iteration 82: Script Execution Has Two Constructors, Not a Hidden Parser
+
+- Commands deleted:
+  - The internal `cmd-scripts` mini-dispatcher with `run`, `list`, `help`, and
+    fallback branches. Public syntax already collapsed to `run script` and
+    `run scripts`.
+  - `clpm run script <name> ARG...` paths that reached project discovery
+    before rejecting the missing `--` payload boundary.
+- Commands merged:
+  - `run scripts` maps directly to script-name observation.
+  - `run script <name> [-- <args...>]` maps directly to script execution.
+- Commands derived instead of exposed:
+  - There is no separate script-management command algebra; scripts are
+    project execution metadata observed or executed through `run`.
+- Commands that survived and why:
+  - `run scripts` survives because the script-name set is useful to humans and
+    agents before choosing a script.
+  - `run script <name> [-- <args...>]` survives because a named script is a
+    project-local execution entrypoint, with user payload crossing only after
+    `--`.
+- Laws/protocol invariants added:
+  - `parse (run script name argv)` validates `argv` shape before project
+    discovery, activation, script lookup, or process execution.
+  - The old `CMD-SCRIPTS` implementation symbol is absent; no hidden command
+    helper keeps a broader syntax alive behind the public `run` constructor.
+- Remaining discomfort:
+  - Script execution still dispatches shell and Lisp script kinds in one
+    function. That is acceptable because the project manifest has exactly that
+    closed script-kind sum; another split would only move the case analysis.
+
 ## Constructors
 
 Terminal constructors:

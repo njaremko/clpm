@@ -86,6 +86,13 @@
         (assert-eql 1 code)
         (assert-contains stderr "Usage: clpm run script <name> [-- <args...>]")
         (assert-not-contains stderr "No clpm.project found")))
+    (uiop:with-current-directory (tmp)
+      (multiple-value-bind (code stdout stderr)
+          (run-cli-captured '("run" "script" "args" "one"))
+        (declare (ignore stdout))
+        (assert-eql 1 code)
+        (assert-contains stderr "Usage: clpm run script <name> [-- <args...>]")
+        (assert-not-contains stderr "No clpm.project found")))
     (format t "  `clpm run script` argv validation PASSED~%")
 
     (unwind-protect
