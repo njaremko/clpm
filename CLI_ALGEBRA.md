@@ -1911,6 +1911,30 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None.
 
+### Iteration 59: Make Umbrella Help Homomorphic to Leaf Help
+
+- Commands deleted:
+  - No executable surface. Deleted only under-specified help observations:
+    `clpm help help` with a one-level selector grammar, project umbrella help
+    that omitted `--member-of`, registry add help with an untyped Ed25519
+    placeholder, REPL umbrella help without daemon status JSON, and eval
+    usage without `--json`.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Umbrella help remains a summary observation, but it must preserve the
+    constructors of the leaf grammar it summarizes.
+- Commands that survived and why:
+  - Nested `help`, workspace-member `project new`, typed registry trust,
+    `repl daemon --status --json`, and `repl eval --json` all survive because
+    each has a distinct user-visible denotation.
+- Laws/protocol invariants added:
+  - If an umbrella help page names a constructor family, it must not erase a
+    required argument constructor or alter a typed placeholder from the leaf
+    page.
+- Remaining discomfort:
+  - None.
+
 ## Constructors
 
 Terminal constructors:

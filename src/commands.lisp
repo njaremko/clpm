@@ -5683,7 +5683,7 @@ sub-subcommand=\"set\")."
       (return-from print-command-help 1))
     (case command
       (:help
-       (p "Usage: clpm help <command> [subcommand]")
+       (p "Usage: clpm help <command> [subcommand ...]")
        (p "")
        (p "Examples:")
        (p "  clpm help project new")
@@ -5749,6 +5749,7 @@ sub-subcommand=\"set\")."
             (p "Usage:")
             (p "  clpm project new <name> --workspace [--dir <path>]")
             (p "  clpm project new <name> --bin|--lib [--dir <path>]")
+            (p "  clpm project new <name> --bin|--lib --member-of <workspace-dir>")
             (p "  clpm project init [name]")
             (p "  clpm project workspace <init|add|remove|list> ...")
             (p "  clpm project package")
@@ -5858,7 +5859,7 @@ sub-subcommand=\"set\")."
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
          (cond
            ((and sub (string= sub "add"))
-            (p "Usage: clpm registry add --name <name> --url <git-url> --trust <ed25519:key-id>")
+            (p "Usage: clpm registry add --name <name> --url <git-url> --trust ed25519:<key-id>")
             (p "   or: clpm registry add --quicklisp [--name quicklisp] [--url <dist-url>] [--trust tofu|sha256:<64-hex-digest>]")
             (p "")
             (p "Example:")
@@ -5983,7 +5984,7 @@ sub-subcommand=\"set\")."
             (p "  clpm repl daemon --detach")
             0)
            ((and sub (string= sub "eval"))
-            (p "Usage: clpm repl eval <form> [--package <name>] [--worker <name>] [--debug] [--no-autostart]")
+            (p "Usage: clpm repl eval <form> [--package <name>] [--worker <name>] [--debug] [--no-autostart] [--json]")
             (p "")
             (p "Evaluate one Lisp form in the daemon. With no daemon running and")
             (p "without --no-autostart, the bridge starts one in the background")
@@ -6031,7 +6032,7 @@ sub-subcommand=\"set\")."
             0)
            (t
             (p "Usage:")
-            (p "  clpm repl daemon [--detach] [--no-load] [--status] [--stop]")
+            (p "  clpm repl daemon [--detach] [--no-load] [--status [--json]] [--stop]")
             (p "  clpm repl eval <form> [--package <pkg>] [--worker <name>] [--debug] ...")
             (p "  clpm repl call <method> [--params-json <json>] [--PARAM <value>]...")
             (p "")
