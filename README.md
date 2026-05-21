@@ -136,8 +136,8 @@ daemon; it never starts one implicitly.
 - **Named workers.** `eval --worker NAME` runs on an isolated worker with
   its own `*package*`, history, and redefinition log. `call list-workers`
   and `call kill-worker --name NAME` manage them.
-- **Trace / time / profile.** `call trace`, `call time-eval`,
-  `call profile-eval`.
+- **Trace.** `call trace`, `call untrace`, and `call list-traced`.
+  Use `repl eval` for explicit timing or profiling forms inside the image.
 - **File watching.** `call watch --dir DIR --glob '*.lisp' --auto-revert true` polls and
   re-LOADs matching files on mtime change, streaming `file-reloaded` /
   `reload-failed` / `revert-applied` events.

@@ -4182,7 +4182,7 @@ directory."
         "after_bytes" #+sbcl (sb-ext:get-bytes-consed) #-sbcl 0))))))
 
 ;;; ----------------------------------------------------------------------------
-;;; Trace / time / profile (#160-#165)
+;;; Trace (#160-#162)
 ;;; ----------------------------------------------------------------------------
 
 (defun %trace-symbol (sym-name pkg-name &key (server *server*))
@@ -4279,138 +4279,6 @@ everything (cl:untrace with no arguments)."
                       (error () nil)))))
       (%success-response id
                          (%json-object "entries" (%json-array entries)))))))
-
-(%register-method
- (make-method-spec
-  :name "time-eval"
-  :summary "Evaluate FORM and return real / cpu time plus bytes consed."
-  :doc "Required: `form'. Returns `{value, timing: {real_ms, run_ms,
-gc_real_ms, bytes_consed, ...}}'."
-  :params (list (list :name "form" :type "string" :required t
-                      :description "Form to evaluate.")
-                (list :name "package" :type "string" :required nil
-                      :description "Reader package."))
-  :handler
-  (lambda (server params id ctx)
-    (declare (ignore ctx))
-    (let* ((form-text (%json-getf params "form"))
-           (pkg-name (%json-getf params "package"))
-           (pkg (or (and pkg-name (%find-package-loose pkg-name))
-                    (and server (server-current-package server))
-                    (find-package "COMMON-LISP-USER"))))
-      (cond
-        ((not (stringp form-text))
-         (%error-response id "protocol-error" "missing `form' param"))
-        (t
-         (handler-case
-             (let* ((parsed (let ((*package* pkg)) (%read-form form-text)))
-                    (start-real (get-internal-real-time))
-                    (start-run (get-internal-run-time))
-                    (start-cons #+sbcl (sb-ext:get-bytes-consed)
-                                #-sbcl 0)
-                    (start-gc-real
-                      #+sbcl sb-ext:*gc-real-time*
-                      #-sbcl 0)
-                    (values (let ((*package* pkg))
-                              (multiple-value-list (eval parsed))))
-                    (end-real (get-internal-real-time))
-                    (end-run (get-internal-run-time))
-                    (end-cons #+sbcl (sb-ext:get-bytes-consed)
-                              #-sbcl 0)
-                    (end-gc-real
-                      #+sbcl sb-ext:*gc-real-time*
-                      #-sbcl 0)
-                    (units internal-time-units-per-second))
-               (%success-response
-                id
-                (%json-object
-                 "value" (%safe-prin1 (first values))
-                 "values" (%json-array (mapcar #'%safe-prin1 values))
-                 "timing"
-                 (%json-object
-                  "real_ms" (round (* 1000 (- end-real start-real)) units)
-                  "run_ms" (round (* 1000 (- end-run start-run)) units)
-                  "gc_real_ms" (- end-gc-real start-gc-real)
-                  "bytes_consed" (- end-cons start-cons)))))
-           (error (c)
-             (%error-response id "eval-error" (princ-to-string c))))))))))
-
-#+sbcl
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (require :sb-sprof))
-
-#+sbcl
-(defun %sprof-entries (top)
-  "Pull the top-N entries from the SB-SPROF profile buffer as JSON."
-  (let ((entries '())
-        (out (make-string-output-stream)))
-    (handler-case
-        (let ((*standard-output* out))
-          (funcall (find-symbol "REPORT" :sb-sprof) :type :flat :max top))
-      (error () nil))
-    (push (%json-object "raw_report" (get-output-stream-string out))
-          entries)
-    entries))
-
-#-sbcl
-(defun %sprof-entries (top)
-  (declare (ignore top))
-  (list (%json-object "raw_report" "sprof is SBCL-only")))
-
-(%register-method
- (make-method-spec
-  :name "profile-eval"
-  :summary "Profile a form with sb-sprof and return the flat report."
-  :doc "Required: `form'. Optional: `top' (default 20), `mode'
-(\"cpu\" default | \"alloc\"). Returns `{value, profile: {raw_report:
-string}}'."
-  :params (list (list :name "form" :type "string" :required t
-                      :description "Form to profile.")
-                (list :name "top" :type "integer" :required nil
-                      :description "Number of top entries (default 20).")
-                (list :name "mode" :type "string" :required nil
-                      :description "cpu (default) or alloc.")
-                (list :name "package" :type "string" :required nil
-                      :description "Reader package."))
-  :handler
-  (lambda (server params id ctx)
-    (declare (ignore ctx))
-    (let* ((form-text (%json-getf params "form"))
-           (top (or (%json-getf params "top") 20))
-           (mode-str (or (%json-getf params "mode") "cpu"))
-           (mode (intern (string-upcase mode-str) :keyword))
-           (pkg-name (%json-getf params "package"))
-           (pkg (or (and pkg-name (%find-package-loose pkg-name))
-                    (and server (server-current-package server))
-                    (find-package "COMMON-LISP-USER"))))
-      (cond
-        ((not (stringp form-text))
-         (%error-response id "protocol-error" "missing `form' param"))
-        (t
-         (handler-case
-             (let* ((parsed (let ((*package* pkg)) (%read-form form-text)))
-                    (values
-                      #+sbcl
-                      (funcall
-                       (compile nil
-                                `(lambda ()
-                                   (,(find-symbol "WITH-PROFILING" :sb-sprof)
-                                    (:mode ,mode :report nil
-                                     :max-samples 10000)
-                                    (multiple-value-list
-                                     (let ((*package* ,pkg)) (eval ',parsed)))))))
-                      #-sbcl
-                      (multiple-value-list
-                       (let ((*package* pkg)) (eval parsed)))))
-               (%success-response
-                id
-                (%json-object
-                 "value" (%safe-prin1 (first values))
-                 "profile"
-                 (%json-object
-                  "entries" (%json-array (%sprof-entries top))))))
-           (error (c)
-             (%error-response id "eval-error" (princ-to-string c))))))))))
 
 (%register-method
  (make-method-spec

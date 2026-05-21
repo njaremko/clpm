@@ -565,11 +565,12 @@ Lisp programmers think. Both should be first-class.
 
 ---
 
-## Tracing, timing, profiling
+## Tracing and Explicit Eval Timing/Profiling
 
 The fast loop "is this function doing what I think? how often is it
-called? where is it slow?" needs three primitives: `trace`,
-`time-eval`, `profile-eval`.
+called? where is it slow?" keeps tracing as a bridge primitive. Timing
+and profiling arbitrary forms are ordinary image evaluation work and should
+be driven through `eval` with explicit Lisp/SBCL forms.
 
 ### Tickets
 
@@ -592,13 +593,9 @@ called? where is it slow?" needs three primitives: `trace`,
 
 - **`#162 P1 trace` `tracedp` / `list-traced`.** Discoverability.
 
-- **`#163 P1 time` `time-eval FORM`.** Returns `result.timing` with
-  `real_ms`, `cpu_ms`, `gc_real_ms`, `cons_bytes`, `eval_count`,
-  `processor_cycles` (when available). Same shape `(time ...)` shows.
-
-- **`#164 P2 profile` `profile-eval FORM [--top N] [--mode :cpu|:alloc]`.**
-  Wraps `sb-sprof:with-profiling`. Returns the top-N entries with name
-  + source location + self-time fraction.
+- **Deleted aliases:** `time-eval` and `profile-eval` are not bridge
+  primitives. Use `eval` for `(time ...)` or profiler setup inside the
+  project image.
 
 - **`#165 P3 trace` Conditional trace and break.** `trace FOO :when
   '(> arg 100)' :break-on-result '(eq result :error)'`.
@@ -775,7 +772,7 @@ This is too much to land in one push. Suggested order:
    Independent and high-value; can land in parallel with the
    debugger work.
 5. **Inspector** (#120–#125). Smaller than the debugger but related.
-6. **Trace / time / profile** (#160–#164).
+6. **Trace** (#160–#162).
 7. **Workers, image, watch** (#170–#193). Lower priority; bigger
    architectural surface.
 8. **Docs and discoverability** (#200–#204) — refresh continuously,
@@ -791,7 +788,7 @@ This is too much to land in one push. Suggested order:
 | Source / compile | 7 | 3–4 days |
 | Introspection | 9 | 2 days (mostly thin wrappers) |
 | Values / history / printing | 6 | 1–2 days |
-| Tracing / timing / profiling | 6 | 2–3 days |
+| Tracing | 4 | 1–2 days |
 | Workers | 4 | 2 days |
 | Watch / hot reload | 3 | 1–2 days |
 | Image / ASDF | 5 | 1–2 days |
@@ -871,8 +868,8 @@ clpm repl call load-file --path src/my-app/core.lisp
 clpm repl call list-redefinitions
 # → list-redefinitions, all up-to-date with source
 
-# 9. Profile a hot path.
-clpm repl call profile-eval --top 10 --form '(my-app:bench-1)'
+# 9. Profile a hot path explicitly in the image.
+clpm repl eval '(time (my-app:bench-1))'
 
 # 10. Done.
 clpm repl daemon --stop

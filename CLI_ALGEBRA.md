@@ -1103,8 +1103,8 @@ but output kind and machine-readable shape are semantic.
   - `repl call` must not add `root` to `world.repls`; only `repl daemon` and
     `repl eval` may do that.
 - Remaining discomfort:
-  - `time-eval` and `profile-eval` are still eval-shaped RPC aliases. They
-    should be attacked as either `repl eval` options or deleted recipes.
+  - Eval-shaped RPC aliases should be deleted rather than repaired outside
+    the worker eval algebra.
 
 ### Iteration 27: Attack JSON Boolean Null
 
@@ -1128,6 +1128,30 @@ but output kind and machine-readable shape are semantic.
   - The method schema still uses string type names. A future pass should
     split them into closed type constructors rather than accepting ad hoc
     string unions like `string-or-boolean`.
+
+### Iteration 28: Delete Eval-Shaped Timing/Profile RPCs
+
+- Commands deleted:
+  - `repl call time-eval`.
+  - `repl call profile-eval`.
+- Commands merged:
+  - Timing and profiling forms are ordinary project-image evaluation work.
+    They belong under `repl eval` or explicit Lisp forms inside the image,
+    not as separate RPC constructors.
+- Commands derived instead of exposed:
+  - Timing can be derived from `repl eval` output and Common Lisp/SBCL timing
+    forms. Profiling can be run explicitly in the image with the profiler the
+    project chooses.
+- Commands that survived and why:
+  - `trace`, `untrace`, and `list-traced` survive because they mutate or
+    observe trace state without evaluating an arbitrary form through a second
+    eval path.
+- Laws/protocol invariants added:
+  - Every public arbitrary-form evaluation must route through `repl eval`.
+  - `method in {"time-eval","profile-eval"} => Failed unknown-method`.
+- Remaining discomfort:
+  - `trace` still uses CL global trace state. It is useful, but should remain
+    under suspicion because it is process-wide rather than worker-local.
 
 ## Constructors
 

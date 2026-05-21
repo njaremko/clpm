@@ -13,8 +13,9 @@ The bridge denotes an interactive, project-scoped SBCL REPL service for an
 LLM. It should be simple to drive, hard to misuse, and powerful enough to use
 Common Lisp as Common Lisp: persistent packages and history, hot
 redefinition, restarts, frame evaluation, inspector sessions, source
-navigation, compilation diagnostics, tracing, profiling, watches, and daemon
-introspection.
+navigation, compilation diagnostics, tracing, watches, and daemon
+introspection. Timing and profiling remain ordinary Lisp work performed
+through `eval`, not separate bridge methods.
 
 This algebra models the public meaning of the bridge:
 
@@ -376,7 +377,7 @@ debug-invoke-restart, debug-eval-in-frame, debug-continue, debug-abort,
 find-definition, xref, macroexpand, compile-file, apropos, documentation,
 arglist, complete-symbol, package-info, class-info, function-info,
 disassemble, describe-system, image-info, loaded-systems, list-packages, gc,
-trace, untrace, list-traced, time-eval, profile-eval, inspect, inspect-into,
+trace, untrace, list-traced, inspect, inspect-into,
 inspect-pop, inspect-eval, inspect-mutate, inspect-page, inspect-close,
 load-file
 ```
@@ -389,7 +390,7 @@ image-info, list-packages, loaded-systems, describe-system, package-info,
 current-package, set-package, apropos, complete-symbol, arglist, doc,
 documentation, disassemble, function-info, class-info, find-definition,
 find-definitions, xref, who-calls, who-references, who-sets, who-binds,
-macroexpand, compile-file, load-file, gc, time-eval, profile-eval, trace,
+macroexpand, compile-file, load-file, gc, trace,
 untrace, list-traced, workers/list-workers, kill-worker, reset, list-watches,
 unwatch, watch, inspect, debug, list-debug-sessions, debug-eval-in-frame,
 debug-invoke-restart, debug-continue, debug-abort

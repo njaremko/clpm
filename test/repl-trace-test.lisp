@@ -1,7 +1,7 @@
-;;;; test/repl-trace-test.lisp - trace / time / profile.
+;;;; test/repl-trace-test.lisp - trace RPCs.
 ;;;;
 ;;;; Covers BRIDGE_V2 #160 (trace), #161 (untrace), #162 (list-traced),
-;;;; #163 (time-eval), #164 (profile-eval).
+;;;; and rejects eval-shaped timing/profile aliases.
 
 (require :asdf)
 (require :sb-bsd-sockets)
@@ -87,37 +87,19 @@
 (format t "  trace/untrace OK~%")
 
 ;;; ----------------------------------------------------------------------------
-;;; #163: time-eval reports real_ms / bytes_consed for a small form.
+;;; Eval-shaped timing/profile aliases are not public RPCs.
 
-(format t "Test: time-eval returns timing fields~%")
+(format t "Test: eval-shaped timing/profile aliases are rejected~%")
 (with-daemon
   (lambda (sock)
-    (let* ((resp (do-rpc sock "time-eval"
-                          (list (cons "form" "(loop for i from 0 below 1000 sum i)"))))
-           (result (lookup resp "result"))
-           (timing (lookup result "timing")))
-      (assert-true result "no result: ~S" resp)
-      (assert-true (integerp (lookup timing "real_ms"))
-                   "real_ms not integer")
-      (assert-true (integerp (lookup timing "bytes_consed"))
-                   "bytes_consed not integer"))))
-(format t "  time-eval OK~%")
-
-;;; ----------------------------------------------------------------------------
-;;; #164: profile-eval returns a raw report.
-
-(format t "Test: profile-eval returns a profile entry~%")
-(with-daemon
-  (lambda (sock)
-    (let* ((resp (do-rpc sock "profile-eval"
-                          (list (cons "form"
-                                      "(loop for i from 0 below 10000 sum i)")
-                                (cons "top" 5))))
-           (result (lookup resp "result"))
-           (entries (array-items (lookup (lookup result "profile") "entries"))))
-      (assert-true result "no result: ~S" resp)
-      (assert-true entries "no profile entries"))))
-(format t "  profile-eval OK~%")
+    (dolist (method '("time-eval" "profile-eval"))
+      (let* ((resp (do-rpc sock method
+                           (list (cons "form" "(loop for i from 0 below 1000 sum i)"))))
+             (err (lookup resp "error")))
+        (assert-true err "expected ~A to be rejected, got: ~S" method resp)
+        (assert-true (search "unknown method" (lookup err "message"))
+                     "wrong ~A error: ~S" method err)))))
+(format t "  eval alias rejection OK~%")
 
 (format t "~%REPL trace tests PASSED!~%")
 (sb-ext:exit :code 0)
