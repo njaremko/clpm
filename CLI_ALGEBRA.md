@@ -1106,6 +1106,29 @@ but output kind and machine-readable shape are semantic.
   - `time-eval` and `profile-eval` are still eval-shaped RPC aliases. They
     should be attacked as either `repl eval` options or deleted recipes.
 
+### Iteration 27: Attack JSON Boolean Null
+
+- Commands deleted:
+  - No command tokens. This removes `null` as an accepted value for boolean
+    RPC parameters.
+- Commands merged:
+  - No semantic carriers.
+- Commands derived instead of exposed:
+  - Optional boolean absence remains the only "not supplied" state.
+- Commands that survived and why:
+  - Boolean RPC parameters survive as two-valued JSON booleans: `true` and
+    `false`.
+  - `break_on` keeps its explicit disable spellings: `"none"`, `"nil"`, and
+    `false`.
+- Laws/protocol invariants added:
+  - `param.type = boolean => param.value in {true,false}`.
+  - `param.absent` is distinct from `param.value = null`; `null` fails schema
+    decoding unless a method explicitly declares a nullable type.
+- Remaining discomfort:
+  - The method schema still uses string type names. A future pass should
+    split them into closed type constructors rather than accepting ad hoc
+    string unions like `string-or-boolean`.
+
 ## Constructors
 
 Terminal constructors:

@@ -147,6 +147,18 @@
                            (lookup typed-error "message"))
                    "wrong type message: ~S"
                    typed-error))
+    (let* ((null-bool (clpm.repl:send-request
+                       sock "gc"
+                       :params (list :object
+                                     (list (cons "full" nil)))))
+           (null-bool-error (lookup null-bool "error")))
+      (assert-true null-bool-error
+                   "null boolean param should be rejected: ~S"
+                   null-bool)
+      (assert-true (search "expected boolean"
+                           (lookup null-bool-error "message"))
+                   "wrong null-boolean message: ~S"
+                   null-bool-error))
     (let* ((not-object (clpm.repl:send-request
                         sock "help"
                         :params (list :array nil)))

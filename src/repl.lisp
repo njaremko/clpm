@@ -2116,7 +2116,7 @@ the method-local schema.")
   (and (consp value) (eq (car value) :object)))
 
 (defun %json-boolean-p (value)
-  (or (eq value t) (eq value :false) (null value)))
+  (or (eq value t) (eq value :false)))
 
 (defun %json-value-type-name (value)
   (cond
@@ -2330,7 +2330,7 @@ worker is changed."
   `record_signals'     -- collect non-error signaled conditions.
   `worker' / `concurrent' -- route to a named or one-shot worker.
   `handlers'           -- declarative restart auto-invocation.
-  `break_on'           -- bind *break-on-signals*; \"none\" / false / nil
+  `break_on'           -- bind *break-on-signals*; \"none\" / false / \"nil\"
                           disables the global default for this eval.
   `max_real_ms' / `max_cons_bytes'
                        -- per-eval resource caps; crossing one aborts the
@@ -2376,7 +2376,7 @@ lost."
 	                (list :name "handlers" :type "array" :required nil
 	                      :description "Declarative condition handlers as {type,restart,args} objects.")
 	                (list :name "break_on" :type "string-or-boolean" :required nil
-	                      :description "Type name to bind *break-on-signals* to; \"none\" / false / nil disables.")
+	                      :description "Type name to bind *break-on-signals* to; \"none\" / false / \"nil\" disables.")
 	                (list :name "max_real_ms" :type "integer" :required nil
 	                      :description "Abort with code resource-exhausted if real time exceeds this.")
 	                (list :name "max_cons_bytes" :type "integer" :required nil
@@ -4701,13 +4701,13 @@ keeps the worker fast-path identical to v1."
       (maybe-bool "concurrent" :concurrent)
       (maybe-string "worker" :worker)
       ;; #211: `break_on' accepts a type name ("error"), the special
-      ;; string "none" (or "nil"), or boolean false -- the latter two
+      ;; strings "none" / "nil", or boolean false. The latter values
       ;; explicitly disable *break-on-signals* for the eval, overriding
       ;; any global default the daemon was started with.
       (let ((b (%json-getf params "break_on" 'unset)))
         (cond
           ((eq b 'unset))
-          ((or (eq b :false) (eq b nil))
+          ((eq b :false)
            (setf options (list* :break-on :none options)))
           ((and (stringp b)
                 (member (string-downcase b) '("none" "nil" "false")

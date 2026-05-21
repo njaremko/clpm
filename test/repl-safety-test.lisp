@@ -1,6 +1,6 @@
 ;;;; test/repl-safety-test.lisp - hygiene / safety / observability.
 ;;;;
-;;;; Covers BRIDGE_V2 #210 (heartbeat), #211 (break-on nil override),
+;;;; Covers BRIDGE_V2 #210 (heartbeat), #211 (break-on disable override),
 ;;;; #212 (worker crash recovery), #213 (per-method counters),
 ;;;; #214 (slowlog), #215 (resource caps).
 
@@ -99,7 +99,7 @@
 ;;; ----------------------------------------------------------------------------
 ;;; #211: break_on "none" disables break-on-signals for this eval.
 ;;; (we can't easily test the global default, but we can confirm explicit
-;;; nil parses and the eval still succeeds.)
+;;; disable syntax parses and the eval still succeeds.)
 
 (format t "Test: break_on \"none\" still runs the form~%")
 (with-daemon
