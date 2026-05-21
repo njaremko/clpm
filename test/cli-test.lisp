@@ -97,13 +97,15 @@
 
 (format t "Testing JSON option scope...~%")
 (dolist (args '(("repl" "--json")
-                ("--json" "repl")))
+                ("--json" "repl")
+                ("--json")))
   (multiple-value-bind (code _out err)
       (run-cli-captured args)
     (declare (ignore _out))
     (assert-eql 1 code)
-    (unless (search "Unknown subcommand: --json" err)
-      (fail "Expected repl resource-level --json to be rejected, got: ~A" err))))
+    (unless (or (search "Unknown subcommand: --json" err)
+                (search "Unknown option: --json" err))
+      (fail "Expected inert --json to be rejected, got: ~A" err))))
 (format t "  JSON option scope PASSED~%")
 
 (format t "Testing insecure option scope...~%")

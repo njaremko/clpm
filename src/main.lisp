@@ -171,8 +171,15 @@ Returns (values command command-args options)."
                (return-from parse-args (values :help nil options))))
           ((string= arg "--version")
            (return-from parse-args (values :version nil options)))
+          ((and (null command)
+                (plusp (length arg))
+                (char= (char arg 0) #\-))
+           (clpm.errors:signal-error 'clpm.errors:clpm-user-error
+                                     "Unknown option: ~A" arg))
           ;; Command
-          ((and (null command) (not (char= (char arg 0) #\-)))
+          ((and (null command)
+                (plusp (length arg))
+                (not (char= (char arg 0) #\-)))
            (setf command (intern (string-upcase arg) :keyword)))
           ;; Command args
           (t

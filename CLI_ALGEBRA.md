@@ -1525,6 +1525,29 @@ but output kind and machine-readable shape are semantic.
   - None for REPL history isolation. The remaining broad attack is the loose
     eval options plist named in Iteration 41.
 
+### Iteration 43: Reject Unknown Pre-Command Options
+
+- Commands deleted:
+  - `clpm --json` as a silent alias for bare help.
+  - Any unknown pre-command flag as an invisible command argument that falls
+    through to bare help.
+- Commands merged:
+  - None. Unknown options have no denotation.
+- Commands derived instead of exposed:
+  - Command-local flags remain parsed by their owning command after the command
+    token is selected.
+- Commands that survived and why:
+  - The closed global option set survives: `-v`, `--verbose`, `-h`, `--help`,
+    `--version`, and the explicitly scoped pre-command knobs already defended
+    by the option-scope laws.
+- Laws/protocol invariants added:
+  - `flag notin GlobalOption => parse([flag]) = Error`.
+  - `parse(["--json"]) = Error`; JSON is only a leaf observation mode where a
+    command explicitly documents it.
+  - Unknown leading flags cannot be observationally equal to bare `clpm`.
+- Remaining discomfort:
+  - None for pre-command option closure.
+
 ## Constructors
 
 Terminal constructors:
@@ -1941,6 +1964,8 @@ Failed-counterexample regressions:
   `clpm.commands:cmd-gc`, and other leaf handlers are not external symbols.
 - `clpm repl --json` is rejected; `--json` is not a resource-level output
   mode.
+- `clpm --json` is rejected; an unknown pre-command flag cannot silently denote
+  bare help.
 - `clpm --insecure help` and `clpm repl --insecure` are rejected;
   `--insecure` is not an inert global decoration.
 - `clpm repl call eval --form FORM` is rejected; public evaluation goes
