@@ -40,6 +40,7 @@
   (assert-contains readme "clpm project new <name> --bin\\|--lib --member-of <workspace-dir>")
   (assert-contains readme "Public keys embedded under `registry/keys/` are distributable metadata, not a")
   (assert-not-contains readme "ed25519:abcd")
+  (assert-not-contains readme "ed25519:...")
   (format t "  README REPL docs PASSED~%"))
 
 (format t "~%README docs tests PASSED!~%")

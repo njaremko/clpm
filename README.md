@@ -54,7 +54,7 @@ clpm project package
 ./dist/myproject
 
 # Optional: configure a signed git registry (example values)
-clpm registry add --name main --url https://github.com/clpm/clpm-registry.git --trust ed25519:...
+clpm registry add --name main --url https://github.com/clpm/clpm-registry.git --trust ed25519:<key-id>
 ```
 
 ## Trust & provenance

@@ -2902,6 +2902,8 @@ Failed-counterexample regressions:
 - Root help, nested help, README, and generated skill output use concrete
   variadic help selectors, typed Ed25519 trust placeholders, and REPL eval
   summaries that include `[--json]`.
+- README does not use fake Ed25519 examples such as `ed25519:...`; examples
+  name the typed placeholder `ed25519:<key-id>`.
 - `clpm registry publish --git-commit ...` is rejected; publish does not run
   VCS commands.
 - `clpm repl eval FORM --pretty` is rejected; human output is the default and
