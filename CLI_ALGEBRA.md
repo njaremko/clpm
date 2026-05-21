@@ -1730,6 +1730,32 @@ but output kind and machine-readable shape are semantic.
     protocol error text. A future internal cleanup can make that a typed
     transport result without changing the CLI algebra.
 
+### Iteration 51: Delete Removed Trust Alias from Error Recovery Text
+
+- Commands deleted:
+  - No new parser surface. The deleted surface is the recovery instruction
+    "Use --refresh-trust" in Quicklisp SHA-256 mismatch errors.
+- Commands merged:
+  - All Quicklisp trust-refresh recovery text is merged into
+    `clpm registry trust refresh <name>`.
+- Commands derived instead of exposed:
+  - None. Trust refresh is a registry-trust operation, not an update option.
+- Commands that survived and why:
+  - `registry trust refresh <name>` survives because Quicklisp trust pins are
+    persistent verifier state and need an explicit operator action to rotate.
+  - `registry update <name>` survives as a registry snapshot update that must
+    fail when existing trust pins are contradicted.
+- Laws/protocol invariants added:
+  - A user-facing error must not name a command or flag that the parser
+    rejects, except as an explicit "is rejected" counterexample.
+  - Quicklisp distinfo/systems/releases SHA mismatch recovery is:
+    `Run clpm registry trust refresh <name>`.
+  - `parse ["registry", "update", "--refresh-trust", name] = Error` remains
+    the only public mention of the removed alias.
+- Remaining discomfort:
+  - The lower layer still uses the internal keyword `:refresh-trust` for the
+    implementation parameter. That name is not a CLI constructor.
+
 ## Constructors
 
 Terminal constructors:
@@ -2193,6 +2219,9 @@ Failed-counterexample regressions:
   is not a CLI trust value.
 - `clpm registry update --refresh-trust quicklisp` is rejected; Quicklisp
   pin refresh is `clpm registry trust refresh quicklisp`.
+- Quicklisp SHA-256 mismatch errors name
+  `clpm registry trust refresh <name>` and do not advertise
+  `--refresh-trust`.
 - `clpm registry publish --git-commit ...` is rejected; publish does not run
   VCS commands.
 - `clpm repl eval FORM --pretty` is rejected; human output is the default and

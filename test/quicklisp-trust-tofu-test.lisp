@@ -279,7 +279,15 @@ Returns (values base-url stop-fn)."
                    (declare (ignore _stdout))
                    (assert-eql 1 code)
                    (assert-true (search "SHA-256 mismatch" stderr :test #'char-equal)
-                                "Expected mismatch error, got:~%~A" stderr))
+                                "Expected mismatch error, got:~%~A" stderr)
+                   (assert-true (search "clpm registry trust refresh quicklisp"
+                                        stderr :test #'char-equal)
+                                "Expected canonical trust refresh command, got:~%~A"
+                                stderr)
+                   (assert-true (not (search "--refresh-trust"
+                                             stderr :test #'char-equal))
+                                "Mismatch error still names deleted --refresh-trust:~%~A"
+                                stderr))
 
                  ;; With refresh, it succeeds and updates config pin.
                  (multiple-value-bind (code _stdout stderr)

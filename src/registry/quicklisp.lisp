@@ -147,10 +147,11 @@ May update global config and REGISTRY trust key when using TOFU or refresh."
            (t
             (error 'clpm.errors:clpm-fetch-error
                    :message (format nil
-                                    "Quicklisp distinfo SHA-256 mismatch for ~A (expected ~A, got ~A). Use --refresh-trust to update."
+                                    "Quicklisp distinfo SHA-256 mismatch for ~A (expected ~A, got ~A). Run `clpm registry trust refresh ~A` to update."
                                     (registry-name registry)
                                     hex
-                                    distinfo-sha256-hex)
+                                    distinfo-sha256-hex
+                                    (registry-name registry))
                    :url (registry-url registry)))))))))
 
 (defun %enforce-quicklisp-index-pin (registry which actual-sha256-hex
@@ -194,11 +195,12 @@ If no pin exists, pins it (TOFU-style) when Quicklisp trust is enabled."
         (t
          (error 'clpm.errors:clpm-fetch-error
                 :message (format nil
-                                 "Quicklisp ~A SHA-256 mismatch for ~A (expected ~A, got ~A). Use --refresh-trust to update."
+                                 "Quicklisp ~A SHA-256 mismatch for ~A (expected ~A, got ~A). Run `clpm registry trust refresh ~A` to update."
                                  which
                                  (registry-name registry)
                                  pin
-                                 actual-sha256-hex)
+                                 actual-sha256-hex
+                                 (registry-name registry))
                 :url (registry-url registry)))))))
 
 (defun %find-yyyymmdd (s)
