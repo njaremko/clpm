@@ -26,6 +26,14 @@
   (unless x
     (apply #'fail fmt args)))
 
+(defun assert-user-error (thunk fmt &rest args)
+  (handler-case
+      (progn
+        (funcall thunk)
+        (apply #'fail fmt args))
+    (clpm.errors:clpm-user-error ()
+      t)))
+
 (format t "Testing streaming store-artifact...~%")
 
 (clpm.store:with-temp-dir (tmp)
@@ -56,6 +64,39 @@
         (delete-file stored)))))
 
 (format t "  Store streaming PASSED~%")
+
+(format t "Testing store identities are digest-only...~%")
+
+(clpm.store:with-temp-dir (tmp)
+  (declare (ignore tmp))
+  (let* ((store-parent
+           (uiop:pathname-parent-directory-pathname
+            (uiop:ensure-directory-pathname (clpm.platform:store-dir))))
+         (escaped-root (merge-pathnames "escaped-source/" store-parent))
+         (escaped-src (merge-pathnames "src/" escaped-root)))
+    (ensure-directories-exist escaped-src)
+    (unwind-protect
+         (assert-user-error
+          (lambda ()
+            (clpm.store:get-source-path "../../../escaped-source"))
+          "Expected invalid source identity to be rejected")
+         (assert-user-error
+          (lambda ()
+            (clpm.store:get-artifact-path "../../../escaped-artifact"))
+          "Expected invalid artifact identity to be rejected")
+         (assert-user-error
+          (lambda ()
+            (clpm.store:get-build-path "../../../escaped-build"))
+          "Expected invalid build identity to be rejected")
+         (assert-user-error
+          (lambda ()
+            (clpm.store:compute-build-id "../../../escaped-source" nil))
+          "Expected invalid source identity to be rejected before build-id derivation")
+      (ignore-errors
+       (uiop:delete-directory-tree escaped-root
+                                   :validate t
+                                   :if-does-not-exist :ignore)))))
+
+(format t "  Store identity validation PASSED~%")
 (format t "~%Store streaming tests PASSED!~%")
 (sb-ext:exit :code 0)
-

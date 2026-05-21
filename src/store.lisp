@@ -4,20 +4,38 @@
 
 ;;; Store paths
 
+(defun %hex-char-p (char)
+  (or (and (char>= char #\0) (char<= char #\9))
+      (and (char>= char #\a) (char<= char #\f))
+      (and (char>= char #\A) (char<= char #\F))))
+
+(defun %sha256-hex-digest (value kind)
+  (unless (and (stringp value)
+               (= 64 (length value))
+               (every #'%hex-char-p value))
+    (error 'clpm.errors:clpm-user-error
+           :message (format nil "Invalid ~A: expected 64 hexadecimal SHA-256 digest, got ~S"
+                            kind
+                            value)))
+  (string-downcase value))
+
 (defun source-path (tree-sha256)
   "Return path for source tree with given hash."
-  (merge-pathnames (format nil "sources/sha256/~A/" tree-sha256)
-                   (clpm.platform:store-dir)))
+  (let ((tree-sha256 (%sha256-hex-digest tree-sha256 "source tree identity")))
+    (merge-pathnames (format nil "sources/sha256/~A/" tree-sha256)
+                     (clpm.platform:store-dir))))
 
 (defun artifact-path (artifact-sha256)
   "Return path for artifact with given hash."
-  (merge-pathnames (format nil "artifacts/sha256/~A" artifact-sha256)
-                   (clpm.platform:store-dir)))
+  (let ((artifact-sha256 (%sha256-hex-digest artifact-sha256 "artifact identity")))
+    (merge-pathnames (format nil "artifacts/sha256/~A" artifact-sha256)
+                     (clpm.platform:store-dir))))
 
 (defun build-path (build-id)
   "Return path for build with given ID."
-  (merge-pathnames (format nil "builds/~A/" build-id)
-                   (clpm.platform:store-dir)))
+  (let ((build-id (%sha256-hex-digest build-id "build identity")))
+    (merge-pathnames (format nil "builds/~A/" build-id)
+                     (clpm.platform:store-dir))))
 
 (defun tmp-path ()
   "Return temp directory path."
@@ -165,7 +183,8 @@ Build ID = sha256(
   asdf-version + '\\0' +
   normalized-compile-policy + '\\0' +
   features-hash)"
-  (let* ((compile-policy (format nil "speed=~D;safety=~D;debug=~D"
+  (let* ((tree-sha256 (%sha256-hex-digest tree-sha256 "source tree identity"))
+         (compile-policy (format nil "speed=~D;safety=~D;debug=~D"
                                  (or (getf compile-options :speed) 1)
                                  (or (getf compile-options :safety) 1)
                                  (or (getf compile-options :debug) 1)))

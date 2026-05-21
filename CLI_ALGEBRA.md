@@ -2004,6 +2004,28 @@ but output kind and machine-readable shape are semantic.
 - Remaining discomfort:
   - None.
 
+### Iteration 63: Store Identities Are Digests, Not Paths
+
+- Commands deleted:
+  - The accidental interpretation of lockfile/store identity strings as
+    pathname fragments.
+- Commands merged:
+  - None.
+- Commands derived instead of exposed:
+  - Source, artifact, and build store paths are derived only from canonical
+    SHA-256 digest identities.
+- Commands that survived and why:
+  - `store gc`, `store clean`, `deps sync`, `deps fetch`, and build commands
+    survive because they operate over content identities, not filesystem
+    selectors.
+- Laws/protocol invariants added:
+  - Store identity inputs are 64-character hexadecimal SHA-256 digests before
+    any pathname is constructed.
+  - Invalid lockfile/store identities fail as user/configuration errors; they
+    are not cache misses and cannot escape the store namespace.
+- Remaining discomfort:
+  - None.
+
 ## Constructors
 
 Terminal constructors:
