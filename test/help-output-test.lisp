@@ -248,6 +248,14 @@
 
 (format t "Testing per-subcommand help...~%")
 
+;; deps add: source selectors include workspace-member shorthand.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "deps" "add"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm deps add")
+  (assert-contains stdout "--workspace <member>"))
+
 ;; workspace add: dedicated page with the add usage line.
 (multiple-value-bind (code stdout stderr)
     (run-cli-captured '("help" "project" "workspace" "add"))
@@ -286,10 +294,22 @@
     (run-cli-captured '("help" "deps" "remove"))
   (declare (ignore stderr))
   (assert-eql 0 code)
-  (assert-contains stdout "Usage: clpm deps remove [--dev|--test] <system>")
+  (assert-contains stdout "Usage: clpm deps remove [--dev|--test] [--workspace <member>] [<system>]")
   (assert-not-contains stdout "<dep>"
                        "deps remove help leaked alternate target name:~%~A"
                        stdout))
+
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "deps" "update"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm deps update [--workspace <member>] [system ...]"))
+
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "deps" "why"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "Usage: clpm [-p <member>] deps why [--workspace <member>] [<system>]"))
 
 ;; registry trust set: leaf page (drills two levels).
 (multiple-value-bind (code stdout stderr)

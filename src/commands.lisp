@@ -570,9 +570,107 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
       (t
        (values nil nil nil nil nil)))))
 
+(defun %workspace-root-for-project (project-root workspace-root workspace-path)
+  (if workspace-root
+      (values workspace-root workspace-path)
+      (clpm.workspace:find-workspace-root project-root)))
+
+(defun %declared-project-system-ids (project)
+  (sort (remove-if-not (lambda (system)
+                         (and (stringp system) (plusp (length system))))
+                       (copy-list (or (clpm.project:project-systems project) '())))
+        #'string<))
+
+(defun %absolute-directory-components (directory)
+  (let ((components (pathname-directory
+                     (uiop:ensure-directory-pathname (truename directory)))))
+    (unless (and (consp components) (eq (first components) :absolute))
+      (log-error "Expected an absolute directory path, got ~A" (namestring directory))
+      (return-from %absolute-directory-components nil))
+    (rest components)))
+
+(defun %relative-directory-string (target base)
+  (let ((target-components (%absolute-directory-components target))
+        (base-components (%absolute-directory-components base)))
+    (unless (and target-components base-components)
+      (return-from %relative-directory-string nil))
+    (loop while (and target-components
+                     base-components
+                     (equal (first target-components)
+                            (first base-components)))
+          do (setf target-components (rest target-components)
+                   base-components (rest base-components)))
+    (let ((parts (append (make-list (length base-components)
+                                    :initial-element "..")
+                         target-components)))
+      (if parts
+          (format nil "~{~A~^/~}" parts)
+          "."))))
+
+(defun %workspace-member-system-and-path (member project-root workspace-root workspace-path
+                                          &key explicit-system)
+  "Resolve workspace MEMBER to its dependency system and path from PROJECT-ROOT."
+  (let ((norm (%normalize-workspace-member-arg member)))
+    (unless norm
+      (return-from %workspace-member-system-and-path (values nil nil)))
+    (multiple-value-bind (root ws-path)
+        (%workspace-root-for-project project-root workspace-root workspace-path)
+      (unless (and root ws-path (uiop:file-exists-p ws-path))
+        (log-error "No clpm.workspace found; --workspace requires a workspace")
+        (return-from %workspace-member-system-and-path (values nil nil)))
+      (let* ((ws (clpm.workspace:read-workspace-file ws-path))
+             (members (sort (copy-list (or (clpm.workspace:workspace-members ws) '()))
+                            #'string<)))
+        (unless (member norm members :test #'string=)
+          (log-error "Workspace member ~A not found. Members:" norm)
+          (dolist (m members)
+            (log-error "  ~A" m))
+          (return-from %workspace-member-system-and-path (values nil nil)))
+        (let* ((member-dir
+                 (uiop:ensure-directory-pathname
+                  (uiop:ensure-pathname (merge-pathnames norm root)
+                                        :defaults root
+                                        :want-existing nil)))
+               (member-manifest (merge-pathnames "clpm.project" member-dir)))
+          (unless (uiop:file-exists-p member-manifest)
+            (log-error "Workspace member ~A does not contain clpm.project: ~A"
+                       norm (namestring member-dir))
+            (return-from %workspace-member-system-and-path (values nil nil)))
+          (when (equal (uiop:ensure-directory-pathname (truename member-dir))
+                       (uiop:ensure-directory-pathname (truename project-root)))
+            (log-error "Workspace member ~A is the selected project" norm)
+            (return-from %workspace-member-system-and-path (values nil nil)))
+          (let* ((member-project (clpm.project:read-project-file member-manifest))
+                 (systems (%declared-project-system-ids member-project))
+                 (system-id
+                   (cond
+                     (explicit-system
+                      (unless (member explicit-system systems :test #'string=)
+                        (log-error "Workspace member ~A does not declare system ~A"
+                                   norm explicit-system)
+                        (when systems
+                          (log-error "Declared systems: ~{~A~^, ~}" systems))
+                        (return-from %workspace-member-system-and-path
+                          (values nil nil)))
+                      explicit-system)
+                     ((= (length systems) 1)
+                      (first systems))
+                     ((null systems)
+                      (log-error "Workspace member ~A declares no systems" norm)
+                      (return-from %workspace-member-system-and-path
+                        (values nil nil)))
+                     (t
+                      (log-error "Workspace member ~A declares multiple systems; pass one explicitly:" norm)
+                      (dolist (system systems)
+                        (log-error "  ~A" system))
+                      (return-from %workspace-member-system-and-path
+                        (values nil nil))))))
+            (values system-id
+                    (%relative-directory-string member-dir project-root))))))))
+
 (defun cmd-add (&rest args)
   "Add dependencies to clpm.project and refresh clpm.lock."
-  (let ((usage "Usage: clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]...")
+  (let ((usage "Usage: clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --workspace <member> | --git <url> --ref <ref>] [<system>[@^<semver>|@=<exact>]...]")
         (specs '())
         (dev-p nil)
         (test-p nil)
@@ -580,6 +678,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
         (caret-p nil)
         (registry-name nil)
         (path nil)
+        (workspace-member nil)
         (git-url nil)
         (git-ref nil)
         (seen-spec-p nil))
@@ -628,6 +727,16 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                  (log-error "Duplicate option: --path")
                  (return-from cmd-add 1))
                (setf path (nth i args)))
+              ((string= arg "--workspace")
+               (option-before-spec arg)
+               (incf i)
+               (when (>= i (length args))
+                 (log-error "Missing value for --workspace")
+                 (return-from cmd-add 1))
+               (when workspace-member
+                 (log-error "Duplicate option: --workspace")
+                 (return-from cmd-add 1))
+               (setf workspace-member (nth i args)))
               ((string= arg "--git")
                (option-before-spec arg)
                (incf i)
@@ -658,7 +767,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
 
       (setf specs (nreverse specs))
 
-      (unless specs
+      (unless (or specs workspace-member)
         (usage-error))
 
       (when (and any-p caret-p)
@@ -669,16 +778,16 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
         (log-error "Only one of --dev or --test may be specified")
         (return-from cmd-add 1))
 
-      (when (and path git-url)
-        (log-error "Only one of --path or --git may be specified")
+      (when (> (count-if #'identity (list path workspace-member git-url)) 1)
+        (log-error "Only one of --path, --workspace, or --git may be specified")
         (return-from cmd-add 1))
 
-      (when (and (or path git-url) (rest specs))
-        (log-error "--path/--git may only be used with one dependency")
+      (when (and (or path workspace-member git-url) (rest specs))
+        (log-error "--path/--workspace/--git may only be used with one dependency")
         (return-from cmd-add 1))
 
-      (when (and registry-name (or path git-url))
-        (log-error "Do not combine --registry with --path/--git")
+      (when (and registry-name (or path workspace-member git-url))
+        (log-error "Do not combine --registry with --path/--workspace/--git")
         (return-from cmd-add 1))
 
       (when (and git-url (null git-ref))
@@ -689,13 +798,34 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
         (log-error "--ref requires --git")
         (return-from cmd-add 1))
 
-      (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
+      (multiple-value-bind (project-root manifest-path lock-path workspace-root workspace-path)
           (find-effective-project-root)
-        (declare (ignore lock-path _workspace-path))
+        (declare (ignore lock-path))
         (unless manifest-path
           (when (null workspace-root)
             (log-no-project-found))
           (return-from cmd-add 1))
+
+        (when workspace-member
+          (let ((explicit-system nil))
+            (when specs
+              (multiple-value-bind (system-id parsed-constraint)
+                  (parse-dep-spec (first specs))
+                (when (or (not (plusp (length system-id)))
+                          (eq parsed-constraint :invalid))
+                  (log-error "Invalid dependency spec: ~A" (first specs))
+                  (return-from cmd-add 1))
+                (when parsed-constraint
+                  (log-error "Do not combine @<constraint> with --workspace")
+                  (return-from cmd-add 1))
+                (setf explicit-system system-id)))
+            (multiple-value-bind (system-id relative-path)
+                (%workspace-member-system-and-path workspace-member project-root workspace-root workspace-path
+                                                   :explicit-system explicit-system)
+              (unless system-id
+                (return-from cmd-add 1))
+              (setf specs (list system-id)
+                    path relative-path))))
 
         (let* ((project (clpm.project:read-project-file manifest-path))
                (registries (load-project-registries project))
@@ -745,7 +875,7 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
                        (log-error "Invalid dependency spec: ~A" spec)
                        (return-from cmd-add 1))
                      (when (and parsed-constraint (or path git-url))
-                       (log-error "Do not combine @<constraint> with --path/--git")
+                       (log-error "Do not combine @<constraint> with --path/--workspace/--git")
                        (return-from cmd-add 1))
                      (when (and parsed-constraint (or any-p caret-p))
                        (log-error "Do not combine @<constraint> with --any/--caret")
@@ -847,38 +977,57 @@ Returns (values project-root manifest-path lock-path workspace-root workspace-pa
 (defun cmd-remove (&rest args)
   "Remove a dependency from clpm.project and refresh clpm.lock."
   (let ((system-id nil)
+        (workspace-member nil)
         (dev-p nil)
         (test-p nil))
-    (dolist (arg args)
-      (cond
-        ((and system-id
-              (member arg '("--dev" "--test") :test #'string=))
-         (log-error "Usage: clpm deps remove [--dev|--test] <system>")
-         (return-from cmd-remove 1))
-        ((string= arg "--dev") (setf dev-p t))
-        ((string= arg "--test") (setf test-p t))
-        ((and (plusp (length arg)) (char= (char arg 0) #\-))
-         (log-error "Unknown option: ~A" arg)
-         (return-from cmd-remove 1))
-        ((null system-id) (setf system-id arg))
-        (t
-         (log-error "Unexpected argument: ~A" arg)
-         (return-from cmd-remove 1))))
-    (unless system-id
-      (log-error "Usage: clpm deps remove [--dev|--test] <system>")
+    (loop while args do
+      (let ((arg (pop args)))
+        (cond
+          ((and system-id
+                (member arg '("--dev" "--test" "--workspace") :test #'string=))
+           (log-error "Usage: clpm deps remove [--dev|--test] [--workspace <member>] [<system>]")
+           (return-from cmd-remove 1))
+          ((string= arg "--dev") (setf dev-p t))
+          ((string= arg "--test") (setf test-p t))
+          ((string= arg "--workspace")
+           (when workspace-member
+             (log-error "Duplicate option: --workspace")
+             (return-from cmd-remove 1))
+           (let ((member (pop args)))
+             (unless (and (stringp member) (plusp (length member)))
+               (log-error "Missing value for --workspace")
+               (return-from cmd-remove 1))
+             (setf workspace-member member)))
+          ((and (plusp (length arg)) (char= (char arg 0) #\-))
+           (log-error "Unknown option: ~A" arg)
+           (return-from cmd-remove 1))
+          ((null system-id) (setf system-id arg))
+          (t
+           (log-error "Unexpected argument: ~A" arg)
+           (return-from cmd-remove 1)))))
+    (unless (or system-id workspace-member)
+      (log-error "Usage: clpm deps remove [--dev|--test] [--workspace <member>] [<system>]")
       (return-from cmd-remove 1))
 
     (when (and dev-p test-p)
       (log-error "Only one of --dev or --test may be specified")
       (return-from cmd-remove 1))
 
-    (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
+    (multiple-value-bind (project-root manifest-path lock-path workspace-root workspace-path)
         (find-effective-project-root)
-      (declare (ignore lock-path _workspace-path))
+      (declare (ignore lock-path))
       (unless manifest-path
         (when (null workspace-root)
           (log-no-project-found))
         (return-from cmd-remove 1))
+      (when workspace-member
+        (multiple-value-bind (resolved-system _relative-path)
+            (%workspace-member-system-and-path workspace-member project-root workspace-root workspace-path
+                                               :explicit-system system-id)
+          (declare (ignore _relative-path))
+          (unless resolved-system
+            (return-from cmd-remove 1))
+          (setf system-id resolved-system)))
       (let ((section (cond
                        (dev-p :dev-depends)
                        (test-p :test-depends)
@@ -1401,14 +1550,24 @@ manifest; root-level entries in that set are tagged \"(optional)\"."
   "Explain why a system appears in the resolved dependency graph."
   (labels ((usage-error (fmt &rest fmt-args)
              (apply #'log-error fmt fmt-args)
-             (log-error "Usage: clpm [-p <member>] deps why <system>")
+             (log-error "Usage: clpm [-p <member>] deps why [--workspace <member>] [<system>]")
              (return-from cmd-why 1)))
-    (let ((target nil))
+    (let ((target nil)
+          (workspace-member nil))
       ;; Parse args
       (let ((i 0))
         (loop while (< i (length args)) do
           (let ((arg (nth i args)))
             (cond
+              ((string= arg "--workspace")
+               (when target
+                 (usage-error "Option must appear before <system>: ~A" arg))
+               (when workspace-member
+                 (usage-error "Duplicate option: --workspace"))
+               (incf i)
+               (when (>= i (length args))
+                 (usage-error "Missing value for --workspace"))
+               (setf workspace-member (nth i args)))
               ((and (stringp arg) (plusp (length arg)) (char= (char arg 0) #\-))
                (usage-error "Unknown option: ~A" arg))
               ((null target)
@@ -1417,16 +1576,24 @@ manifest; root-level entries in that set are tagged \"(optional)\"."
                (usage-error "Unexpected argument: ~A" arg))))
           (incf i)))
 
-      (unless (and (stringp target) (plusp (length target)))
+      (unless (or (and (stringp target) (plusp (length target)))
+                  workspace-member)
         (usage-error "Missing <system>"))
 
-      (multiple-value-bind (_project-root manifest-path lock-path workspace-root _workspace-path)
+      (multiple-value-bind (project-root manifest-path lock-path workspace-root workspace-path)
           (find-effective-project-root)
-        (declare (ignore _project-root _workspace-path))
         (unless manifest-path
           (when (null workspace-root)
             (log-no-project-found))
           (return-from cmd-why 1))
+        (when workspace-member
+          (multiple-value-bind (resolved-system _relative-path)
+              (%workspace-member-system-and-path workspace-member project-root workspace-root workspace-path
+                                                 :explicit-system target)
+            (declare (ignore _relative-path))
+            (unless resolved-system
+              (return-from cmd-why 1))
+            (setf target resolved-system)))
         (unless lock-path
           (log-error "No clpm.lock found - run 'clpm deps sync --to lock' first")
           (return-from cmd-why 1))
@@ -1702,24 +1869,46 @@ lockfile; NIL persists no opt-ins."
 scratch. Given one or more system IDs, only those systems are unlocked;
 every other system is pinned to its current lockfile selection (so unrelated
 deps don't churn)."
-  (dolist (system systems)
-    (when (and (stringp system)
-               (plusp (length system))
-               (char= (char system 0) #\-))
-      (log-error "Unknown option: ~A" system)
-      (return-from cmd-update 1)))
-  (multiple-value-bind (project-root manifest-path lock-path workspace-root _workspace-path)
-      (find-effective-project-root)
-    (declare (ignore _workspace-path))
-    (unless manifest-path
-      (when (null workspace-root)
-        (log-no-project-found))
-      (return-from cmd-update 1))
-    (let* ((project (clpm.project:read-project-file manifest-path))
-           (registries (load-project-registries project))
-           (selective (not (null systems)))
-           (existing-lock (and selective lock-path
-                               (clpm.project:read-lock-file lock-path))))
+  (let ((workspace-members '())
+        (explicit-systems '()))
+    (loop while systems do
+      (let ((arg (pop systems)))
+        (cond
+          ((string= arg "--workspace")
+           (let ((member (pop systems)))
+             (unless (and (stringp member) (plusp (length member)))
+               (log-error "Missing value for --workspace")
+               (log-error "Usage: clpm deps update [--workspace <member>] [system ...]")
+               (return-from cmd-update 1))
+             (push member workspace-members)))
+          ((and (stringp arg)
+                (plusp (length arg))
+                (char= (char arg 0) #\-))
+           (log-error "Unknown option: ~A" arg)
+           (return-from cmd-update 1))
+          (t
+           (push arg explicit-systems)))))
+    (setf systems (nreverse explicit-systems)
+          workspace-members (nreverse workspace-members))
+    (multiple-value-bind (project-root manifest-path lock-path workspace-root workspace-path)
+        (find-effective-project-root)
+      (unless manifest-path
+        (when (null workspace-root)
+          (log-no-project-found))
+        (return-from cmd-update 1))
+      (dolist (member workspace-members)
+        (multiple-value-bind (resolved-system _relative-path)
+            (%workspace-member-system-and-path member project-root workspace-root workspace-path)
+          (declare (ignore _relative-path))
+          (unless resolved-system
+            (return-from cmd-update 1))
+          (pushnew resolved-system systems :test #'string=)))
+      (setf systems (sort (copy-list systems) #'string<))
+      (let* ((project (clpm.project:read-project-file manifest-path))
+             (registries (load-project-registries project))
+             (selective (not (null systems)))
+             (existing-lock (and selective lock-path
+                                 (clpm.project:read-lock-file lock-path))))
       (when selective
         (unless existing-lock
           (log-error "No clpm.lock found - run 'clpm deps sync' before 'clpm deps update <system>'")
@@ -1761,7 +1950,7 @@ deps don't churn)."
           (clpm.errors:clpm-resolve-error (c)
             (log-error "~A" c)
             (return-from cmd-update 2)))))
-    0))
+    0)))
 
 (defun cmd-deps-sync (&rest args)
   "Realize dependency state through a selected pipeline stage."
@@ -1817,14 +2006,14 @@ deps don't churn)."
         (rest (rest args)))
     (labels ((usage ()
                (log-error "Usage:")
-               (log-error "  clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>...")
-               (log-error "  clpm deps remove [--dev|--test] <system>")
+               (log-error "  clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --workspace <member> | --git <url> --ref <ref>] [<system>...]")
+               (log-error "  clpm deps remove [--dev|--test] [--workspace <member>] [<system>]")
                (log-error "  clpm deps sync [--to lock|source|build|active]")
-               (log-error "  clpm deps update [system ...]")
+               (log-error "  clpm deps update [--workspace <member>] [system ...]")
                (log-error "  clpm deps search <query> [--limit N] [--json]")
                (log-error "  clpm deps info <system> [--json] [--all]")
                (log-error "  clpm [-p <member>] deps tree [--depth N]")
-               (log-error "  clpm [-p <member>] deps why <system>")
+               (log-error "  clpm [-p <member>] deps why [--workspace <member>] [<system>]")
                (log-error "  clpm deps audit [--json]")
                (log-error "  clpm deps sbom --format <format> [--out <path>]")
                1))
@@ -6162,7 +6351,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "1. Run `clpm doctor` when the environment is suspect."
     "2. Run `clpm help <command>` before using an unfamiliar command."
     "3. In a project, run `clpm deps sync` to resolve, fetch, build, and activate dependencies."
-    "4. Use `clpm deps tree` and `clpm deps why <system>` to understand dependency shape before changing it."
+    "4. Use `clpm deps tree` and `clpm deps why <system>` (or `clpm deps why --workspace <member>`) to understand dependency shape before changing it."
     ""
     "## Common Workflows"
     ""
@@ -6181,10 +6370,13 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "clpm deps add alexandria"
     "clpm deps add alexandria bordeaux-threads"
     "clpm deps add alexandria@^1.4.0"
+    "clpm -p app deps add --workspace my-lib"
     "clpm deps add --dev fiveam"
     "clpm deps remove alexandria"
+    "clpm -p app deps remove --workspace my-lib"
     "clpm deps update"
     "clpm deps update alexandria"
+    "clpm -p app deps update --workspace my-lib"
     "```"
     ""
     "Prefer `clpm deps add` / `clpm deps remove` over manually editing dependency lists. After dependency changes, run `clpm deps sync` and then the relevant tests."
@@ -6219,6 +6411,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "clpm deps info split-sequence"
     "clpm deps tree --depth 3"
     "clpm deps why alexandria"
+    "clpm -p app deps why --workspace my-lib"
     "clpm deps audit"
     "clpm deps sbom --format cyclonedx-json --out sbom.json"
     "```"
@@ -6449,7 +6642,7 @@ sub-subcommand=\"set\")."
        (let ((sub (and (stringp subcommand) (string-downcase subcommand))))
          (cond
            ((and sub (string= sub "add"))
-            (p "Usage: clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --git <url> --ref <ref>] <system>[@^<semver>|@=<exact>]...")
+            (p "Usage: clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --workspace <member> | --git <url> --ref <ref>] [<system>[@^<semver>|@=<exact>]...]")
             (p "")
             (p "Examples:")
             (p "  clpm deps add alexandria")
@@ -6457,11 +6650,12 @@ sub-subcommand=\"set\")."
             (p "  clpm deps add --caret alexandria")
             (p "  clpm deps add alexandria@^1.4.0")
             (p "  clpm deps add --path ../my-lib my-lib")
+            (p "  clpm -p app deps add --workspace my-lib")
             (p "")
             (p "Run `clpm deps sync` after dependency edits to realize the graph.")
             0)
            ((and sub (string= sub "remove"))
-            (p "Usage: clpm deps remove [--dev|--test] <system>")
+            (p "Usage: clpm deps remove [--dev|--test] [--workspace <member>] [<system>]")
             0)
            ((and sub (string= sub "sync"))
             (p "Usage: clpm deps sync [--to lock|source|build|active]")
@@ -6483,7 +6677,7 @@ sub-subcommand=\"set\")."
             (p "  --with-all-optional    Include every declared optional dependency.")
             0)
            ((and sub (string= sub "update"))
-            (p "Usage: clpm deps update [system ...]")
+            (p "Usage: clpm deps update [--workspace <member>] [system ...]")
             (p "")
             (p "Scoped options:")
             (p "  --insecure             Skip registry signature checks for this run.")
@@ -6512,7 +6706,7 @@ sub-subcommand=\"set\")."
             (p "Usage: clpm [-p <member>] deps tree [--depth N]")
             0)
            ((and sub (string= sub "why"))
-            (p "Usage: clpm [-p <member>] deps why <system>")
+            (p "Usage: clpm [-p <member>] deps why [--workspace <member>] [<system>]")
             0)
            ((and sub (string= sub "audit"))
             (p "Usage: clpm deps audit [--json]")
@@ -6527,10 +6721,10 @@ sub-subcommand=\"set\")."
             0)
            (t
             (p "Usage:")
-            (p "  clpm deps add [options] <system>...")
-            (p "  clpm deps remove [options] <system>")
+            (p "  clpm deps add [--dev|--test] [--any|--caret] [--registry <name>] [--path <dir> | --workspace <member> | --git <url> --ref <ref>] [<system>...]")
+            (p "  clpm deps remove [--dev|--test] [--workspace <member>] [<system>]")
             (p "  clpm deps sync [--to lock|source|build|active]")
-            (p "  clpm deps update [system ...]")
+            (p "  clpm deps update [--workspace <member>] [system ...]")
             (p "  clpm deps search|info|tree|why|audit|sbom ...")
             (p "")
             (p "Scoped options:")

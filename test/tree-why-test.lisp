@@ -126,7 +126,7 @@
           (run-cli-captured '("deps" "why"))
         (declare (ignore stdout))
         (assert-eql 1 code)
-        (assert-contains stderr "Usage: clpm [-p <member>] deps why <system>"))
+        (assert-contains stderr "Usage: clpm [-p <member>] deps why [--workspace <member>] [<system>]"))
 
       ;; tree (default depth)
       (multiple-value-bind (code stdout stderr)

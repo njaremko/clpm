@@ -262,14 +262,14 @@ explicit resource operations.
 | `clpm project workspace remove <member> [--dir <path>]` | Remove a workspace member |
 | `clpm project workspace list [--dir <path>]` | List workspace members |
 | `clpm project package` | Build a distributable executable |
-| `clpm deps add [--dev\|--test] [--any\|--caret] ... <system>...` | Add one or more dependencies |
-| `clpm deps remove [--dev\|--test] <system>` | Remove a dependency |
+| `clpm deps add [--dev\|--test] [--any\|--caret] [--path <dir>\|--workspace <member>\|--git <url> --ref <ref>] [<system>...]` | Add one or more dependencies |
+| `clpm deps remove [--dev\|--test] [--workspace <member>] [<system>]` | Remove a dependency |
 | `clpm deps sync [--to lock\|source\|build\|active]` | Resolve, fetch, build, and activate by stage |
-| `clpm deps update [system ...]` | Update dependencies |
+| `clpm deps update [--workspace <member>] [system ...]` | Update dependencies |
 | `clpm deps search <query> [--limit N] [--json]` | Search configured registries |
 | `clpm deps info <system> [--json] [--all]` | Show system details |
 | `clpm [-p <member>] deps tree [--depth N]` | Show dependency tree |
-| `clpm [-p <member>] deps why <system>` | Explain why a system is included |
+| `clpm [-p <member>] deps why [--workspace <member>] [<system>]` | Explain why a system is included |
 | `clpm deps audit [--json]` | Provenance report |
 | `clpm deps sbom --format <cyclonedx-json\|cyclonedx-xml\|spdx-json> [--out <path>]` | SBOM export |
 | `clpm registry add --name <name> --url <git-url> --trust ed25519:<key-id>` | Add a signed git registry |

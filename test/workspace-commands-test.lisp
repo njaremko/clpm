@@ -38,6 +38,20 @@
                needle
                haystack))
 
+(defun assert-equal (expected actual)
+  (unless (equal expected actual)
+    (fail "Assertion failed: expected ~S, got ~S" expected actual)))
+
+(defun find-dep (deps system-id)
+  (find system-id deps
+        :key #'clpm.project:dependency-system
+        :test #'string=))
+
+(defun find-dep-form (deps system-id)
+  (find system-id deps
+        :key (lambda (dep) (getf (cdr dep) :system))
+        :test #'string=))
+
 (defun run-cli-captured (args)
   (let ((out (make-string-output-stream))
         (err (make-string-output-stream)))
@@ -115,9 +129,18 @@
                (assert-contains stderr "Use -p/--package")
                (assert-contains stderr "Workspace members")))
 
-           ;; Add dep as a path dependency to app from workspace root.
+           ;; Add dep as a workspace-member path dependency to app from workspace root.
            (uiop:with-current-directory (ws-root)
-             (assert-eql 0 (clpm:run-cli '("-p" "app" "deps" "add" "--path" "../dep" "dep")))
+             (assert-eql 0 (clpm:run-cli '("-p" "app" "deps" "add" "--workspace" "dep"))))
+
+           (let* ((manifest (clpm.io.sexp:read-safe-sexp-from-file
+                             (merge-pathnames "clpm.project" app-root)))
+                  (dep (find-dep-form (getf (cdr manifest) :depends) "dep")))
+             (assert-true dep "Expected dep in app depends")
+             (assert-equal '(:path "../dep")
+                           (getf (cdr dep) :constraint)))
+
+           (uiop:with-current-directory (ws-root)
              (assert-eql 0 (clpm:run-cli '("-p" "app" "deps" "sync"))))
 
            ;; Ensure project-local artifacts are in the member directory.
@@ -149,11 +172,27 @@
                  (run-cli-captured '("-p" "app" "deps" "why" "dep"))
                (declare (ignore stderr))
                (assert-eql 0 code)
+               (assert-contains stdout "Why: dep"))
+             (multiple-value-bind (code stdout stderr)
+                 (run-cli-captured '("-p" "app" "deps" "why" "--workspace" "dep"))
+               (declare (ignore stderr))
+               (assert-eql 0 code)
                (assert-contains stdout "Why: dep")))
+
+           ;; Workspace member shorthand also resolves dependency targets.
+           (uiop:with-current-directory (ws-root)
+             (assert-eql 0 (clpm:run-cli '("-p" "app" "deps" "update" "--workspace" "dep"))))
 
            ;; Run tests for app from workspace root.
            (uiop:with-current-directory (ws-root)
-             (assert-eql 0 (clpm:run-cli '("-p" "app" "run" "test")))))
+             (assert-eql 0 (clpm:run-cli '("-p" "app" "run" "test"))))
+
+           (uiop:with-current-directory (ws-root)
+             (assert-eql 0 (clpm:run-cli '("-p" "app" "deps" "remove" "--workspace" "dep"))))
+           (let* ((project (clpm.project:read-project-file
+                            (merge-pathnames "clpm.project" app-root)))
+                  (dep (find-dep (clpm.project:project-depends project) "dep")))
+             (assert-true (null dep) "Did not expect dep after workspace remove")))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME")))))
