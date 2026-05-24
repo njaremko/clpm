@@ -253,8 +253,9 @@ explicit resource operations.
 | `clpm help [command [subcommand ...]]` | Show help or command-specific help |
 | `clpm doctor` | Check environment and configuration |
 | `clpm project new <name> --workspace [--dir <path>]` | Create a workspace scaffold |
-| `clpm project new <name> --bin\|--lib [--dir <path>]` | Create a project scaffold |
-| `clpm project new <name> --bin\|--lib --member-of <workspace-dir>` | Create and register a workspace member |
+| `clpm project new <name> --bin\|--lib [--template <template>] [--dir <path>]` | Create a project scaffold |
+| `clpm project new <name> --bin\|--lib [--template <template>] --member-of <workspace-dir>` | Create and register a workspace member |
+| `clpm project new <name> --template coalton [--dir <path>\|--member-of <workspace-dir>]` | Create a Coalton project scaffold |
 | `clpm project init [name]` | Initialize new project |
 | `clpm project workspace init [--dir <path>]` | Initialize a workspace file |
 | `clpm project workspace add <member> [--dir <path>]` | Add a workspace member |

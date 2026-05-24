@@ -107,21 +107,32 @@ When not in a project, only the global config registries are used."
              (apply #'log-error fmt fmt-args)
              (log-error "Usage:")
              (log-error "  clpm project new <name> --workspace [--dir <path>]")
-             (log-error "  clpm project new <name> --bin|--lib [--dir <path>]")
-             (log-error "  clpm project new <name> --bin|--lib --member-of <workspace-dir>")
+             (log-error "  clpm project new <name> --bin|--lib [--template <template>] [--dir <path>]")
+             (log-error "  clpm project new <name> --bin|--lib [--template <template>] --member-of <workspace-dir>")
+             (log-error "  clpm project new <name> --template coalton [--dir <path>|--member-of <workspace-dir>]")
              (return-from cmd-new 1))
            (ensure-dir-arg (path)
              (uiop:ensure-directory-pathname
               (uiop:ensure-pathname (clpm.platform:expand-path path)
                                     :defaults (uiop:getcwd)
-                                    :want-existing nil))))
+                                    :want-existing nil)))
+           (parse-template-name (raw)
+             (cond
+               ((string= raw "common-lisp") :common-lisp)
+               ((string= raw "coalton") :coalton)
+               (t
+                (usage-error "Unknown project template: ~A" raw))))
+           (project-dependency (system)
+             (clpm.project:make-dependency :system system :constraint nil)))
     (let ((name (first args))
           (kind nil)
           (dir nil)
+          (template nil)
           (workspace-p nil)
           (member-of nil)
           (dir-seen nil)
-          (member-of-seen nil))
+          (member-of-seen nil)
+          (template-seen nil))
       (unless (and name (plusp (length name)) (not (char= (char name 0) #\-)))
         (usage-error "Missing project name"))
       ;; Parse flags
@@ -155,6 +166,14 @@ When not in a project, only the global config registries are used."
                (when (>= i (length args))
                  (usage-error "Missing value for --member-of"))
                (setf member-of (nth i args)))
+              ((string= arg "--template")
+               (when template-seen
+                 (usage-error "Duplicate option: --template"))
+               (setf template-seen t)
+               (incf i)
+               (when (>= i (length args))
+                 (usage-error "Missing value for --template"))
+               (setf template (parse-template-name (nth i args))))
               (t
                (usage-error "Unknown option: ~A" arg))))
           (incf i)))
@@ -163,26 +182,40 @@ When not in a project, only the global config registries are used."
         (usage-error "--workspace may not be combined with --bin/--lib"))
       (when (and workspace-p member-of)
         (usage-error "--workspace may not be combined with --member-of"))
+      (when (and workspace-p template-seen)
+        (usage-error "--workspace may not be combined with --template"))
+      (setf template (or template :common-lisp))
+      (when (and (eq template :coalton) (eq kind :bin))
+        (usage-error "Template coalton does not support --bin"))
+      (when (and (eq template :coalton) (null kind))
+        (setf kind :lib))
 
       (labels ((compute-base ()
                  (if dir
                      (ensure-dir-arg dir)
                      (uiop:getcwd)))
-               (make-project-scaffold (project-root)
+               (project-kind-label ()
+                 (case template
+                   (:coalton "coalton")
+                   (t (string-downcase (symbol-name kind)))))
+               (write-gitignore (project-root)
+                 (write-text
+                  (merge-pathnames ".gitignore" project-root)
+                  ".DS_Store
+.clpm/
+*.fasl
+*.fasl-tmp
+"))
+               (write-common-lisp-scaffold (project-root)
                  (let* ((src-dir (merge-pathnames "src/" project-root))
                         (test-dir (merge-pathnames "test/" project-root))
                         (asd-path (merge-pathnames (format nil "~A.asd" name) project-root))
                         (src-path (merge-pathnames (format nil "src/~A.lisp" name) project-root))
                         (test-path (merge-pathnames (format nil "test/~A-test.lisp" name) project-root))
-                        (gitignore-path (merge-pathnames ".gitignore" project-root))
                         (manifest-path (merge-pathnames "clpm.project" project-root)))
-                   (when (uiop:directory-exists-p project-root)
-                     (log-error "Destination already exists: ~A" (namestring project-root))
-                     (return-from cmd-new 1))
                    (ensure-directories-exist src-dir)
                    (ensure-directories-exist test-dir)
 
-                   ;; clpm.project
                    (let ((project (clpm.project:make-project
                                    :name name
                                    :version "0.1.0"
@@ -198,14 +231,6 @@ When not in a project, only the global config registries are used."
                                    :scripts nil)))
                      (clpm.project:write-project-file project manifest-path))
 
-                   ;; .gitignore
-                   (write-text gitignore-path ".DS_Store
-.clpm/
-*.fasl
-*.fasl-tmp
-")
-
-                   ;; ASDF system + test system.
                    (write-text
                     asd-path
                     (with-output-to-string (s)
@@ -246,7 +271,89 @@ When not in a project, only the global config registries are used."
                               name
                               (if (eq kind :bin)
                                   (format nil "(eql 0 (uiop:symbol-call :~A :main))" name)
-                                  (format nil "(eql :ok (uiop:symbol-call :~A :hello))" name))))))))
+                                  (format nil "(eql :ok (uiop:symbol-call :~A :hello))" name)))))))
+               (write-coalton-scaffold (project-root)
+                 (let* ((test-dir (merge-pathnames "test/" project-root))
+                        (asd-path (merge-pathnames (format nil "~A.asd" name) project-root))
+                        (package-path (merge-pathnames "package.lisp" project-root))
+                        (core-path (merge-pathnames "core.ct" project-root))
+                        (test-path (merge-pathnames "test/test.lisp" project-root))
+                        (manifest-path (merge-pathnames "clpm.project" project-root)))
+                   (ensure-directories-exist test-dir)
+                   (let ((project (clpm.project:make-project
+                                   :name name
+                                   :version "0.1.0"
+                                   :systems (list name)
+                                   :test (list :systems (list (format nil "~A/test" name)))
+                                   :depends (list (project-dependency "coalton")
+                                                  (project-dependency "named-readtables"))
+                                   :test-depends (list (project-dependency "coalton/testing")
+                                                       (project-dependency "fiasco"))
+                                   :scripts nil)))
+                     (clpm.project:write-project-file project manifest-path))
+                   (write-text
+                    asd-path
+                    (with-output-to-string (s)
+                      (format s ";;;; ~A.asd~%~%" name)
+                      (format s "(asdf:defsystem ~S~%  :version ~S~%  :description ~S~%  :defsystem-depends-on (~S)~%  :depends-on (~S ~S)~%  :serial t~%  :components ((:file ~S)~%               (:ct-file ~S))~%  :in-order-to ((asdf:test-op (asdf:test-op ~S))))~%~%"
+                              name
+                              "0.1.0"
+                              (format nil "Coalton project ~A." name)
+                              "coalton-asdf"
+                              "coalton"
+                              "named-readtables"
+                              "package"
+                              "core"
+                              (format nil "~A/test" name))
+                      (format s "(asdf:defsystem ~S~%  :depends-on (~S ~S ~S)~%  :pathname ~S~%  :serial t~%  :components ((:file ~S))~%  :perform (asdf:test-op (op c)~%             (declare (ignore op c))~%             (uiop:symbol-call :~A/test :run-tests)))~%"
+                              (format nil "~A/test" name)
+                              name
+                              "coalton/testing"
+                              "fiasco"
+                              "test/"
+                              "test"
+                              name)))
+                   (write-text
+                    package-path
+                    (with-output-to-string (s)
+                      (format s ";;;; package.lisp~%~%")
+                      (format s "(cl:defpackage #:~A~%  (:use #:coalton #:coalton-prelude)~%  (:export~%   #:Point~%   #:make-origin~%   #:distance-squared~%   #:add-two))~%"
+                              name)))
+                   (write-text
+                    core-path
+                    (with-output-to-string (s)
+                      (format s ";;;; core.ct~%~%")
+                      (format s "(cl:in-package #:~A)~%~%" name)
+                      (format s "(coalton-toplevel~%")
+                      (format s "  (define-struct Point~%    (x Integer)~%    (y Integer))~%~%")
+                      (format s "  (declare make-origin (Void -> Point))~%")
+                      (format s "  (define make-origin~%    (fn () (Point 0 0)))~%~%")
+                      (format s "  (declare distance-squared (Point -> Integer))~%")
+                      (format s "  (define (distance-squared p)~%    (+ (* (.x p) (.x p))~%       (* (.y p) (.y p))))~%~%")
+                      (format s "  (declare add-two (Integer -> Integer))~%")
+                      (format s "  (define (add-two x)~%    (+ x 2)))~%")))
+                   (write-text
+                    test-path
+                    (with-output-to-string (s)
+                      (format s ";;;; test/test.lisp~%~%")
+                      (format s "(cl:defpackage #:~A/test~%  (:use #:coalton #:coalton-prelude #:coalton-testing)~%  (:local-nicknames (#:sut #:~A))~%  (:export #:run-tests))~%~%"
+                              name name)
+                      (format s "(cl:in-package #:~A/test)~%" name)
+                      (format s "(named-readtables:in-readtable coalton:coalton)~%~%")
+                      (format s "(fiasco:define-test-package #:~A/fiasco-test-package)~%" name)
+                      (format s "(coalton-fiasco-init #:~A/fiasco-test-package)~%~%" name)
+                      (format s "(cl:defun run-tests ()~%  (fiasco:run-package-tests~%   :packages '(#:~A/fiasco-test-package)~%   :interactive cl:t))~%~%"
+                              name)
+                      (format s "(define-test add-two-test ()~%  (is (== 4 (sut:add-two 2))))~%~%")
+                      (format s "(define-test origin-distance-test ()~%  (is (== 0 (sut:distance-squared (sut:make-origin)))))~%")))))
+               (make-project-scaffold (project-root)
+                 (when (uiop:directory-exists-p project-root)
+                   (log-error "Destination already exists: ~A" (namestring project-root))
+                   (return-from cmd-new 1))
+                 (write-gitignore project-root)
+                 (ecase template
+                   (:common-lisp (write-common-lisp-scaffold project-root))
+                   (:coalton (write-coalton-scaffold project-root)))))
         (cond
           (workspace-p
            (let* ((base (compute-base))
@@ -303,22 +410,23 @@ When not in a project, only the global config registries are used."
                      (clpm.workspace:write-workspace-file ws ws-path))
                    (log-info "Added workspace member: ~A" member-rel)
                    (log-info "Created ~A project: ~A"
-                             (string-downcase (symbol-name kind))
+                             (project-kind-label)
                              (namestring project-root))
                    0))
                (let* ((base (compute-base))
                       (project-root (merge-pathnames (format nil "~A/" name) base)))
                  (make-project-scaffold project-root)
                  (log-info "Created ~A project: ~A"
-                           (string-downcase (symbol-name kind))
+                           (project-kind-label)
                            (namestring project-root))
                  0))))))))
 
 (defun %emit-project-usage (emit)
   (funcall emit "Usage:")
   (funcall emit "  clpm project new <name> --workspace [--dir <path>]")
-  (funcall emit "  clpm project new <name> --bin|--lib [--dir <path>]")
-  (funcall emit "  clpm project new <name> --bin|--lib --member-of <workspace-dir>")
+  (funcall emit "  clpm project new <name> --bin|--lib [--template <template>] [--dir <path>]")
+  (funcall emit "  clpm project new <name> --bin|--lib [--template <template>] --member-of <workspace-dir>")
+  (funcall emit "  clpm project new <name> --template coalton [--dir <path>|--member-of <workspace-dir>]")
   (funcall emit "  clpm project init [name]")
   (funcall emit "  clpm project workspace init [--dir <path>]")
   (funcall emit "  clpm project workspace add <member> [--dir <path>]")
@@ -6063,6 +6171,7 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "```sh"
     "clpm project new my-app --bin"
     "clpm project new my-lib --lib"
+    "clpm project new my-coalton-lib --template coalton"
     "clpm project init my-existing-project"
     "```"
     ""
@@ -6290,8 +6399,13 @@ sub-subcommand=\"set\")."
            ((and sub (string= sub "new"))
             (p "Usage:")
             (p "  clpm project new <name> --workspace [--dir <path>]")
-            (p "  clpm project new <name> --bin|--lib [--dir <path>]")
-            (p "  clpm project new <name> --bin|--lib --member-of <workspace-dir>")
+            (p "  clpm project new <name> --bin|--lib [--template <template>] [--dir <path>]")
+            (p "  clpm project new <name> --bin|--lib [--template <template>] --member-of <workspace-dir>")
+            (p "  clpm project new <name> --template coalton [--dir <path>|--member-of <workspace-dir>]")
+            (p "")
+            (p "Templates:")
+            (p "  common-lisp  Common Lisp scaffold used by --bin and --lib.")
+            (p "  coalton      Coalton library scaffold with .ct source and tests.")
             0)
            ((and sub (string= sub "init"))
             (p "Usage: clpm project init [name]")

@@ -41,6 +41,11 @@
                needle
                haystack))
 
+(defun find-dep (deps system)
+  (find system deps
+        :key #'clpm.project:dependency-system
+        :test #'string=))
+
 (defun run-cli-captured (args)
   (let ((out (make-string-output-stream))
         (err (make-string-output-stream)))
@@ -74,7 +79,8 @@
 (clpm.store:with-temp-dir (tmp)
   (let* ((workspace (merge-pathnames "ws/" tmp))
          (bin-root (merge-pathnames "binproj/" workspace))
-         (lib-root (merge-pathnames "libproj/" workspace)))
+         (lib-root (merge-pathnames "libproj/" workspace))
+         (coalton-root (merge-pathnames "coalproj/" workspace)))
     (ensure-directories-exist workspace)
 
     ;; Singleton value options must reject duplicates before creating files.
@@ -96,6 +102,18 @@
              "--member-of" (namestring member-a)
              "--member-of" (namestring member-b))
        "--member-of"))
+
+    (assert-duplicate-option
+     (list "project" "new" "duptemplate" "--lib"
+           "--template" "common-lisp"
+           "--template" "coalton")
+     "--template")
+
+    (multiple-value-bind (code stdout stderr)
+        (run-cli-captured '("project" "new" "badtemplate" "--template" "missing"))
+      (declare (ignore stdout))
+      (assert-eql 1 code)
+      (assert-contains stderr "Unknown project template: missing"))
 
     ;; --bin
     (uiop:with-current-directory (workspace)
@@ -149,7 +167,41 @@
         (assert-true (equal '("libproj/test") (getf test :systems))
                      "Unexpected :test :systems: ~S" (getf test :systems)))
       (assert-true (null (clpm.project:project-package p))
-                   "Did not expect :package metadata for --lib project"))))
+                   "Did not expect :package metadata for --lib project"))
+
+    ;; --template coalton
+    (uiop:with-current-directory (workspace)
+      (assert-eql 0 (clpm:run-cli '("project" "new" "coalproj" "--template" "coalton"))))
+    (assert-true (uiop:directory-exists-p coalton-root) "Expected Coalton project dir")
+    (dolist (rel '(".gitignore" "clpm.project" "coalproj.asd" "package.lisp" "core.ct" "test/test.lisp"))
+      (assert-true (uiop:file-exists-p (merge-pathnames rel coalton-root))
+                   "Missing Coalton scaffold file: ~A" rel))
+    (assert-gitignore coalton-root)
+    (assert-contains (uiop:read-file-string (merge-pathnames "coalproj.asd" coalton-root))
+                     ":defsystem-depends-on (\"coalton-asdf\")")
+    (assert-contains (uiop:read-file-string (merge-pathnames "package.lisp" coalton-root))
+                     "(:use #:coalton #:coalton-prelude)")
+    (assert-contains (uiop:read-file-string (merge-pathnames "core.ct" coalton-root))
+                     "(coalton-toplevel")
+    (assert-contains (uiop:read-file-string (merge-pathnames "test/test.lisp" coalton-root))
+                     "(coalton-fiasco-init #:coalproj/fiasco-test-package)")
+    (let ((p (clpm.project:read-project-file (merge-pathnames "clpm.project" coalton-root))))
+      (assert-true (string= "coalproj" (clpm.project:project-name p))
+                   "Unexpected project name: ~S" (clpm.project:project-name p))
+      (assert-true (equal '("coalproj") (clpm.project:project-systems p))
+                   "Unexpected project systems: ~S" (clpm.project:project-systems p))
+      (assert-true (null (clpm.project:project-run p))
+                   "Did not expect :run metadata for Coalton project")
+      (assert-true (null (clpm.project:project-package p))
+                   "Did not expect :package metadata for Coalton project")
+      (assert-true (find-dep (clpm.project:project-depends p) "coalton")
+                   "Expected coalton runtime dependency")
+      (assert-true (find-dep (clpm.project:project-depends p) "named-readtables")
+                   "Expected named-readtables runtime dependency")
+      (assert-true (find-dep (clpm.project:project-test-depends p) "coalton/testing")
+                   "Expected coalton/testing test dependency")
+      (assert-true (find-dep (clpm.project:project-test-depends p) "fiasco")
+                   "Expected fiasco test dependency"))))
 
 (format t "  `clpm project new` scaffolding PASSED~%")
 (format t "~%New command tests PASSED!~%")
