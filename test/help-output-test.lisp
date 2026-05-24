@@ -148,6 +148,7 @@
   (assert-contains stdout "clpm project workspace add <member> [--dir <path>]")
   (assert-contains stdout "clpm project workspace remove <member> [--dir <path>]")
   (assert-contains stdout "clpm project workspace list [--dir <path>]")
+  (assert-contains stdout "clpm project workspace deps <add|remove|list> ...")
   (assert-not-contains stdout "clpm project workspace <init|add|remove|list> ..."
                        "project help still exposes workspace as a residual subgrammar:~%~A"
                        stdout))
@@ -160,6 +161,7 @@
   (assert-eql 1 code)
   (assert-contains stderr "clpm project workspace init [--dir <path>]")
   (assert-contains stderr "clpm project workspace add <member> [--dir <path>]")
+  (assert-contains stderr "clpm project workspace deps <add|remove|list> ...")
   (assert-not-contains stderr "clpm project workspace <init|add|remove|list> ..."
                        "project arity error still exposes workspace as a residual subgrammar:~%~A"
                        stderr))
@@ -271,6 +273,15 @@
   (declare (ignore stderr))
   (assert-eql 0 code)
   (assert-contains stdout "Usage: clpm project workspace remove"))
+
+;; workspace deps: dedicated nested umbrella page.
+(multiple-value-bind (code stdout stderr)
+    (run-cli-captured '("help" "project" "workspace" "deps"))
+  (declare (ignore stderr))
+  (assert-eql 0 code)
+  (assert-contains stdout "clpm project workspace deps add")
+  (assert-contains stdout "clpm project workspace deps remove")
+  (assert-contains stdout "clpm project workspace deps list"))
 
 ;; keys generate: focused on the generate subcommand.
 (multiple-value-bind (code stdout stderr)
@@ -519,9 +530,10 @@
   (assert-eql 1 code)
   (assert-contains stderr "Unknown command"))
 (dolist (args '(("help" "deps" "bogus")
-                ("help" "registry" "trust" "bogus")
-                ("help" "registry" "trust" "set" "extra")
-                ("help" "project" "workspace" "bogus")))
+	                ("help" "registry" "trust" "bogus")
+	                ("help" "registry" "trust" "set" "extra")
+	                ("help" "project" "workspace" "deps" "add")
+	                ("help" "project" "workspace" "bogus")))
   (multiple-value-bind (code stdout stderr)
       (run-cli-captured args)
     (declare (ignore stdout))

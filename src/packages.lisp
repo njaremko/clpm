@@ -228,6 +228,10 @@
            #:make-workspace
            #:workspace-format
            #:workspace-members
+           #:workspace-depends
+           #:workspace-dependency-marker-p
+           #:workspace-dependency-for-system
+           #:expand-project-workspace-dependencies
            #:read-workspace-file
            #:write-workspace-file
            #:find-workspace-root

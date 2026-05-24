@@ -362,7 +362,9 @@ each group ordering is alphabetical for determinism."
                                                   (uiop:ensure-directory-pathname root-dir))))
                    (when (uiop:file-exists-p manifest)
                      (handler-case
-                         (clpm.project:read-project-file manifest)
+                         (clpm.workspace:expand-project-workspace-dependencies
+                          (clpm.project:read-project-file manifest)
+                          manifest)
                        (error (c)
                          (signal-conflict state system-id constraint
                                           (format nil "Failed to read ~A: ~A"

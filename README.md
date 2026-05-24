@@ -193,6 +193,26 @@ The `clpm.project` file is a data-only S-expression:
 - `(:exact "1.2.3")` - Exact version
 - `(:git :url "..." :ref "...")` - Git source override
 - `(:path "../local-lib")` - Local path override
+- `"workspace"` - Use the matching dependency declared in `clpm.workspace`
+
+Workspace dependency declarations let a workspace pin a local or external
+dependency once and let each member opt into it by system name:
+
+```lisp
+;; clpm.workspace
+(:workspace
+  :format 1
+  :members ("app" "lib" "hegel-cl")
+  :depends
+    ((:dep :system "hegel-cl" :constraint (:path "hegel-cl"))))
+
+;; lib/clpm.project
+(:dep :system "hegel-cl" :constraint "workspace")
+```
+
+For path declarations, CLPM resolves the workspace-level path relative to the
+workspace root before solving, so the member project does not need its own
+`../...` path spelling. The CLI shorthand is `clpm deps add hegel-cl@workspace`.
 
 ### Quicklisp caveats
 
@@ -261,8 +281,11 @@ explicit resource operations.
 | `clpm project workspace add <member> [--dir <path>]` | Add a workspace member |
 | `clpm project workspace remove <member> [--dir <path>]` | Remove a workspace member |
 | `clpm project workspace list [--dir <path>]` | List workspace members |
+| `clpm project workspace deps add [--dir <path>] [--path <dir>\|--workspace <member>\|--git <url> --ref <ref>] [<system>]` | Add a workspace-level dependency |
+| `clpm project workspace deps remove [--dir <path>] <system>` | Remove a workspace-level dependency |
+| `clpm project workspace deps list [--dir <path>]` | List workspace-level dependencies |
 | `clpm project package` | Build a distributable executable |
-| `clpm deps add [--dev\|--test] [--any\|--caret] [--path <dir>\|--workspace <member>\|--git <url> --ref <ref>] [<system>...]` | Add one or more dependencies |
+| `clpm deps add [--dev\|--test] [--any\|--caret] [--path <dir>\|--workspace <member>\|--git <url> --ref <ref>] [<system>[@^<semver>\|@=<exact>\|@workspace]...]` | Add one or more dependencies |
 | `clpm deps remove [--dev\|--test] [--workspace <member>] [<system>]` | Remove a dependency |
 | `clpm deps sync [--to lock\|source\|build\|active]` | Resolve, fetch, build, and activate by stage |
 | `clpm deps update [--workspace <member>] [system ...]` | Update dependencies |
