@@ -48,6 +48,10 @@
   (assert-contains readme ":constraint \"workspace\"")
   (assert-contains readme "clpm registry trust refresh <name>")
   (assert-contains readme "clpm repl eval <form> --debug [debug-options]")
+  (assert-contains readme "call watch-system --name SYSTEM` watches ASDF")
+  (assert-contains readme "component files and reloads the system through ASDF")
+  (assert-not-contains readme "--auto-revert")
+  (assert-not-contains readme "revert-applied")
   (assert-not-contains readme "clpm project workspace <init\\|add\\|remove\\|list> ...")
   (assert-not-contains readme "clpm registry <add\\|list\\|update\\|trust\\|init\\|key\\|publish> ...")
   (assert-not-contains readme "clpm repl <daemon\\|eval\\|call> ...")
@@ -63,6 +67,13 @@
   (assert-not-contains bridge "with `--pretty`")
   (assert-not-contains bridge "Default mode is raw JSON")
   (format t "  Bridge docs PASSED~%"))
+
+(let ((algebra (read-file-string (merge-pathnames "BRIDGE_ALGEBRA.md" *repo-root*))))
+  (format t "Testing bridge algebra docs...~%")
+  (assert-contains algebra "watch-system/asdf-reload")
+  (assert-not-contains algebra "auto-revert")
+  (assert-not-contains algebra "revert-applied")
+  (format t "  Bridge algebra docs PASSED~%"))
 
 (let ((skill (read-file-string
               (merge-pathnames ".claude/skills/clpm-repl-bridge.md"

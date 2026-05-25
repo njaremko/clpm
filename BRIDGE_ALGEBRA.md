@@ -671,10 +671,11 @@ forall watch file.
 ```
 
 ```haskell
-Law: "watch/auto-revert"
-forall watch file.
-  autoRevert watch and successful reload file
-  => Tick emits revert-applied for file
+Law: "watch-system/asdf-reload"
+forall system files.
+  files are ASDF source files for system and any mtimeIncreased files
+  => Tick eventually emits system-reloaded or system-reload-failed
+     and successful reload mutates image as ASDF LoadSystem system
 ```
 
 ```haskell
@@ -973,8 +974,8 @@ JSON for decoder tests.
 8. Inspector laws: open/into/pop/page/eval/close satisfy zipper behavior on
    lists, vectors, hash tables, and objects with bounded rendering.
 9. Watch laws: watch acknowledgement creates a discoverable watch; unwatch is
-   idempotent; file modification emits reload or failure; auto-revert emits
-   revert-applied after successful load.
+   idempotent; file modification emits reload or failure; system watches batch
+   ASDF source modifications into ASDF system reloads.
 10. CLI morphism: `call METHOD` produces the same frames as directly
     dispatching the typed action for METHOD; all old wrapper names are absent
     or documented as recipes.

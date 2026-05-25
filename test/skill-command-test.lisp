@@ -72,8 +72,11 @@
   (assert-true (not (search "clpm repl call macroexpand --form '(my-macro x)' --full true" stdout :test #'char-equal))
                "skill output still advertises invalid macroexpand parameter:~%~A"
                stdout)
-  (assert-contains stdout "clpm repl call watch --dir /absolute/path/to/src --glob '*.lisp' --auto-revert true")
-  (assert-contains stdout "clpm repl call watch-system --name my-app --glob '*.lisp' --auto-revert true")
+  (assert-contains stdout "clpm repl call watch --dir /absolute/path/to/src --glob '*.lisp'")
+  (assert-contains stdout "clpm repl call watch-system --name my-app")
+  (assert-true (not (search "--auto-revert" stdout :test #'char-equal))
+               "skill output still advertises fake auto-revert semantics:~%~A"
+               stdout)
   (assert-true (not (search "clpm repl call watch --dir src" stdout :test #'char-equal))
                "skill output still advertises a relative watch directory:~%~A"
                stdout)

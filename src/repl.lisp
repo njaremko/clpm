@@ -2915,24 +2915,32 @@ unwinds. Any in-flight evals are interrupted via the unwind-protect."
 ;;; ----------------------------------------------------------------------------
 ;;; File watching (BRIDGE_V2 #180-#182)
 ;;;
-;;; A watch is a background thread that polls a directory's `*.glob`
-;;; entries every 1 s. On mtime change the watcher LOADs the file (so
-;;; redefinitions land in-image) and streams `event: file-changed' /
-;;; `event: file-reloaded' / `event: reload-failed' frames back through
-;;; the original `watch' request's context. The terminal `result' frame
-;;; is emitted by the watcher thread itself when an `unwatch' arrives.
+;;; A file watch is a background thread that polls a directory's `*.glob`
+;;; entries every 1 s. On mtime change the watcher LOADs the file and
+;;; streams `event: file-reloaded' / `event: reload-failed' frames back
+;;; through the original `watch' request's context.
 ;;;
-;;; Auto-revert (#182): if AUTO-REVERT? is set, any definition recorded
-;;; in the current worker's redefinition log that points at the watched
-;;; file is re-evaluated from disk. Today that's equivalent to "load
-;;; the file"; the simple path keeps the on-disk version authoritative.
+;;; A system watch polls the concrete source files from ASDF's component
+;;; graph. On mtime change it debounces the batch and reloads with
+;;; `asdf:load-system', so component ordering, macros, and dependents stay
+;;; under ASDF's semantics instead of direct-loading one changed file.
+;;; The terminal `result' frame is emitted by the watcher thread itself
+;;; when an `unwatch' arrives.
 ;;; ----------------------------------------------------------------------------
+
+(defconstant +watch-poll-seconds+ 1)
+(defconstant +system-watch-debounce-seconds+ 1)
 
 (defstruct watch
   (id 0 :type integer)
+  (kind :file :type keyword)
   (dir "" :type string)
   (glob "*.lisp" :type string)
-  (auto-revert? nil :type boolean)
+  system-name
+  system-source-file
+  source-files
+  pending-files
+  pending-reload-at
   ctx
   thread
   control-mailbox
@@ -2943,19 +2951,114 @@ unwinds. Any in-flight evals are interrupted via the unwind-protect."
   "Return the wild pathname used by `directory' to enumerate matches."
   (merge-pathnames glob (uiop:ensure-directory-pathname dir)))
 
+(defun %watch-file-namestring (path)
+  (handler-case (namestring (truename path))
+    (error () (namestring path))))
+
 (defun %watch-scan (watch)
   "Compute a fresh `(filename . write-date)' alist of matching files."
-  (let ((files (handler-case
-                   (directory (%watch-pattern (watch-dir watch)
-                                              (watch-glob watch)))
-                 (error () nil))))
-    (loop for f in files
-          for tn = (handler-case (namestring (truename f))
-                     (error () nil))
-          for mt = (and tn (handler-case (file-write-date f)
-                             (error () nil)))
-          when (and tn mt)
-            collect (cons tn mt))))
+  (flet ((existing-file-mtime (path)
+           (let ((tn (handler-case (namestring (truename path))
+                       (error () nil))))
+             (when tn
+               (let ((mt (handler-case (file-write-date tn)
+                           (error () nil))))
+                 (when mt (cons tn mt)))))))
+    (cond
+      ((eq (watch-kind watch) :system)
+       (loop for path in (watch-source-files watch)
+             for cell = (existing-file-mtime path)
+             when cell collect cell))
+      (t
+       (let ((files (handler-case
+                        (directory (%watch-pattern (watch-dir watch)
+                                                   (watch-glob watch)))
+                      (error () nil))))
+         (loop for f in files
+               for cell = (existing-file-mtime f)
+               when cell collect cell))))))
+
+(defun %string-suffix-p (string suffix &key (test #'char=))
+  (let ((slen (length string))
+        (suflen (length suffix)))
+    (and (>= slen suflen)
+         (loop for i from 0 below suflen
+               always (funcall test
+                               (char string (+ (- slen suflen) i))
+                               (char suffix i))))))
+
+(defun %file-name-matches-glob-p (path glob)
+  "Return true when PATH's file namestring matches the simple basename GLOB."
+  (let ((name (file-namestring path)))
+    (cond
+      ((or (null glob) (string= glob "*")) t)
+      ((and (plusp (length glob))
+            (char= (char glob 0) #\*)
+            (not (find #\* glob :start 1)))
+       (%string-suffix-p name (subseq glob 1) :test #'char-equal))
+      ((not (find #\* glob))
+       (string-equal name glob))
+      (t nil))))
+
+(defun %asdf-component-children (component)
+  (handler-case (asdf:component-children component)
+    (error () nil)))
+
+(defun %asdf-component-pathname (component)
+  (handler-case (asdf:component-pathname component)
+    (error () nil)))
+
+(defun %asdf-component-source-files (component glob)
+  "Return concrete source file namestrings from COMPONENT's ASDF tree."
+  (let ((children (%asdf-component-children component)))
+    (cond
+      (children
+       (mapcan (lambda (child)
+                 (%asdf-component-source-files child glob))
+               children))
+      (t
+       (let ((path (%asdf-component-pathname component)))
+         (when (and path
+                    (pathname-name path)
+                    (%file-name-matches-glob-p path glob))
+           (list (namestring path))))))))
+
+(defun %asdf-system-source-files (system glob)
+  "Return unique source files that should trigger an ASDF reload for SYSTEM."
+  (let ((seen (make-hash-table :test 'equal))
+        (files '()))
+    (flet ((add-file (path)
+             (when path
+               (let ((name (%watch-file-namestring path)))
+                 (unless (gethash name seen)
+                   (setf (gethash name seen) t)
+                   (push name files))))))
+      ;; Always watch the .asd file; it defines the component graph and may not
+      ;; match the component source glob.
+      (add-file (handler-case (asdf:system-source-file system)
+                  (error () nil)))
+      (dolist (file (%asdf-component-source-files system glob))
+        (add-file file)))
+    (nreverse files)))
+
+(defun %refresh-system-watch-files (watch)
+  "Refresh WATCH's ASDF source file set and seed mtimes for newly known files."
+  (let ((system (asdf:find-system (watch-system-name watch) nil)))
+    (when system
+      (setf (watch-source-files watch)
+            (%asdf-system-source-files system (watch-glob watch))
+            (watch-system-source-file watch)
+            (let ((source (handler-case (asdf:system-source-file system)
+                            (error () nil))))
+              (and source (%watch-file-namestring source)))
+            (watch-dir watch)
+            (let ((dir (handler-case (asdf:system-source-directory system)
+                         (error () nil))))
+              (if dir (namestring dir) "")))
+      (clrhash (watch-mtimes watch))
+      (loop for (path . mtime) in (%watch-scan watch)
+            do (setf (gethash path (watch-mtimes watch)) mtime))
+      t)))
 
 (defun %watch-load-file (path)
   "Load PATH and return `(list :ok? :diagnostics)' for the watcher to
@@ -2987,47 +3090,109 @@ still attached. Failures (closed socket) are swallowed."
     (when ctx
       (apply #'%emit-event ctx event-name fields))))
 
-(defun %watch-revert-from-file (watch path diagnostics)
-  "When AUTO-REVERT? is set, emit a `revert-applied' event after the
-load so clients can see that the on-disk version is now authoritative.
-The actual revert is implicit in the load that just succeeded."
-  (declare (ignore diagnostics))
-  (when (watch-auto-revert? watch)
-    (let ((target (handler-case (namestring (truename path))
-                    (error () path))))
-      (%watch-emit watch "revert-applied" "file" target))))
+(defun %watch-condition-json (severity condition)
+  (%json-object
+   "severity" severity
+   "message" (handler-case (princ-to-string condition)
+               (error () "<unprintable>"))))
+
+(defun %watch-update-mtimes (watch)
+  "Update WATCH's mtime table. Return changed and removed file namestrings."
+  (let* ((scan (%watch-scan watch))
+         (now (make-hash-table :test 'equal))
+         (mtimes (watch-mtimes watch))
+         (changed '())
+         (removed '()))
+    (loop for (f . mt) in scan do (setf (gethash f now) mt))
+    (loop for f being the hash-keys of now using (hash-value mt)
+          for prior = (gethash f mtimes)
+          when (or (null prior) (> mt prior))
+            do (push f changed)
+               (setf (gethash f mtimes) mt))
+    (loop for f being the hash-keys of mtimes
+          unless (gethash f now)
+            do (push f removed)
+               (remhash f mtimes))
+    (values (nreverse changed) (nreverse removed))))
+
+(defun %watch-load-changed-file (watch path)
+  (let ((reload (%watch-load-file path)))
+    (cond
+      ((cdr (assoc :ok? reload))
+       (%watch-emit watch "file-reloaded"
+                    "file" path
+                    "diagnostics"
+                    (%json-array (cdr (assoc :diagnostics reload)))))
+      (t
+       (%watch-emit watch "reload-failed"
+                    "file" path
+                    "diagnostics"
+                    (%json-array (cdr (assoc :diagnostics reload))))))))
+
+(defun %queue-system-reload (watch files)
+  (when files
+    (let ((seen (make-hash-table :test 'equal))
+          (merged '()))
+      (dolist (file (append (watch-pending-files watch) files))
+        (unless (gethash file seen)
+          (setf (gethash file seen) t)
+          (push file merged)))
+      (setf (watch-pending-files watch) (nreverse merged)
+            (watch-pending-reload-at watch)
+            (+ (get-internal-real-time)
+               (* +system-watch-debounce-seconds+
+                  internal-time-units-per-second))))))
+
+(defun %system-reload-due-p (watch)
+  (let ((due (watch-pending-reload-at watch)))
+    (and due (>= (get-internal-real-time) due))))
+
+(defun %changed-system-definition-p (watch files)
+  (let ((source (watch-system-source-file watch)))
+    (and source (member source files :test #'string=))))
+
+(defun %run-system-watch-reload (watch)
+  "Reload WATCH's ASDF system once for its queued changed files."
+  (let ((files (watch-pending-files watch))
+        (diagnostics '())
+        (system-name (watch-system-name watch)))
+    (setf (watch-pending-files watch) nil
+          (watch-pending-reload-at watch) nil)
+    (handler-case
+        (handler-bind ((warning
+                         (lambda (c)
+                           (push (%watch-condition-json "warning" c)
+                                 diagnostics))))
+          (when (%changed-system-definition-p watch files)
+            (asdf:clear-system system-name))
+          (asdf:load-system system-name :verbose nil)
+          (%refresh-system-watch-files watch)
+          (%watch-emit watch "system-reloaded"
+                       "system" system-name
+                       "files" (%json-array files)
+                       "diagnostics" (%json-array (nreverse diagnostics))))
+      (error (c)
+        (push (%watch-condition-json "error" c) diagnostics)
+        (%watch-emit watch "system-reload-failed"
+                     "system" system-name
+                     "files" (%json-array files)
+                     "diagnostics" (%json-array (nreverse diagnostics)))))))
 
 (defun %watch-poll (watch)
   "Compare current scan with WATCH's tracked mtimes; emit events for
 added / modified / deleted files."
-  (let* ((scan (%watch-scan watch))
-         (now (make-hash-table :test 'equal))
-         (mtimes (watch-mtimes watch)))
-    (loop for (f . mt) in scan do (setf (gethash f now) mt))
-    ;; Added / modified.
-    (loop for f being the hash-keys of now using (hash-value mt)
-          for prior = (gethash f mtimes)
-          when (or (null prior) (> mt prior))
-            do (let ((reload (%watch-load-file f)))
-                 (cond
-                   ((cdr (assoc :ok? reload))
-                    (%watch-emit watch "file-reloaded"
-                                 "file" f
-                                 "diagnostics"
-                                 (%json-array (cdr (assoc :diagnostics reload))))
-                    (%watch-revert-from-file watch f
-                                              (cdr (assoc :diagnostics reload))))
-                   (t
-                    (%watch-emit watch "reload-failed"
-                                 "file" f
-                                 "diagnostics"
-                                 (%json-array (cdr (assoc :diagnostics reload)))))))
-             (setf (gethash f mtimes) mt))
-    ;; Removed.
-    (loop for f being the hash-keys of mtimes
-          unless (gethash f now)
-            do (%watch-emit watch "file-removed" "file" f)
-               (remhash f mtimes))))
+  (multiple-value-bind (changed removed)
+      (%watch-update-mtimes watch)
+    (dolist (file removed)
+      (%watch-emit watch "file-removed" "file" file))
+    (cond
+      ((eq (watch-kind watch) :system)
+       (%queue-system-reload watch (append changed removed))
+       (when (%system-reload-due-p watch)
+         (%run-system-watch-reload watch)))
+      (t
+       (dolist (file changed)
+         (%watch-load-changed-file watch file))))))
 
 (defun %watch-loop (server watch)
   "Daemon thread for one watch. Polls every second; exits when its
@@ -3036,9 +3201,10 @@ out so the watcher's `watch' request finally completes."
   (let ((mbox (watch-control-mailbox watch)))
     (%watch-emit watch "watch-started"
                  "id" (watch-id watch)
+                 "kind" (string-downcase (symbol-name (watch-kind watch)))
                  "dir" (watch-dir watch)
                  "glob" (watch-glob watch)
-                 "auto_revert" (watch-auto-revert? watch))
+                 "system" (watch-system-name watch))
     ;; Seed the mtime map so the first poll doesn't fire a flood of
     ;; "file-reloaded" events for files that haven't actually changed
     ;; since the watch started.
@@ -3063,19 +3229,23 @@ out so the watcher's `watch' request finally completes."
       (handler-case (%watch-poll watch)
         (error (c)
           (%watch-emit watch "watch-error" "message" (princ-to-string c))))
-      (sleep 1))))
+      (sleep +watch-poll-seconds+))))
 
-(defun %make-watch (server dir glob auto-revert? ctx)
+(defun %make-watch (server &key (kind :file) dir (glob "*.lisp") system-name
+                            source-files system-source-file ctx)
   "Spawn a fresh watch, register it, and start its polling thread."
   (clpm.repl.compat:with-mutex ((server-watches-mutex server))
     (let* ((id (incf (server-watch-counter server)))
-           (w (make-watch :id id
-                          :dir dir
-                          :glob glob
-                          :auto-revert? auto-revert?
-                          :ctx ctx
-                          :control-mailbox
-                          (clpm.repl.compat:make-mailbox))))
+            (w (make-watch :id id
+                           :kind kind
+                           :dir dir
+                           :glob glob
+                           :system-name system-name
+                           :system-source-file system-source-file
+                           :source-files source-files
+                           :ctx ctx
+                           :control-mailbox
+                           (clpm.repl.compat:make-mailbox))))
       (setf (watch-thread w)
             (clpm.repl.compat:make-thread
              (let ((owner server))
@@ -3104,69 +3274,62 @@ out so the watcher's `watch' request finally completes."
   :name "watch"
   :summary "Spawn a directory watcher that reloads matching files on save."
   :doc "Required: `dir' (absolute path). Optional: `glob' (default
-\"*.lisp\") and `auto_revert' (default false). Returns immediately
-with `{id, dir, glob}', then streams `event: file-reloaded' / `event:
-reload-failed' / `event: file-removed' / `event: revert-applied'
+\"*.lisp\"). Returns immediately with `{id, dir, glob}', then streams
+`event: file-reloaded' / `event: reload-failed' / `event: file-removed'
 frames as files on disk change. Polls at 1 s.
 
 The terminal `result' frame is emitted when `unwatch ID' is called or
-when the daemon shuts down.
-
-With `auto_revert: true', the watcher emits a `revert-applied' event
-listing in-image definitions originally recorded as coming from the
-reloaded file -- those definitions are now equivalent to the on-disk
-version (because the file was just LOADed)."
+when the daemon shuts down. This is a file-level watcher; it direct-LOADs
+the changed file and deliberately does not apply ASDF component semantics."
   :params (list (list :name "dir" :type :string :required t
                       :description "Directory to watch.")
                 (list :name "glob" :type :string :required nil
-                      :description "Filename glob (default \"*.lisp\").")
-                (list :name "auto_revert" :type :boolean :required nil
-                      :description "Emit revert-applied events for matching definitions."))
+                      :description "Filename glob (default \"*.lisp\")."))
   :handler
   (lambda (server params id ctx)
     (let* ((dir (%json-getf params "dir"))
-           (glob (or (%json-getf params "glob") "*.lisp"))
-           (auto-revert? (%json-true-p (%json-getf params "auto_revert"))))
+           (glob (or (%json-getf params "glob") "*.lisp")))
       (cond
         ((not (stringp dir))
          (%error-response id "protocol-error" "missing `dir' param"))
         ((not (probe-file (uiop:ensure-directory-pathname dir)))
          (%error-response id "eval-error"
-                          (format nil "no such directory: ~A" dir)))
+                           (format nil "no such directory: ~A" dir)))
         (t
-         (let ((w (%make-watch server dir glob auto-revert? ctx)))
+         (let ((w (%make-watch server :kind :file :dir dir :glob glob
+                               :ctx ctx)))
            ;; Emit the head of the stream immediately so the client
            ;; knows the watch id. We return NIL from this handler so
            ;; the dispatcher does NOT close the request -- the watcher
            ;; thread keeps the ctx alive and finalizes via unwatch.
-            (%emit-watch-acknowledged ctx w)
-            nil)))))))
+           (%emit-watch-acknowledged ctx w)
+           nil)))))))
 
 (defun %emit-watch-acknowledged (ctx watch)
   (%emit-event ctx "watch-acknowledged"
                "id" (watch-id watch)
+               "kind" (string-downcase (symbol-name (watch-kind watch)))
                "dir" (watch-dir watch)
                "glob" (watch-glob watch)
-               "auto_revert" (watch-auto-revert? watch)))
+               "system" (watch-system-name watch)))
 
 (%register-method
  (make-method-spec
   :name "watch-system"
-  :summary "Watch an ASDF system's source directory and reload changed files."
+  :summary "Watch ASDF component files and reload the system on save."
   :doc "Required: `name' (ASDF system name). Optional: `glob' (default
-\"*.lisp\") and `auto_revert' (default false). Resolves the system with
-ASDF, watches its source directory, and streams the same events as `watch'."
+\"*.lisp\") for component source basenames. Resolves the system with ASDF,
+watches its .asd file and component source files, and debounces changed files
+into one `asdf:load-system' call. Streams `event: system-reloaded' or
+`event: system-reload-failed' with the changed file list."
   :params (list (list :name "name" :type :string :required t
                       :description "ASDF system name.")
                 (list :name "glob" :type :string :required nil
-                      :description "Filename glob (default \"*.lisp\").")
-                (list :name "auto_revert" :type :boolean :required nil
-                      :description "Emit revert-applied events for matching definitions."))
+                      :description "Component source basename glob (default \"*.lisp\")."))
   :handler
   (lambda (server params id ctx)
     (let* ((name (%json-getf params "name"))
-           (glob (or (%json-getf params "glob") "*.lisp"))
-           (auto-revert? (%json-true-p (%json-getf params "auto_revert"))))
+           (glob (or (%json-getf params "glob") "*.lisp")))
       (cond
         ((not (stringp name))
          (%error-response id "protocol-error" "missing `name' param"))
@@ -3183,8 +3346,19 @@ ASDF, watches its source directory, and streams the same events as `watch'."
                   (%error-response id "eval-error"
                                    (format nil "system has no source directory: ~A" name)))
                  (t
-                  (let ((w (%make-watch server (namestring dir) glob
-                                        auto-revert? ctx)))
+                  (let* ((source-file (handler-case (asdf:system-source-file system)
+                                        (error () nil)))
+                         (w (%make-watch
+                             server
+                             :kind :system
+                             :dir (namestring dir)
+                             :glob glob
+                             :system-name name
+                             :system-source-file (and source-file
+                                                      (%watch-file-namestring
+                                                       source-file))
+                             :source-files (%asdf-system-source-files system glob)
+                             :ctx ctx)))
                     (%emit-watch-acknowledged ctx w)
                     nil))))
            (error (c)
@@ -3194,7 +3368,7 @@ ASDF, watches its source directory, and streams the same events as `watch'."
  (make-method-spec
   :name "list-watches"
   :summary "Return every active directory watcher."
-  :doc "Returns `{entries: [{id, dir, glob, auto_revert, alive}, ...]}'."
+  :doc "Returns `{entries: [{id, kind, dir, glob, system, alive}, ...]}'."
   :params nil
   :handler
   (lambda (server params id ctx)
@@ -3205,14 +3379,15 @@ ASDF, watches its source directory, and streams the same events as `watch'."
       "entries"
       (%json-array
        (mapcar (lambda (w)
-                 (%json-object
-                  "id" (watch-id w)
-                  "dir" (watch-dir w)
-                  "glob" (watch-glob w)
-                  "auto_revert" (watch-auto-revert? w)
-                  "alive" (and (watch-thread w)
-                               (clpm.repl.compat:thread-alive-p
-                                (watch-thread w))
+                  (%json-object
+                   "id" (watch-id w)
+                   "kind" (string-downcase (symbol-name (watch-kind w)))
+                   "dir" (watch-dir w)
+                   "glob" (watch-glob w)
+                   "system" (watch-system-name w)
+                   "alive" (and (watch-thread w)
+                                (clpm.repl.compat:thread-alive-p
+                                 (watch-thread w))
                                t)))
                (%all-watches server))))))))
 

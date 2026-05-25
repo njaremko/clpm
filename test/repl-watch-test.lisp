@@ -1,7 +1,7 @@
 ;;;; test/repl-watch-test.lisp - directory watchers.
 ;;;;
 ;;;; Covers BRIDGE_V2 #180 (watch DIR), #181 (unwatch ID / list-watches),
-;;;; #182 (auto-revert).
+;;;; and ASDF-backed watch-system reloads.
 
 (require :asdf)
 (require :sb-bsd-sockets)
@@ -33,6 +33,13 @@
 (defun array-items (a)
   (when (and (consp a) (eq (car a) :array))
     (cadr a)))
+
+(defun receive-message-or-fail (mailbox description &optional (timeout 8))
+  (multiple-value-bind (message received?)
+      (sb-concurrency:receive-message mailbox :timeout timeout)
+    (unless received?
+      (fail "timed out waiting for ~A" description))
+    message))
 
 (defun with-daemon (fn)
   (let* ((sock (format nil "/tmp/clpm-rb-watch-~A.sock" (random (expt 2 32))))
@@ -90,15 +97,27 @@
     (ensure-directories-exist dir)
     (values name package dir)))
 
-(defun write-watch-system (dir name package value)
+(defun write-watch-system-macro (dir package value)
+  (write-file
+   (merge-pathnames "src/macros.lisp" dir)
+   (format nil "(in-package #:~A)~%(defmacro watched-token () ~A)~%"
+           package value)))
+
+(defun write-macro-watch-system (dir name package value)
   (write-file
    (merge-pathnames (format nil "~A.asd" name) dir)
-   (format nil "(asdf:defsystem ~S :serial t :components ((:file \"source\")))~%"
+   (format nil "(asdf:defsystem ~S~%  :serial t~%  :components ((:module \"src\"~%                :serial t~%                :components ((:file \"package\")~%                             (:file \"macros\")~%                             (:file \"user\")))))~%"
            name))
-  (write-file
-   (merge-pathnames "source.lisp" dir)
-   (format nil "(defpackage #:~A (:use #:cl) (:export #:value))~%(in-package #:~A)~%(defun value () ~A)~%"
-           package package value)))
+  (let ((src-dir (merge-pathnames "src/" dir)))
+    (write-file
+     (merge-pathnames "package.lisp" src-dir)
+     (format nil "(defpackage #:~A (:use #:cl) (:export #:macro-value))~%"
+             package))
+    (write-watch-system-macro dir package value)
+    (write-file
+     (merge-pathnames "user.lisp" src-dir)
+     (format nil "(in-package #:~A)~%(defun macro-value () (watched-token))~%"
+             package))))
 
 (defun register-system-dir-form (dir)
   (format nil "(pushnew #P~S asdf:*central-registry* :test #'equal)"
@@ -248,98 +267,77 @@
 (format t "  reload-failed OK~%")
 
 ;;; ----------------------------------------------------------------------------
-;;; #182: auto_revert emits revert-applied after a reload.
+;;; watch-system watches ASDF component files and reloads through ASDF, not by
+;;; direct-loading the changed file. Changing a macro file must recompile the
+;;; dependent user file, otherwise MACRO-VALUE would keep returning :OLD.
 
-(format t "Test: auto_revert emits revert-applied~%")
-(with-daemon
-  (lambda (sock)
-    (let* ((dir (make-watch-dir))
-           (file (format nil "~Arevertible.lisp" dir))
-           (id-box (sb-concurrency:make-mailbox))
-           (revert-box (sb-concurrency:make-mailbox))
-           (watcher
-             (sb-thread:make-thread
-              (lambda ()
-                (do-rpc sock "watch"
-                        (list (cons "dir" dir)
-                              (cons "auto_revert" t))
-                        :on-event
-                        (lambda (frame)
-                          (let ((ev (lookup frame "event")))
-                            (cond
-                              ((string= ev "watch-acknowledged")
-                               (sb-concurrency:send-message
-                                id-box (lookup frame "id")))
-                              ((string= ev "revert-applied")
-                               (sb-concurrency:send-message
-                                revert-box frame))))
-                          nil)))
-              :name "test-watch-revert")))
-      (let ((wid (sb-concurrency:receive-message id-box)))
-        (sleep 1.2)
-        (write-file file "(defun revertible () :ok)")
-        (let ((revert-evt (sb-concurrency:receive-message revert-box)))
-          (assert-true (string= "revert-applied"
-                                 (lookup revert-evt "event"))
-                       "expected revert-applied"))
-        (do-rpc sock "unwatch" (list (cons "id" wid)))
-        (sb-thread:join-thread watcher)))))
-(format t "  auto-revert OK~%")
-
-;;; ----------------------------------------------------------------------------
-;;; watch-system resolves an ASDF system source directory, then uses the same
-;;; reload path as watch.
-
-(format t "Test: watch-system reloads changed system source~%")
+(format t "Test: watch-system reloads through ASDF~%")
 (multiple-value-bind (name package dir)
     (make-watch-system)
   (unwind-protect
        (progn
-         (write-watch-system dir name package ":old")
+         (write-macro-watch-system dir name package ":old")
          (with-daemon
            (lambda (sock)
              (let ((registered (do-rpc sock "eval"
                                        (list (cons "form"
                                                    (register-system-dir-form dir))))))
-               (assert-true (lookup registered "result")
-                            "failed to register temp system: ~S" registered))
+                (assert-true (lookup registered "result")
+                             "failed to register temp system: ~S" registered))
+             (let ((loaded (do-rpc sock "load-system"
+                                   (list (cons "name" name)))))
+               (assert-true (lookup loaded "result")
+                            "initial load-system failed: ~S" loaded))
+             (let* ((old (do-rpc sock "eval"
+                                 (list (cons "form"
+                                             (format nil "(~A:macro-value)"
+                                                     package)))))
+                    (value (lookup (lookup old "result") "value")))
+               (assert-true (search "OLD" value)
+                            "initial macro-value should be old: ~S" old))
              (let* ((id-box (sb-concurrency:make-mailbox))
                     (reload-box (sb-concurrency:make-mailbox))
-                    (watcher
-                      (sb-thread:make-thread
-                       (lambda ()
+                     (watcher
+                       (sb-thread:make-thread
+                        (lambda ()
                          (do-rpc sock "watch-system"
                                  (list (cons "name" name))
                                  :on-event
                                  (lambda (frame)
                                    (let ((ev (lookup frame "event")))
                                      (cond
-                                       ((string= ev "watch-acknowledged")
-                                        (sb-concurrency:send-message
-                                         id-box (lookup frame "id")))
-                                       ((string= ev "file-reloaded")
-                                        (sb-concurrency:send-message
-                                         reload-box frame))))
-                                   nil)))
-                       :name "test-watch-system")))
-               (let ((wid (sb-concurrency:receive-message id-box)))
-                 (sleep 1.2)
-                 (write-watch-system dir name package ":new")
-                 (let ((reload-evt (sb-concurrency:receive-message reload-box)))
-                   (assert-true (string= "file-reloaded"
-                                        (lookup reload-evt "event"))
-                                "expected file-reloaded, got ~S" reload-evt))
-                 (do-rpc sock "unwatch" (list (cons "id" wid)))
-                 (sb-thread:join-thread watcher)
-                 (let* ((resp (do-rpc sock "eval"
-                                      (list (cons "form"
-                                                  (format nil "(~A:value)"
-                                                          package)))))
-                        (value (lookup (lookup resp "result") "value")))
-                   (assert-true (search "NEW" value)
-                                "watch-system should reload new value: ~S"
-                                resp)))))))
-    (ignore-errors (delete-file (merge-pathnames "source.lisp" dir)))
+                                        ((string= ev "watch-acknowledged")
+                                         (sb-concurrency:send-message
+                                          id-box (lookup frame "id")))
+                                        ((string= ev "system-reloaded")
+                                         (sb-concurrency:send-message
+                                          reload-box frame))))
+                                    nil)))
+                        :name "test-watch-system")))
+                (let ((wid (receive-message-or-fail id-box "watch-system acknowledgement")))
+                  (sleep 1.2)
+                  (write-watch-system-macro dir package ":new")
+                  (let ((reload-evt (receive-message-or-fail reload-box
+                                                            "ASDF system reload")))
+                    (assert-true (string= "system-reloaded"
+                                         (lookup reload-evt "event"))
+                                 "expected system-reloaded, got ~S" reload-evt)
+                    (assert-true (string= name (lookup reload-evt "system"))
+                                 "reload event should name the system: ~S"
+                                 reload-evt))
+                  (do-rpc sock "unwatch" (list (cons "id" wid)))
+                  (sb-thread:join-thread watcher)
+                  (let* ((resp (do-rpc sock "eval"
+                                       (list (cons "form"
+                                                   (format nil "(~A:macro-value)"
+                                                           package)))))
+                         (value (lookup (lookup resp "result") "value")))
+                    (assert-true (search "NEW" value)
+                                 "watch-system should recompile ASDF dependents: ~S"
+                                 resp)))))))
+    (ignore-errors (delete-file (merge-pathnames "src/package.lisp" dir)))
+    (ignore-errors (delete-file (merge-pathnames "src/macros.lisp" dir)))
+    (ignore-errors (delete-file (merge-pathnames "src/user.lisp" dir)))
     (ignore-errors (delete-file (merge-pathnames (format nil "~A.asd" name) dir)))
     (ignore-errors (uiop:delete-directory-tree dir :validate t))))
 (format t "  watch-system OK~%")

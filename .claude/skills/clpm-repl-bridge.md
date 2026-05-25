@@ -142,8 +142,8 @@ clpm repl call inspect-eval --session ins-1 --form '(length *)'
 clpm repl call inspect-close --session ins-1
 
 # watch and trace
-clpm repl call watch --dir /absolute/path/to/src --glob '*.lisp' --auto-revert true
-clpm repl call watch-system --name my-app --glob '*.lisp' --auto-revert true
+clpm repl call watch --dir /absolute/path/to/src --glob '*.lisp'
+clpm repl call watch-system --name my-app
 clpm repl call list-watches
 clpm repl call unwatch --id 1
 clpm repl call trace --symbols '["my-fn"]'
