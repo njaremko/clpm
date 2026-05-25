@@ -148,6 +148,21 @@
         (assert-equal-string "42" (lookup (second parts) "repr"))))))
 (format t "  mutate OK~%")
 
+(format t "Test: inspect mutable=false rejects mutation~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((init (do-rpc sock "inspect"
+                          (list (cons "form" "(vector 1 2 3)")
+                                (cons "mutable" :false))))
+           (sid (lookup (lookup init "result") "session"))
+           (mutate (do-rpc sock "inspect-mutate"
+                           (list (cons "session" sid)
+                                 (cons "i" 1)
+                                 (cons "form" "42")))))
+      (assert-true (lookup mutate "error")
+                   "mutable=false should reject mutation: ~S" mutate))))
+(format t "  mutable=false OK~%")
+
 ;;; ----------------------------------------------------------------------------
 ;;; #124: pagination.
 

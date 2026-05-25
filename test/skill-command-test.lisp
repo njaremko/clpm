@@ -62,6 +62,8 @@
   (assert-contains stdout "clpm repl")
   (assert-contains stdout "clpm repl eval FORM [--package P] [--worker W] [--no-autostart] [--json]")
   (assert-contains stdout "clpm repl eval FORM [--package P] [--worker W] [--no-autostart] --debug [debug-options]")
+  (assert-contains stdout "clpm repl call load-system --name my-app")
+  (assert-contains stdout "clpm repl call test-system --name my-app")
   (assert-contains stdout "clpm repl call xref --symbol my-function --direction callers")
   (assert-true (not (search "--direction calls" stdout :test #'char-equal))
                "skill output still advertises invalid xref direction:~%~A"
@@ -71,6 +73,7 @@
                "skill output still advertises invalid macroexpand parameter:~%~A"
                stdout)
   (assert-contains stdout "clpm repl call watch --dir /absolute/path/to/src --glob '*.lisp' --auto-revert true")
+  (assert-contains stdout "clpm repl call watch-system --name my-app --glob '*.lisp' --auto-revert true")
   (assert-true (not (search "clpm repl call watch --dir src" stdout :test #'char-equal))
                "skill output still advertises a relative watch directory:~%~A"
                stdout)
@@ -84,8 +87,12 @@
                "skill output still describes workspace targeting as global:~%~A"
                stdout)
   (assert-true (not (search "clpm run repl" stdout))
-               "skill output still advertises ordinary REPL:~%~A"
-               stdout)
+                "skill output still advertises ordinary REPL:~%~A"
+                stdout)
+  (assert-contains stdout "Do not use `clpm run exec -- sbcl ...` for iterative Lisp work")
+  (assert-true (not (search "clpm run exec -- sbcl --script" stdout :test #'char-equal))
+                "skill output still gives an sbcl run-exec example:~%~A"
+                stdout)
   (assert-true (not (search "repl-bridge" stdout :test #'char-equal))
                "skill output still advertises obsolete repl-bridge:~%~A"
                stdout))

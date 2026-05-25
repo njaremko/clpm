@@ -2399,6 +2399,10 @@ the method-local schema.")
 (defun %json-boolean-p (value)
   (or (eq value t) (eq value :false)))
 
+(defun %json-true-p (value)
+  "Return true only for JSON true. JSON false is encoded as :FALSE."
+  (eq value t))
+
 (defun %json-value-type-name (value)
   (cond
     ((stringp value) "string")
@@ -3122,7 +3126,7 @@ version (because the file was just LOADed)."
   (lambda (server params id ctx)
     (let* ((dir (%json-getf params "dir"))
            (glob (or (%json-getf params "glob") "*.lisp"))
-           (auto-revert? (and (%json-getf params "auto_revert") t)))
+           (auto-revert? (%json-true-p (%json-getf params "auto_revert"))))
       (cond
         ((not (stringp dir))
          (%error-response id "protocol-error" "missing `dir' param"))
@@ -3135,12 +3139,56 @@ version (because the file was just LOADed)."
            ;; knows the watch id. We return NIL from this handler so
            ;; the dispatcher does NOT close the request -- the watcher
            ;; thread keeps the ctx alive and finalizes via unwatch.
-           (%emit-event ctx "watch-acknowledged"
-                        "id" (watch-id w)
-                        "dir" (watch-dir w)
-                        "glob" (watch-glob w)
-                        "auto_revert" (watch-auto-revert? w))
-           nil)))))))
+            (%emit-watch-acknowledged ctx w)
+            nil)))))))
+
+(defun %emit-watch-acknowledged (ctx watch)
+  (%emit-event ctx "watch-acknowledged"
+               "id" (watch-id watch)
+               "dir" (watch-dir watch)
+               "glob" (watch-glob watch)
+               "auto_revert" (watch-auto-revert? watch)))
+
+(%register-method
+ (make-method-spec
+  :name "watch-system"
+  :summary "Watch an ASDF system's source directory and reload changed files."
+  :doc "Required: `name' (ASDF system name). Optional: `glob' (default
+\"*.lisp\") and `auto_revert' (default false). Resolves the system with
+ASDF, watches its source directory, and streams the same events as `watch'."
+  :params (list (list :name "name" :type :string :required t
+                      :description "ASDF system name.")
+                (list :name "glob" :type :string :required nil
+                      :description "Filename glob (default \"*.lisp\").")
+                (list :name "auto_revert" :type :boolean :required nil
+                      :description "Emit revert-applied events for matching definitions."))
+  :handler
+  (lambda (server params id ctx)
+    (let* ((name (%json-getf params "name"))
+           (glob (or (%json-getf params "glob") "*.lisp"))
+           (auto-revert? (%json-true-p (%json-getf params "auto_revert"))))
+      (cond
+        ((not (stringp name))
+         (%error-response id "protocol-error" "missing `name' param"))
+        (t
+         (handler-case
+             (let* ((system (asdf:find-system name nil))
+                    (dir (and system
+                              (asdf:system-source-directory system))))
+               (cond
+                 ((null system)
+                  (%error-response id "eval-error"
+                                   (format nil "no such system: ~A" name)))
+                 ((null dir)
+                  (%error-response id "eval-error"
+                                   (format nil "system has no source directory: ~A" name)))
+                 (t
+                  (let ((w (%make-watch server (namestring dir) glob
+                                        auto-revert? ctx)))
+                    (%emit-watch-acknowledged ctx w)
+                    nil))))
+           (error (c)
+             (%error-response id "eval-error" (princ-to-string c))))))))))
 
 (%register-method
  (make-method-spec
@@ -3547,7 +3595,7 @@ macroexpands|specializes). Returns
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (let* ((form-text (%json-getf params "form"))
-           (recursive (%json-getf params "recursive"))
+           (recursive (%json-true-p (%json-getf params "recursive")))
            (pkg-name (%json-getf params "package"))
            (pkg (or (and pkg-name (%find-package-loose pkg-name))
                     (and server (server-current-package server))
@@ -4041,7 +4089,100 @@ response. Bounded by the daemon's 1 MB output cap."
          (let ((out (with-output-to-string (s)
                       (handler-case (disassemble sym :stream s)
                         (error (c) (format s "~A" c))))))
-           (%success-response id (%json-object "output" out)))))))))
+            (%success-response id (%json-object "output" out)))))))))
+
+(defun %asdf-system-summary-json (system)
+  "Small, stable ASDF system summary for load/test responses."
+  (%json-object
+   "name" (asdf:component-name system)
+   "version" (handler-case (asdf:component-version system)
+               (error () nil))
+   "source_directory" (handler-case
+                          (namestring (asdf:system-source-directory system))
+                        (error () nil))))
+
+(defun %asdf-operation-response (id name operation force thunk)
+  "Run THUNK for ASDF system NAME and return a structured terminal response."
+  (handler-case
+      (let ((system (asdf:find-system name nil)))
+        (unless system
+          (return-from %asdf-operation-response
+            (%error-response id "eval-error"
+                             (format nil "no such system: ~A" name))))
+        (funcall thunk)
+        (%success-response
+         id
+         (%json-object
+           "success" t
+           "operation" operation
+           "force" (if force t :false)
+           "system" (%asdf-system-summary-json system))))
+    (error (c)
+      (%error-response id "eval-error" (princ-to-string c)))))
+
+(defun %with-asdf-diagnostics (ctx thunk)
+  "Run THUNK while streaming compiler/ASDF conditions as diagnostic events."
+  (let ((handler (lambda (c) (%emit-compile-diagnostic ctx c))))
+    (handler-bind ((condition handler))
+      (funcall thunk))))
+
+(%register-method
+ (make-method-spec
+  :name "load-system"
+  :summary "Load or rehydrate an ASDF system in the running image."
+  :doc "Required: `name' (ASDF system name). Optional: `force' (boolean,
+default false). Runs `asdf:load-system' in the daemon, streaming compiler
+diagnostics while ASDF recompiles and reloads stale components. Use
+`force: true' when you want a complete reload rather than ASDF's freshness
+check."
+  :params (list (list :name "name" :type :string :required t
+                      :description "ASDF system name.")
+                (list :name "force" :type :boolean :required nil
+                      :description "Force ASDF to reload/recompile components."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server))
+    (let ((name (%json-getf params "name"))
+          (force (%json-true-p (%json-getf params "force"))))
+      (cond
+        ((not (stringp name))
+         (%error-response id "protocol-error" "missing `name' param"))
+        (t
+         (%asdf-operation-response
+          id name "load-system" force
+          (lambda ()
+            (%with-asdf-diagnostics
+             ctx
+             (lambda ()
+               (asdf:load-system name :force force :verbose nil)))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "test-system"
+  :summary "Run an ASDF system's test-op inside the running image."
+  :doc "Required: `name' (ASDF system name). Optional: `force' (boolean,
+default false). Runs `asdf:test-system' in the daemon and streams compiler
+diagnostics from any stale components ASDF loads on the way."
+  :params (list (list :name "name" :type :string :required t
+                      :description "ASDF system name.")
+                (list :name "force" :type :boolean :required nil
+                      :description "Force ASDF while performing test-op."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server))
+    (let ((name (%json-getf params "name"))
+          (force (%json-true-p (%json-getf params "force"))))
+      (cond
+        ((not (stringp name))
+         (%error-response id "protocol-error" "missing `name' param"))
+        (t
+         (%asdf-operation-response
+          id name "test-system" force
+          (lambda ()
+            (%with-asdf-diagnostics
+             ctx
+             (lambda ()
+               (asdf:test-system name :force force :verbose nil)))))))))))
 
 (%register-method
  (make-method-spec
@@ -4488,7 +4629,7 @@ directory."
   :handler
   (lambda (server params id ctx)
     (declare (ignore server ctx))
-    (let* ((full (%json-getf params "full"))
+    (let* ((full (%json-true-p (%json-getf params "full")))
            (before #+sbcl (sb-ext:get-bytes-consed) #-sbcl 0))
       #+sbcl (sb-ext:gc :full full)
       #-sbcl (declare (ignore full))
@@ -4669,7 +4810,7 @@ subsequent inspect-* RPCs."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (let* ((form-text (%json-getf params "form"))
-           (mutable (%json-getf params "mutable"))
+           (mutable (%json-true-p (%json-getf params "mutable")))
            (pkg-name (%json-getf params "package"))
            (pkg (or (and pkg-name (%find-package-loose pkg-name))
                     (and server (server-current-package server))
@@ -4924,8 +5065,8 @@ keeps the worker fast-path identical to v1."
   (let ((options '()))
     (flet ((maybe-bool (key plist-key)
              (let ((v (%json-getf params key 'unset)))
-               (unless (eq v 'unset)
-                 (setf options (list* plist-key (and v t) options)))))
+                (unless (eq v 'unset)
+                  (setf options (list* plist-key (%json-true-p v) options)))))
            (maybe-int (key plist-key)
              (let ((v (%json-getf params key)))
                (when (integerp v)
@@ -5400,8 +5541,8 @@ so any straggling events from a background thread are dropped."
 debug-invoke-restart, ...)? Such requests must run in their own thread so
 the connection thread stays free to read those continuations."
   (and params
-       (or (%json-getf params "query_interactive")
-           (%json-getf params "debug"))))
+        (or (%json-true-p (%json-getf params "query_interactive"))
+            (%json-true-p (%json-getf params "debug")))))
 
 (defun %write-error-inline (cstate id code message)
   (clpm.repl.compat:with-mutex ((connection-state-stream-mutex cstate))
@@ -5531,8 +5672,8 @@ blocked on its query-mailbox."
        (%write-error-inline cstate id "protocol-error"
                             "no in-flight query waiting on this id"))
       (t
-       (let* ((eof? (%json-getf params "eof"))
-              (raw-value (%json-getf params "value"))
+        (let* ((eof? (%json-true-p (%json-getf params "eof")))
+               (raw-value (%json-getf params "value"))
               (value (cond
                        (eof? :eof)
                        ((stringp raw-value) raw-value)
@@ -5566,7 +5707,7 @@ Used by both the inline path and the threaded path."
                                     :id id
                                     :options params))
          (start (get-internal-real-time))
-         (explain? (and params (%json-getf params "explain")))
+         (explain? (and params (%json-true-p (%json-getf params "explain"))))
          (response (handler-case
                        (progn
                          ;; `explain: true' -- emit a `plan' event before

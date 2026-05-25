@@ -124,6 +124,9 @@ clpm repl call reset --worker default
 clpm repl call kill-worker --name scratch
 
 # source and introspection
+clpm repl call load-system --name my-app
+clpm repl call load-system --name my-app --force true
+clpm repl call test-system --name my-app
 clpm repl call compile-file --path src/foo.lisp
 clpm repl call load-file --path src/foo.lisp
 clpm repl call find-definition --symbol my-function
@@ -138,15 +141,14 @@ clpm repl call inspect-into --session ins-1 --i 0
 clpm repl call inspect-eval --session ins-1 --form '(length *)'
 clpm repl call inspect-close --session ins-1
 
-# watch, trace, profile
+# watch and trace
 clpm repl call watch --dir /absolute/path/to/src --glob '*.lisp' --auto-revert true
+clpm repl call watch-system --name my-app --glob '*.lisp' --auto-revert true
 clpm repl call list-watches
 clpm repl call unwatch --id 1
 clpm repl call trace --symbols '["my-fn"]'
 clpm repl call untrace --symbols '["my-fn"]'
 clpm repl call list-traced
-clpm repl call time-eval --form '(some-fn)'
-clpm repl call profile-eval --form '(big-fn)' --top 10
 ```
 
 `call` emits raw JSON responses and streams raw event frames, which is the right

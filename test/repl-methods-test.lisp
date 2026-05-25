@@ -88,7 +88,8 @@
                          collect (lookup m "name"))))
         (dolist (expected '("ping" "current-package" "set-package"
                             "interrupt" "reset" "describe"
-                            "list-redefinitions" "methods" "help"))
+                            "list-redefinitions" "load-system"
+                            "test-system" "watch-system" "methods" "help"))
           (assert-true (member expected names :test #'string=)
                        "missing method ~A; got ~S" expected names))
         (dolist (internal '("eval" "shutdown" "query-response"))

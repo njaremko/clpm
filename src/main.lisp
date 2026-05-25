@@ -52,7 +52,7 @@ Examples:
   clpm deps sync
   clpm test
   clpm repl
-  clpm repl eval '(asdf:load-system \"myproject\")'
+  clpm repl call load-system --name myproject
   clpm deps update alexandria
 " *version*))
 

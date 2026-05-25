@@ -35,6 +35,40 @@
   (when (and (consp a) (eq (car a) :array))
     (cadr a)))
 
+(defun write-file (path contents)
+  (ensure-directories-exist path)
+  (with-open-file (s path :direction :output
+                          :if-exists :supersede
+                          :if-does-not-exist :create
+                          :external-format :utf-8)
+    (write-string contents s)))
+
+(defun make-temp-system ()
+  (let* ((n (random (expt 2 32)))
+         (name (format nil "clpm-repl-system-~A" n))
+         (package (string-upcase name))
+         (dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/~A/" name))))
+    (ensure-directories-exist dir)
+    (values name package dir)))
+
+(defun write-test-system (dir name package value)
+  (let ((asd (merge-pathnames (format nil "~A.asd" name) dir))
+        (src (merge-pathnames "source.lisp" dir)))
+    (write-file
+     asd
+     (format nil "(asdf:defsystem ~S~%  :serial t~%  :components ((:file \"source\"))~%  :perform (asdf:test-op (op c)~%             (declare (ignore op c))~%             (let* ((pkg (find-package ~S))~%                    (sym (and pkg (find-symbol \"VALUE\" pkg))))~%               (unless (and sym (eq (funcall sym) :new))~%                 (error \"test system did not see new value\")))))~%"
+             name package))
+    (write-file
+     src
+     (format nil "(defpackage #:~A (:use #:cl) (:export #:value))~%(in-package #:~A)~%(defun value () ~A)~%"
+             package package value))
+    src))
+
+(defun register-system-dir-form (dir)
+  (format nil "(pushnew #P~S asdf:*central-registry* :test #'equal)"
+          (namestring dir)))
+
 (defun with-daemon (fn)
   (let* ((sock (format nil "/tmp/clpm-rb-source-~A.sock" (random (expt 2 32))))
          (thread (sb-thread:make-thread
@@ -188,6 +222,78 @@
                           "package missing"))))
     (ignore-errors (delete-file tmp-src))))
 (format t "  load-file OK~%")
+
+;;; ----------------------------------------------------------------------------
+;;; ASDF system rehydration: load-system recompiles/reloads stale files and
+;;; test-system runs test-op in the same live image.
+
+(format t "Test: load-system reloads changed ASDF source~%")
+(multiple-value-bind (name package dir)
+    (make-temp-system)
+  (let ((src nil))
+    (unwind-protect
+         (progn
+           (setf src (write-test-system dir name package ":old"))
+           (with-daemon
+             (lambda (sock)
+               (let ((register (clpm.repl:send-request
+                                sock "eval"
+                                :params (list :object
+                                              (list (cons "form"
+                                                          (register-system-dir-form dir)))))))
+                 (assert-true (lookup register "result")
+                              "central-registry push failed: ~S" register))
+               (let* ((loaded (clpm.repl:send-request
+                               sock "load-system"
+                               :params (list :object
+                                             (list (cons "name" name)))))
+                      (result (lookup loaded "result")))
+                 (assert-true result "load-system failed: ~S" loaded)
+                 (assert-true (lookup result "success")
+                              "load-system success missing: ~S" result))
+               (let* ((old (clpm.repl:send-request
+                            sock "eval"
+                            :params (list :object
+                                          (list (cons "form"
+                                                      (format nil "(~A:value)"
+                                                              package))))))
+                      (old-result (lookup old "result")))
+                 (assert-true (search "OLD" (lookup old-result "value"))
+                              "expected old value, got: ~S" old))
+               (sleep 1.2)
+               (write-test-system dir name package ":new")
+               (let* ((loaded (clpm.repl:send-request
+                               sock "load-system"
+                               :params (list :object
+                                             (list (cons "name" name)
+                                                   (cons "force" :false)))))
+                      (result (lookup loaded "result")))
+                  (assert-true result "second load-system failed: ~S" loaded)
+                  (assert-true (eq :false (lookup result "force"))
+                               "JSON false force should remain false: ~S" result))
+               (let* ((new (clpm.repl:send-request
+                            sock "eval"
+                            :params (list :object
+                                          (list (cons "form"
+                                                      (format nil "(~A:value)"
+                                                              package))))))
+                      (new-result (lookup new "result")))
+                 (assert-true (search "NEW" (lookup new-result "value"))
+                              "expected new value after load-system, got: ~S"
+                              new))
+               (let* ((tested (clpm.repl:send-request
+                               sock "test-system"
+                               :params (list :object
+                                             (list (cons "name" name)))))
+                      (test-result (lookup tested "result")))
+                 (assert-true test-result "test-system failed: ~S" tested)
+                 (assert-true (string= "test-system"
+                                       (lookup test-result "operation"))
+                              "wrong operation: ~S" test-result)))))
+      (ignore-errors (delete-file src))
+      (ignore-errors (delete-file (merge-pathnames (format nil "~A.asd" name) dir)))
+      (ignore-errors (uiop:delete-directory-tree dir :validate t)))))
+(format t "  load-system/test-system OK~%")
 
 (format t "~%REPL source tests PASSED!~%")
 (sb-ext:exit :code 0)

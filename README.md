@@ -116,7 +116,8 @@ clpm repl                                           # terminal: Lisp, non-termin
 clpm repl --interactive                             # force foreground Lisp
 clpm repl --non-interactive                         # force daemon ensure
 clpm repl daemon --status --json                    # machine-readable status
-clpm repl eval '(asdf:load-system "my-app")'
+clpm repl call load-system --name my-app             # rehydrate ASDF-stale files
+clpm repl call test-system --name my-app             # run test-op in-image
 clpm repl eval '(my-app:hello)'
 clpm repl call methods                              # list callable daemon RPCs
 clpm repl daemon --stop
@@ -143,6 +144,9 @@ daemon; it never starts one implicitly. Transport fields such as
   binds `*` to the focus; `inspect-mutate` replaces an element.
 - **Compile diagnostics.** `call compile-file --path PATH` returns warnings/errors with
   file + line positions, suitable for surfacing in an editor.
+- **ASDF rehydration.** `call load-system --name SYSTEM` recompiles and reloads
+  stale components in the live image; `--force true` forces a complete reload.
+  `call test-system --name SYSTEM` runs ASDF `test-op` without discarding state.
 - **Source navigation.** `call find-definition`, `call xref`, `call apropos`,
   `call documentation`, `call arglist`, `call complete-symbol`,
   `call disassemble`, and `call describe-system`.
@@ -153,7 +157,8 @@ daemon; it never starts one implicitly. Transport fields such as
   Use `repl eval` for explicit timing or profiling forms inside the image.
 - **File watching.** `call watch --dir DIR --glob '*.lisp' --auto-revert true` polls and
   re-LOADs matching files on mtime change, streaming `file-reloaded` /
-  `reload-failed` / `revert-applied` events.
+  `reload-failed` / `revert-applied` events. `call watch-system --name SYSTEM`
+  watches an ASDF system's source directory.
 - **Image introspection.** `image-info`, `loaded-systems`, `list-packages`,
   `gc`, all through `call METHOD`.
 - **Self-documenting.** Public callable methods are published in the registry

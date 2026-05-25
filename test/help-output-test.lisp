@@ -68,8 +68,12 @@
   (assert-contains stdout "store")
   (assert-contains stdout "skill")
   (assert-contains stdout "repl")
+  (assert-contains stdout "clpm repl call load-system --name myproject")
   (assert-contains stdout "Scoped options must appear before the command token.")
   (assert-contains stdout "Use `clpm help [command [subcommand ...]]`")
+  (assert-not-contains stdout "clpm repl eval '(asdf:load-system"
+                       "top-level help still advertises ASDF load through eval:~%~A"
+                       stdout)
   (assert-not-contains stdout "ed25519:example-key-id"
                        "top-level help still uses fake trust key example:~%~A"
                        stdout)

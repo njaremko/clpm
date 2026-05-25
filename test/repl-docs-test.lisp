@@ -71,8 +71,9 @@
     (let* ((resp (do-rpc sock "methods"))
            (entries (array-items (lookup (lookup resp "result") "methods")))
            (names (mapcar (lambda (e) (lookup e "name")) entries)))
-      (dolist (m '("watch" "list-workers" "inspect"
-                   "kill-worker" "unwatch" "image-info"))
+      (dolist (m '("watch" "watch-system" "list-workers" "inspect"
+                   "kill-worker" "unwatch" "image-info"
+                   "load-system" "test-system"))
         (assert-true (find m names :test #'string=)
                      "~A missing from methods: ~S" m names))
       (assert-true (not (find "eval" names :test #'string=))

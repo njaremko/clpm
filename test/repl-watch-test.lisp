@@ -74,10 +74,35 @@
     path))
 
 (defun write-file (path contents)
+  (ensure-directories-exist path)
   (with-open-file (s path :direction :output
                           :if-exists :supersede
-                          :if-does-not-exist :create)
+                          :if-does-not-exist :create
+                          :external-format :utf-8)
     (write-string contents s)))
+
+(defun make-watch-system ()
+  (let* ((n (random (expt 2 32)))
+         (name (format nil "clpm-repl-watch-system-~A" n))
+         (package (string-upcase name))
+         (dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/~A/" name))))
+    (ensure-directories-exist dir)
+    (values name package dir)))
+
+(defun write-watch-system (dir name package value)
+  (write-file
+   (merge-pathnames (format nil "~A.asd" name) dir)
+   (format nil "(asdf:defsystem ~S :serial t :components ((:file \"source\")))~%"
+           name))
+  (write-file
+   (merge-pathnames "source.lisp" dir)
+   (format nil "(defpackage #:~A (:use #:cl) (:export #:value))~%(in-package #:~A)~%(defun value () ~A)~%"
+           package package value)))
+
+(defun register-system-dir-form (dir)
+  (format nil "(pushnew #P~S asdf:*central-registry* :test #'equal)"
+          (namestring dir)))
 
 ;;; ----------------------------------------------------------------------------
 ;;; #180 + #181: watch acknowledges, list-watches shows the entry, unwatch
@@ -260,6 +285,64 @@
         (do-rpc sock "unwatch" (list (cons "id" wid)))
         (sb-thread:join-thread watcher)))))
 (format t "  auto-revert OK~%")
+
+;;; ----------------------------------------------------------------------------
+;;; watch-system resolves an ASDF system source directory, then uses the same
+;;; reload path as watch.
+
+(format t "Test: watch-system reloads changed system source~%")
+(multiple-value-bind (name package dir)
+    (make-watch-system)
+  (unwind-protect
+       (progn
+         (write-watch-system dir name package ":old")
+         (with-daemon
+           (lambda (sock)
+             (let ((registered (do-rpc sock "eval"
+                                       (list (cons "form"
+                                                   (register-system-dir-form dir))))))
+               (assert-true (lookup registered "result")
+                            "failed to register temp system: ~S" registered))
+             (let* ((id-box (sb-concurrency:make-mailbox))
+                    (reload-box (sb-concurrency:make-mailbox))
+                    (watcher
+                      (sb-thread:make-thread
+                       (lambda ()
+                         (do-rpc sock "watch-system"
+                                 (list (cons "name" name))
+                                 :on-event
+                                 (lambda (frame)
+                                   (let ((ev (lookup frame "event")))
+                                     (cond
+                                       ((string= ev "watch-acknowledged")
+                                        (sb-concurrency:send-message
+                                         id-box (lookup frame "id")))
+                                       ((string= ev "file-reloaded")
+                                        (sb-concurrency:send-message
+                                         reload-box frame))))
+                                   nil)))
+                       :name "test-watch-system")))
+               (let ((wid (sb-concurrency:receive-message id-box)))
+                 (sleep 1.2)
+                 (write-watch-system dir name package ":new")
+                 (let ((reload-evt (sb-concurrency:receive-message reload-box)))
+                   (assert-true (string= "file-reloaded"
+                                        (lookup reload-evt "event"))
+                                "expected file-reloaded, got ~S" reload-evt))
+                 (do-rpc sock "unwatch" (list (cons "id" wid)))
+                 (sb-thread:join-thread watcher)
+                 (let* ((resp (do-rpc sock "eval"
+                                      (list (cons "form"
+                                                  (format nil "(~A:value)"
+                                                          package)))))
+                        (value (lookup (lookup resp "result") "value")))
+                   (assert-true (search "NEW" value)
+                                "watch-system should reload new value: ~S"
+                                resp)))))))
+    (ignore-errors (delete-file (merge-pathnames "source.lisp" dir)))
+    (ignore-errors (delete-file (merge-pathnames (format nil "~A.asd" name) dir)))
+    (ignore-errors (uiop:delete-directory-tree dir :validate t))))
+(format t "  watch-system OK~%")
 
 (format t "~%REPL watch tests PASSED!~%")
 (sb-ext:exit :code 0)
