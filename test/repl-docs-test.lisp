@@ -98,8 +98,12 @@
                         (plusp (length doc)))
                     "watch should have a docstring")
       (assert-true (find "dir" params
-                           :test (lambda (s p) (string= s (lookup p "name"))))
+                            :test (lambda (s p) (string= s (lookup p "name"))))
                     "dir param missing")
+      (assert-true (search "Watchman" doc :test #'char-equal)
+                   "watch help should describe Watchman backend: ~S" doc)
+      (assert-true (search "falls back" doc :test #'char-equal)
+                   "watch help should describe polling fallback: ~S" doc)
       (assert-true (not (search "auto_revert" doc :test #'char-equal))
                    "watch help still advertises fake auto_revert: ~S" doc))
     (let* ((resp (do-rpc sock "help"
@@ -109,7 +113,10 @@
       (assert-true (search "asdf:load-system" doc :test #'char-equal)
                    "watch-system help should describe ASDF reloads: ~S" doc)
       (assert-true (search "system-reloaded" doc :test #'char-equal)
-                   "watch-system help should describe system-reloaded: ~S" doc))
+                    "watch-system help should describe system-reloaded: ~S" doc)
+      (assert-true (search "Watchman" doc :test #'char-equal)
+                   "watch-system help should describe Watchman backend: ~S"
+                   doc))
     (let* ((resp (do-rpc sock "help"
                          (list (cons "method" "eval"))))
            (err (lookup resp "error")))

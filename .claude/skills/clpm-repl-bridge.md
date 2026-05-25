@@ -154,6 +154,10 @@ clpm repl call list-traced
 `call` emits raw JSON responses and streams raw event frames, which is the right
 shape for agents and other tools.
 
+File watches use Watchman when it is available and fall back to polling. Use
+`watch-system` for ASDF systems so saves reload through `asdf:load-system`;
+use `watch` only when direct-loading individual files is intended.
+
 ## Cleanup Checklist
 
 Before handing off, make the daemon state boring:

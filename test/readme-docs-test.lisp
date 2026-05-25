@@ -48,6 +48,7 @@
   (assert-contains readme ":constraint \"workspace\"")
   (assert-contains readme "clpm registry trust refresh <name>")
   (assert-contains readme "clpm repl eval <form> --debug [debug-options]")
+  (assert-contains readme "uses Watchman")
   (assert-contains readme "call watch-system --name SYSTEM` watches ASDF")
   (assert-contains readme "component files and reloads the system through ASDF")
   (assert-not-contains readme "--auto-revert")

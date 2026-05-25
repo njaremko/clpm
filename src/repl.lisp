@@ -2915,12 +2915,13 @@ unwinds. Any in-flight evals are interrupted via the unwind-protect."
 ;;; ----------------------------------------------------------------------------
 ;;; File watching (BRIDGE_V2 #180-#182)
 ;;;
-;;; A file watch is a background thread that polls a directory's `*.glob`
-;;; entries every 1 s. On mtime change the watcher LOADs the file and
-;;; streams `event: file-reloaded' / `event: reload-failed' frames back
-;;; through the original `watch' request's context.
+;;; A file watch is a background thread that observes a directory's `*.glob`
+;;; entries. It uses Watchman when available, otherwise it polls every 1 s.
+;;; On mtime change the watcher LOADs the file and streams
+;;; `event: file-reloaded' / `event: reload-failed' frames back through the
+;;; original `watch' request's context.
 ;;;
-;;; A system watch polls the concrete source files from ASDF's component
+;;; A system watch observes the concrete source files from ASDF's component
 ;;; graph. On mtime change it debounces the batch and reloads with
 ;;; `asdf:load-system', so component ordering, macros, and dependents stay
 ;;; under ASDF's semantics instead of direct-loading one changed file.
@@ -2929,7 +2930,10 @@ unwinds. Any in-flight evals are interrupted via the unwind-protect."
 ;;; ----------------------------------------------------------------------------
 
 (defconstant +watch-poll-seconds+ 1)
+(defconstant +watchman-idle-seconds+ 1/10)
 (defconstant +system-watch-debounce-seconds+ 1)
+
+(defparameter *watchman-enabled* t)
 
 (defstruct watch
   (id 0 :type integer)
@@ -2944,8 +2948,25 @@ unwinds. Any in-flight evals are interrupted via the unwind-protect."
   ctx
   thread
   control-mailbox
+  (backend :polling :type keyword)
+  backend-reason
+  watchman-process
+  watchman-input
+  watchman-output
+  watchman-reader-thread
+  watchman-mailbox
+  watchman-root
+  watchman-relative-path
+  watchman-subscription
   ;; truename namestring -> file-write-date integer
   (mtimes (make-hash-table :test 'equal)))
+
+(defun %json-array-items (value)
+  (when (and (consp value) (eq (car value) :array))
+    (cadr value)))
+
+(defun %watch-backend-name (watch)
+  (string-downcase (symbol-name (watch-backend watch))))
 
 (defun %watch-pattern (dir glob)
   "Return the wild pathname used by `directory' to enumerate matches."
@@ -2999,6 +3020,46 @@ unwinds. Any in-flight evals are interrupted via the unwind-protect."
       ((not (find #\* glob))
        (string-equal name glob))
       (t nil))))
+
+(defun %watch-parent-directory-namestring (path)
+  (namestring (uiop:pathname-directory-pathname path)))
+
+(defun %watch-directory-identities (dir)
+  (let* ((configured (namestring (uiop:ensure-directory-pathname dir)))
+         (canonical (handler-case
+                        (namestring (truename configured))
+                      (error () configured))))
+    (if (string= configured canonical)
+        (list configured)
+        (list configured canonical))))
+
+(defun %watch-direct-file-p (watch path)
+  (and (member (%watch-parent-directory-namestring path)
+               (%watch-directory-identities (watch-dir watch))
+               :test #'string=)
+       (%file-name-matches-glob-p path (watch-glob watch))))
+
+(defun %watch-system-source-file-p (watch path)
+  (member (%watch-file-namestring path)
+          (watch-source-files watch)
+          :test #'string=))
+
+(defun %watch-relevant-path-p (watch path)
+  (ecase (watch-kind watch)
+    (:file (%watch-direct-file-p watch path))
+    (:system (%watch-system-source-file-p watch path))))
+
+(defun %watch-event-file-keys (watch path)
+  (let ((file (%watch-file-namestring path)))
+    (remove-duplicates
+     (append
+      (list file)
+      (when (eq (watch-kind watch) :file)
+        (loop for dir in (%watch-directory-identities (watch-dir watch))
+              collect (namestring
+                       (merge-pathnames (file-namestring path)
+                                        (uiop:ensure-directory-pathname dir))))))
+     :test #'string=)))
 
 (defun %asdf-component-children (component)
   (handler-case (asdf:component-children component)
@@ -3124,10 +3185,23 @@ still attached. Failures (closed socket) are swallowed."
                     "diagnostics"
                     (%json-array (cdr (assoc :diagnostics reload)))))
       (t
-       (%watch-emit watch "reload-failed"
-                    "file" path
-                    "diagnostics"
-                    (%json-array (cdr (assoc :diagnostics reload))))))))
+        (%watch-emit watch "reload-failed"
+                     "file" path
+                     "diagnostics"
+                     (%json-array (cdr (assoc :diagnostics reload))))))))
+
+(defun %watch-handle-changes (watch changed removed)
+  "Apply already-detected file changes to WATCH's reload semantics."
+  (dolist (file removed)
+    (%watch-emit watch "file-removed" "file" file))
+  (cond
+    ((eq (watch-kind watch) :system)
+     (%queue-system-reload watch (append changed removed))
+     (when (%system-reload-due-p watch)
+       (%run-system-watch-reload watch)))
+    (t
+     (dolist (file changed)
+       (%watch-load-changed-file watch file)))))
 
 (defun %queue-system-reload (watch files)
   (when files
@@ -3183,57 +3257,331 @@ still attached. Failures (closed socket) are swallowed."
 added / modified / deleted files."
   (multiple-value-bind (changed removed)
       (%watch-update-mtimes watch)
-    (dolist (file removed)
-      (%watch-emit watch "file-removed" "file" file))
-    (cond
-      ((eq (watch-kind watch) :system)
-       (%queue-system-reload watch (append changed removed))
-       (when (%system-reload-due-p watch)
-         (%run-system-watch-reload watch)))
-      (t
-       (dolist (file changed)
-         (%watch-load-changed-file watch file))))))
+    (%watch-handle-changes watch changed removed)))
+
+(defun %watch-record-existing-file-event (watch path)
+  "Update WATCH's mtime table for a Watchman existing-file event.
+Returns the canonical file namestring when the event is new or newer."
+  (let ((file (%watch-file-namestring path)))
+    (when (%watch-relevant-path-p watch file)
+      (let ((mtime (handler-case (file-write-date file)
+                     (error () nil))))
+        (when mtime
+          (let ((prior (gethash file (watch-mtimes watch))))
+            (setf (gethash file (watch-mtimes watch)) mtime)
+            (when (or (null prior) (> mtime prior))
+              file)))))))
+
+(defun %watch-record-removed-file-event (watch path)
+  "Update WATCH's mtime table for a Watchman removal event.
+Returns the watched file namestring when the removal was known and relevant."
+  (let ((file (%watch-file-namestring path)))
+    (when (%watch-relevant-path-p watch file)
+      (loop for key in (%watch-event-file-keys watch path)
+            do (multiple-value-bind (_ present?)
+                   (gethash key (watch-mtimes watch))
+                 (declare (ignore _))
+                 (when present?
+                   (remhash key (watch-mtimes watch))
+                   (return key)))))))
+
+(defun %watchman-enabled-p ()
+  (and *watchman-enabled*
+       (eq (clpm.repl.compat:host-impl) :sbcl)
+       (clpm.platform:which "watchman")))
+
+(defun %watchman-command-json (&rest items)
+  (%json-array items))
+
+(defun %watchman-run-json-command (command &key (timeout 5))
+  "Run one Watchman JSON command and return its response object.
+Signals on transport, exit-status, or JSON-level errors."
+  (let ((watchman (%watchman-enabled-p)))
+    (unless watchman
+      (error "watchman is not available"))
+    (multiple-value-bind (output error-output code)
+        (clpm.platform:run-program
+         (list watchman "-j" "--no-pretty")
+         :input (concatenate 'string
+                             (clpm.io.json:write-json-to-string command)
+                             (string #\Newline))
+         :output :string
+         :error-output :string
+         :timeout timeout)
+      (unless (zerop code)
+        (error "watchman exited with status ~D: ~A" code error-output))
+      (let ((response (clpm.io.json:read-json-from-string output)))
+        (let ((remote-error (%json-getf response "error")))
+          (when remote-error
+            (error "watchman error: ~A" remote-error)))
+        response))))
+
+(defun %watchman-watch-project (dir)
+  (let* ((response (%watchman-run-json-command
+                    (%watchman-command-json "watch-project"
+                                            (namestring
+                                             (uiop:ensure-directory-pathname
+                                              dir)))))
+         (root (%json-getf response "watch"))
+         (relative (%json-getf response "relative_path")))
+    (unless (stringp root)
+      (error "watchman watch-project response did not include a watch root"))
+    (values root (and (stringp relative) relative))))
+
+(defun %watchman-subscribe-options (relative-path)
+  (let ((fields (list (cons "fields" (%json-array (list "name" "exists" "type"))))))
+    (when relative-path
+      (setf fields (append fields (list (cons "relative_root" relative-path)))))
+    (list :object fields)))
+
+(defun %watchman-write-command (stream command)
+  (clpm.io.json:write-json command stream)
+  (write-char #\Newline stream)
+  (force-output stream))
+
+#+sbcl
+(defun %watchman-launch-persistent-process ()
+  (let ((watchman (%watchman-enabled-p)))
+    (unless watchman
+      (error "watchman is not available"))
+    (let ((process (sb-ext:run-program
+                    watchman
+                    (list "-j" "--server-encoding=json" "--no-pretty" "-p")
+                    :input :stream
+                    :output :stream
+                    :error nil
+                    :wait nil
+                    :search nil)))
+      (values process
+              (sb-ext:process-input process)
+              (sb-ext:process-output process)))))
+
+#-sbcl
+(defun %watchman-launch-persistent-process ()
+  (error "persistent watchman subscriptions require SBCL process streams"))
+
+(defun %watchman-reader-loop (stream mailbox)
+  (loop
+    (handler-case
+        (let ((response (clpm.io.json:read-json stream)))
+          (clpm.repl.compat:send-message mailbox (list :response response)))
+      (error (c)
+        (clpm.repl.compat:send-message mailbox
+                                       (list :closed (princ-to-string c)))
+        (return)))))
+
+(defun %watchman-relative-prefix-p (name relative-path)
+  (let ((prefix (concatenate 'string relative-path "/")))
+    (and (>= (length name) (length prefix))
+         (string= prefix name :end2 (length prefix)))))
+
+(defun %watchman-file-path (watch name)
+  "Return an absolute pathname for Watchman's relative NAME."
+  (when (stringp name)
+    (let ((relative-path (watch-watchman-relative-path watch)))
+      (cond
+        ((and relative-path (%watchman-relative-prefix-p name relative-path))
+         (merge-pathnames name
+                          (uiop:ensure-directory-pathname
+                           (watch-watchman-root watch))))
+        (t
+         (merge-pathnames name
+                          (uiop:ensure-directory-pathname
+                           (watch-dir watch))))))))
+
+(defun %watchman-file-entry-name (entry)
+  (cond
+    ((stringp entry) entry)
+    ((and (consp entry) (eq (car entry) :object))
+     (%json-getf entry "name"))
+    (t nil)))
+
+(defun %watchman-file-entry-exists-p (entry)
+  (not (and (consp entry)
+            (eq (car entry) :object)
+            (eq (%json-getf entry "exists" t) :false))))
+
+(defun %watchman-file-entry-regular-file-p (entry)
+  (let ((type (and (consp entry)
+                   (eq (car entry) :object)
+                   (%json-getf entry "type"))))
+    (or (null type)
+        (and (stringp type) (string= type "f")))))
+
+(defun %watchman-update-mtimes (watch response)
+  "Update WATCH's mtime table from one Watchman subscription RESPONSE.
+Returns changed and removed file namestrings."
+  (let ((changed '())
+        (removed '()))
+    (dolist (entry (%json-array-items (%json-getf response "files")))
+      (let ((path (%watchman-file-path watch (%watchman-file-entry-name entry))))
+        (when path
+          (let* ((exists? (%watchman-file-entry-exists-p entry))
+                 (file (cond
+                         ((and exists?
+                               (%watchman-file-entry-regular-file-p entry))
+                          (%watch-record-existing-file-event watch path))
+                         ((not exists?)
+                          (%watch-record-removed-file-event watch path)))))
+            (when file
+              (if exists?
+                  (push file changed)
+                  (push file removed)))))))
+    (values (nreverse changed) (nreverse removed))))
+
+(defun %watchman-stop (watch)
+  (ignore-errors (close (watch-watchman-input watch)))
+  (ignore-errors (close (watch-watchman-output watch)))
+  #+sbcl
+  (when (watch-watchman-process watch)
+    (ignore-errors (sb-ext:process-kill (watch-watchman-process watch) 15))
+    (ignore-errors (sb-ext:process-close (watch-watchman-process watch))))
+  (when (and (watch-watchman-reader-thread watch)
+             (clpm.repl.compat:thread-alive-p
+              (watch-watchman-reader-thread watch)))
+    (ignore-errors
+      (clpm.repl.compat:terminate-thread (watch-watchman-reader-thread watch))))
+  (setf (watch-watchman-process watch) nil
+        (watch-watchman-input watch) nil
+        (watch-watchman-output watch) nil
+        (watch-watchman-reader-thread watch) nil
+        (watch-watchman-mailbox watch) nil
+        (watch-watchman-root watch) nil
+        (watch-watchman-relative-path watch) nil
+        (watch-watchman-subscription watch) nil))
+
+(defun %watchman-start (watch)
+  "Try to attach WATCH to Watchman. Return true on success, NIL and reason on
+fallback. The caller keeps polling semantics when this returns NIL."
+  (handler-case
+      (progn
+        (unless (%watchman-enabled-p)
+          (error "watchman is not available"))
+        (multiple-value-bind (root relative-path)
+            (%watchman-watch-project (watch-dir watch))
+          (multiple-value-bind (process input output)
+              (%watchman-launch-persistent-process)
+            (let* ((mailbox (clpm.repl.compat:make-mailbox))
+                   (subscription (format nil "clpm-repl-~D" (watch-id watch)))
+                   (command (%watchman-command-json
+                             "subscribe"
+                             root
+                             subscription
+                             (%watchman-subscribe-options relative-path))))
+              (setf (watch-watchman-process watch) process
+                    (watch-watchman-input watch) input
+                    (watch-watchman-output watch) output
+                    (watch-watchman-mailbox watch) mailbox
+                    (watch-watchman-root watch) root
+                    (watch-watchman-relative-path watch) relative-path
+                    (watch-watchman-subscription watch) subscription)
+              (%watchman-write-command input command)
+              (setf (watch-watchman-reader-thread watch)
+                    (clpm.repl.compat:make-thread
+                     (lambda () (%watchman-reader-loop output mailbox))
+                     :name (format nil "clpm.repl.watchman[~D]"
+                                   (watch-id watch))))
+              (setf (watch-backend watch) :watchman
+                    (watch-backend-reason watch) nil)
+              t))))
+    (error (c)
+      (%watchman-stop watch)
+      (setf (watch-backend watch) :polling
+            (watch-backend-reason watch) (princ-to-string c))
+      (values nil (princ-to-string c)))))
+
+(defun %watchman-fallback-to-polling (watch reason)
+  (when (eq (watch-backend watch) :watchman)
+    (setf (watch-backend watch) :polling
+          (watch-backend-reason watch) reason)
+    (%watchman-stop watch)
+    (%watch-emit watch "watch-backend-changed"
+                 "backend" (%watch-backend-name watch)
+                 "reason" reason)))
+
+(defun %watchman-handle-response (watch response)
+  (cond
+    ((%json-getf response "error")
+     (%watchman-fallback-to-polling
+      watch
+      (format nil "watchman error: ~A" (%json-getf response "error"))))
+    ((%json-getf response "subscription")
+     (multiple-value-bind (changed removed)
+         (%watchman-update-mtimes watch response)
+       (%watch-handle-changes watch changed removed)))
+    (t nil)))
+
+(defun %watchman-drain (watch)
+  (let ((mailbox (watch-watchman-mailbox watch)))
+    (when mailbox
+      (loop for message = (clpm.repl.compat:receive-message-no-hang mailbox)
+            while (and (eq (watch-backend watch) :watchman)
+                       (cdr message))
+            do (destructuring-bind (kind payload) (car message)
+                 (case kind
+                   (:response (%watchman-handle-response watch payload))
+                   (:closed (%watchman-fallback-to-polling watch payload))))))))
+
+(defun %watch-start-observing (watch)
+  "Seed WATCH and choose its notification backend."
+  (loop for (f . mt) in (%watch-scan watch)
+        do (setf (gethash f (watch-mtimes watch)) mt))
+  (unless (%watchman-start watch)
+    (setf (watch-backend watch) :polling))
+  ;; Close the small race between the initial seed and Watchman subscription.
+  ;; Future iterations use Watchman events when the backend is active.
+  (when (eq (watch-backend watch) :watchman)
+    (%watch-poll watch)))
 
 (defun %watch-loop (server watch)
-  "Daemon thread for one watch. Polls every second; exits when its
+  "Daemon thread for one watch. Observes file changes; exits when its
 control mailbox receives `:stop'. Emits the terminal frame on the way
 out so the watcher's `watch' request finally completes."
   (let ((mbox (watch-control-mailbox watch)))
+    (%watch-start-observing watch)
     (%watch-emit watch "watch-started"
                  "id" (watch-id watch)
                  "kind" (string-downcase (symbol-name (watch-kind watch)))
                  "dir" (watch-dir watch)
                  "glob" (watch-glob watch)
-                 "system" (watch-system-name watch))
-    ;; Seed the mtime map so the first poll doesn't fire a flood of
-    ;; "file-reloaded" events for files that haven't actually changed
-    ;; since the watch started.
-    (loop for (f . mt) in (%watch-scan watch)
-          do (setf (gethash f (watch-mtimes watch)) mt))
+                 "system" (watch-system-name watch)
+                 "backend" (%watch-backend-name watch)
+                 "reason" (watch-backend-reason watch))
     (loop
       (let ((msg (clpm.repl.compat:receive-message-no-hang mbox)))
         (when (cdr msg)
           (case (car msg)
             (:stop
-             (let ((ctx (watch-ctx watch)))
-               (when ctx
-                 (%emit-terminal
-                  ctx
-                  (%success-response (request-context-id ctx)
-                                     (%json-object "id" (watch-id watch)
-                                                   "unwatched" t)))))
-             (clpm.repl.compat:with-mutex
-                 ((server-watches-mutex server))
-               (remhash (watch-id watch) (server-watches server)))
-             (return)))))
-      (handler-case (%watch-poll watch)
+              (%watchman-stop watch)
+              (let ((ctx (watch-ctx watch)))
+                (when ctx
+                  (%emit-terminal
+                   ctx
+                   (%success-response (request-context-id ctx)
+                                      (%json-object "id" (watch-id watch)
+                                                    "unwatched" t)))))
+              (clpm.repl.compat:with-mutex
+                  ((server-watches-mutex server))
+                (remhash (watch-id watch) (server-watches server)))
+              (return)))))
+      (handler-case
+          (ecase (watch-backend watch)
+            (:watchman
+             (%watchman-drain watch)
+             (when (and (eq (watch-kind watch) :system)
+                        (%system-reload-due-p watch))
+               (%run-system-watch-reload watch)))
+            (:polling
+             (%watch-poll watch)))
         (error (c)
           (%watch-emit watch "watch-error" "message" (princ-to-string c))))
-      (sleep +watch-poll-seconds+))))
+      (sleep (if (eq (watch-backend watch) :watchman)
+                 +watchman-idle-seconds+
+                 +watch-poll-seconds+)))))
 
 (defun %make-watch (server &key (kind :file) dir (glob "*.lisp") system-name
                             source-files system-source-file ctx)
-  "Spawn a fresh watch, register it, and start its polling thread."
+  "Spawn a fresh watch, register it, and start its observer thread."
   (clpm.repl.compat:with-mutex ((server-watches-mutex server))
     (let* ((id (incf (server-watch-counter server)))
             (w (make-watch :id id
@@ -3276,7 +3624,8 @@ out so the watcher's `watch' request finally completes."
   :doc "Required: `dir' (absolute path). Optional: `glob' (default
 \"*.lisp\"). Returns immediately with `{id, dir, glob}', then streams
 `event: file-reloaded' / `event: reload-failed' / `event: file-removed'
-frames as files on disk change. Polls at 1 s.
+frames as files on disk change. Uses Watchman when available and falls back
+to 1 s polling otherwise.
 
 The terminal `result' frame is emitted when `unwatch ID' is called or
 when the daemon shuts down. This is a file-level watcher; it direct-LOADs
@@ -3321,7 +3670,8 @@ the changed file and deliberately does not apply ASDF component semantics."
 \"*.lisp\") for component source basenames. Resolves the system with ASDF,
 watches its .asd file and component source files, and debounces changed files
 into one `asdf:load-system' call. Streams `event: system-reloaded' or
-`event: system-reload-failed' with the changed file list."
+`event: system-reload-failed' with the changed file list. Uses Watchman when
+available and falls back to 1 s polling otherwise."
   :params (list (list :name "name" :type :string :required t
                       :description "ASDF system name.")
                 (list :name "glob" :type :string :required nil
@@ -3368,7 +3718,7 @@ into one `asdf:load-system' call. Streams `event: system-reloaded' or
  (make-method-spec
   :name "list-watches"
   :summary "Return every active directory watcher."
-  :doc "Returns `{entries: [{id, kind, dir, glob, system, alive}, ...]}'."
+  :doc "Returns `{entries: [{id, kind, dir, glob, system, backend, alive}, ...]}'."
   :params nil
   :handler
   (lambda (server params id ctx)
@@ -3382,11 +3732,12 @@ into one `asdf:load-system' call. Streams `event: system-reloaded' or
                   (%json-object
                    "id" (watch-id w)
                    "kind" (string-downcase (symbol-name (watch-kind w)))
-                   "dir" (watch-dir w)
-                   "glob" (watch-glob w)
-                   "system" (watch-system-name w)
-                   "alive" (and (watch-thread w)
-                                (clpm.repl.compat:thread-alive-p
+                    "dir" (watch-dir w)
+                    "glob" (watch-glob w)
+                    "system" (watch-system-name w)
+                    "backend" (%watch-backend-name w)
+                    "alive" (and (watch-thread w)
+                                 (clpm.repl.compat:thread-alive-p
                                  (watch-thread w))
                                t)))
                (%all-watches server))))))))

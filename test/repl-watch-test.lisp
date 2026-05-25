@@ -85,8 +85,21 @@
   (with-open-file (s path :direction :output
                           :if-exists :supersede
                           :if-does-not-exist :create
-                          :external-format :utf-8)
+                           :external-format :utf-8)
     (write-string contents s)))
+
+(defun with-watchman-enabled (enabled fn)
+  (let ((old clpm.repl::*watchman-enabled*))
+    (unwind-protect
+         (progn
+           (setf clpm.repl::*watchman-enabled* enabled)
+           (funcall fn))
+      (setf clpm.repl::*watchman-enabled* old))))
+
+(defun find-watch-entry (entries id)
+  (find id entries
+        :test (lambda (needle entry)
+                (eql needle (lookup entry "id")))))
 
 (defun make-watch-system ()
   (let* ((n (random (expt 2 32)))
@@ -175,6 +188,112 @@
 (format t "  watch lifecycle OK~%")
 
 ;;; ----------------------------------------------------------------------------
+;;; Watchman is an optional notification backend. Disabling it must leave the
+;;; existing polling behavior selected and visible through watch-started and
+;;; list-watches.
+
+(format t "Test: watchman-disabled watches use polling backend~%")
+(with-watchman-enabled
+ nil
+ (lambda ()
+   (with-daemon
+     (lambda (sock)
+       (let* ((dir (make-watch-dir))
+              (id-box (sb-concurrency:make-mailbox))
+              (started-box (sb-concurrency:make-mailbox))
+              (watcher
+                (sb-thread:make-thread
+                 (lambda ()
+                   (do-rpc sock "watch"
+                           (list (cons "dir" dir))
+                           :on-event
+                           (lambda (frame)
+                             (let ((ev (lookup frame "event")))
+                               (cond
+                                 ((string= ev "watch-acknowledged")
+                                  (sb-concurrency:send-message
+                                   id-box (lookup frame "id")))
+                                 ((string= ev "watch-started")
+                                  (sb-concurrency:send-message
+                                   started-box frame))))
+                             nil)))
+                 :name "test-watch-polling-backend")))
+         (let* ((wid (receive-message-or-fail id-box "watch acknowledgement"))
+                (started (receive-message-or-fail started-box "watch-started"))
+                (listed (do-rpc sock "list-watches"))
+                (entries (array-items (lookup (lookup listed "result")
+                                              "entries")))
+                (entry (find-watch-entry entries wid)))
+           (assert-true (string= "polling" (lookup started "backend"))
+                        "watch-started should report polling backend: ~S"
+                        started)
+           (assert-true entry "list-watches missing wid=~A entries=~S"
+                        wid entries)
+           (assert-true (string= "polling" (lookup entry "backend"))
+                        "list-watches should report polling backend: ~S"
+                        entry)
+           (do-rpc sock "unwatch" (list (cons "id" wid)))
+           (sb-thread:join-thread watcher)))))))
+(format t "  watchman-disabled fallback OK~%")
+
+;;; ----------------------------------------------------------------------------
+;;; Watchman notification packets are only an event source; reload decisions
+;;; still go through the same mtime table and file-level glob semantics.
+
+(format t "Test: watchman event translation preserves watch semantics~%")
+(let* ((dir (make-watch-dir))
+       (file (format nil "~Atarget.lisp" dir))
+       (nested (format nil "~Asub/nested.lisp" dir))
+       (watch (clpm.repl::make-watch :id 1 :kind :file :dir dir
+                                     :glob "*.lisp")))
+  (unwind-protect
+       (progn
+         (write-file file "(defun watchman-target () :ok)")
+         (multiple-value-bind (changed removed)
+             (clpm.repl::%watchman-update-mtimes
+              watch
+              (clpm.repl::%json-object
+               "files"
+               (clpm.repl::%json-array
+                (list (clpm.repl::%json-object "name" "target.lisp"
+                                                "exists" t)))))
+           (assert-true (and changed (null removed))
+                        "existing watchman file event should be changed: ~S ~S"
+                        changed removed)
+           (assert-true (search "target.lisp" (first changed))
+                        "changed file should be target.lisp: ~S" changed))
+         (write-file nested "(defun nested-target () :ignored)")
+         (multiple-value-bind (changed removed)
+             (clpm.repl::%watchman-update-mtimes
+              watch
+              (clpm.repl::%json-object
+               "files"
+               (clpm.repl::%json-array
+                (list (clpm.repl::%json-object "name" "sub/nested.lisp"
+                                                "exists" t)))))
+           (assert-true (and (null changed) (null removed))
+                        "nested files should not match file-level watch: ~S ~S"
+                        changed removed))
+         (delete-file file)
+         (multiple-value-bind (changed removed)
+             (clpm.repl::%watchman-update-mtimes
+              watch
+              (clpm.repl::%json-object
+               "files"
+               (clpm.repl::%json-array
+                (list (clpm.repl::%json-object "name" "target.lisp"
+                                                "exists" :false)))))
+           (assert-true (and (null changed) removed)
+                        "removed watchman file event should be removed: ~S ~S"
+                        changed removed)
+           (assert-true (search "target.lisp" (first removed))
+                        "removed file should be target.lisp: ~S" removed)))
+    (ignore-errors (delete-file file))
+    (ignore-errors (delete-file nested))
+    (ignore-errors (uiop:delete-directory-tree dir :validate t))))
+(format t "  watchman event translation OK~%")
+
+;;; ----------------------------------------------------------------------------
 ;;; #180: mtime change fires file-reloaded.
 
 (format t "Test: file-reloaded fires when a watched file changes~%")
@@ -204,9 +323,9 @@
                           nil)))
               :name "test-watch-reload")))
       (let ((wid (sb-concurrency:receive-message id-box)))
-        ;; Give the watcher one polling cycle to seed its mtime map.
+        ;; Give the watcher time to seed its mtime map and select a backend.
         (sleep 1.2)
-        ;; Now create the file. The next poll should emit file-reloaded.
+        ;; Now create the file. The watcher should emit file-reloaded.
         (write-file file
                     "(defun watch-target () :hello)")
         (let ((reload-evt (sb-concurrency:receive-message reload-box)))

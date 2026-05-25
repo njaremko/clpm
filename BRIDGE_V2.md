@@ -637,18 +637,12 @@ diagnostics. Optional, opt-in.
 
 ### Tickets
 
-- **`#180 P3 watch` `watch DIR [--glob '*.lisp']`.** Daemon polls
-  `directory + glob` (1s interval; native FSEvents/inotify is out of
-  scope), and on a mtime change, re-evaluates the file via
-  `compile-file` semantics. Streams `diagnostic` and a terminal
-  `reloaded` event.
+- **`#180 P3 watch` `watch DIR [--glob '*.lisp']`.** Daemon uses Watchman
+  when available and falls back to `directory + glob` polling (1s interval).
+  On a mtime change, it direct-LOADs the file and streams `file-reloaded` or
+  `reload-failed` events.
 
 - **`#181 P3 watch` `unwatch ID` / `list-watches`.** Mirror.
-
-- **`#182 P3 watch` Auto-revert support.** When a watched file changes,
-  any in-image definition recorded as coming from that file is
-  automatically reverted to the on-disk version, with a notification.
-  Makes "edit on disk, see effect immediately" Just Work.
 
 ---
 

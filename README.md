@@ -155,10 +155,10 @@ daemon; it never starts one implicitly. Transport fields such as
   and `call kill-worker --name NAME` manage them.
 - **Trace.** `call trace`, `call untrace`, and `call list-traced`.
   Use `repl eval` for explicit timing or profiling forms inside the image.
-- **File watching.** `call watch --dir DIR --glob '*.lisp'` polls and
-  direct-LOADs matching files on mtime change, streaming `file-reloaded` /
-  `reload-failed` events. `call watch-system --name SYSTEM` watches ASDF
-  component files and reloads the system through ASDF, streaming
+- **File watching.** `call watch --dir DIR --glob '*.lisp'` uses Watchman
+  when available, falls back to polling, and direct-LOADs matching files on
+  mtime change, streaming `file-reloaded` / `reload-failed` events.
+  `call watch-system --name SYSTEM` watches ASDF component files and reloads the system through ASDF, streaming
   `system-reloaded` / `system-reload-failed` events.
 - **Image introspection.** `image-info`, `loaded-systems`, `list-packages`,
   `gc`, all through `call METHOD`.
