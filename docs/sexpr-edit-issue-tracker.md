@@ -386,7 +386,7 @@ Acceptance evidence:
 
 ### SE-027: Effect Summaries
 
-Status: open
+Status: in-progress
 
 Provide approximate effect summaries for forms: reads, writes, allocation, unknown calls, possible signals, and mutation of generalized places. Effects are conservative observations used to guard rewrites, not a proof system.
 

@@ -6150,6 +6150,359 @@ macroexpands|specializes). Returns
   (when (and (integerp index) (<= 0 index) (listp form))
     (nth index form)))
 
+(defun %sexpr-child-at-index (form index)
+  (let ((elements (%sexpr-proper-list-elements form)))
+    (if (and elements (integerp index) (<= 0 index)
+             (< index (length elements)))
+        (values (nth index elements) t)
+        (values nil nil))))
+
+(defun %sexpr-form-at-child-path (form child-path)
+  (let ((current form))
+    (dolist (index child-path (values current t))
+      (multiple-value-bind (child present-p)
+          (%sexpr-child-at-index current index)
+        (unless present-p
+          (return-from %sexpr-form-at-child-path (values nil nil)))
+        (setf current child)))))
+
+(defun %sexpr-effect-constant-symbol-p (symbol)
+  (or (eq symbol nil)
+      (eq symbol t)
+      (keywordp symbol)))
+
+(defun %sexpr-effect-constant-form-p (form)
+  (or (numberp form)
+      (stringp form)
+      (characterp form)
+      (pathnamep form)
+      (and (symbolp form)
+           (%sexpr-effect-constant-symbol-p form))
+      (%sexpr-quoted-form-p form)))
+
+(defun %sexpr-effect-special-operator-p (operator)
+  (and (symbolp operator)
+       (member (symbol-name operator)
+               '("BLOCK" "CATCH" "DECLARE" "EVAL-WHEN" "FLET" "FUNCTION"
+                 "GO" "IF" "LABELS" "LET" "LET*" "LOAD-TIME-VALUE"
+                 "LOCALLY" "MACROLET" "MULTIPLE-VALUE-CALL" "MULTIPLE-VALUE-PROG1"
+                 "PROGN" "PROGV" "QUOTE" "RETURN-FROM" "SETQ" "SYMBOL-MACROLET"
+                 "TAGBODY" "THE" "THROW" "UNWIND-PROTECT"
+                 "DEFCLASS" "DEFCONSTANT" "DEFGENERIC" "DEFMACRO" "DEFMETHOD"
+                 "DEFPACKAGE" "DEFPARAMETER" "DEFSTRUCT" "DEFUN" "DEFVAR"
+                 "IN-PACKAGE")
+               :test #'string=)))
+
+(defun %sexpr-effect-allocating-operator-p (operator)
+  (and (symbolp operator)
+       (or (member (symbol-name operator)
+                   '("APPEND" "COPY-ALIST" "COPY-LIST" "COPY-SEQ" "COPY-TREE"
+                     "CONS" "LIST" "LIST*" "MAKE-ARRAY" "MAKE-HASH-TABLE"
+                     "MAKE-INSTANCE" "MAKE-LIST" "MAKE-PATHNAME" "VECTOR")
+                   :test #'string=)
+           (%string-prefix-p "MAKE-" (symbol-name operator)))))
+
+(defun %sexpr-effect-signaling-operator-p (operator)
+  (and (symbolp operator)
+       (member (symbol-name operator)
+               '("ASSERT" "CCASE" "CERROR" "CHECK-TYPE" "CTYPECASE"
+                 "ECASE" "ERROR" "ETYPECASE" "SIGNAL")
+               :test #'string=)))
+
+(defun %sexpr-effect-summary-for-form (form package)
+  (let ((reads '())
+        (writes '())
+        (unknown-calls '())
+        (may-signal '())
+        (notes '())
+        (allocates nil))
+    (labels ((printed (value)
+               (%sexpr-print-form-json value package))
+             (path-json (child-path)
+               (%json-array child-path))
+             (record-read (symbol child-path)
+               (push (%json-object
+                      "kind" "variable"
+                      "name" (symbol-name symbol)
+                      "path" (path-json child-path))
+                     reads))
+             (record-write (kind child-path &rest pairs)
+               (push (apply #'%json-object
+                            "kind" kind
+                            "path" (path-json child-path)
+                            pairs)
+                     writes))
+             (record-unknown-call (operator reason child-path call-form)
+               (push (%json-object
+                      "operator" (if (symbolp operator)
+                                      (symbol-name operator)
+                                      (printed operator))
+                      "reason" reason
+                      "path" (path-json child-path)
+                      "form" (printed call-form))
+                     unknown-calls))
+             (record-signal (operator child-path call-form)
+               (push (%json-object
+                      "operator" (symbol-name operator)
+                      "reason" "may_signal_condition"
+                      "path" (path-json child-path)
+                      "form" (printed call-form))
+                     may-signal))
+             (walk-sequence (forms child-path start-index)
+               (loop for child in forms
+                     for index from start-index
+                     do (walk child (append child-path (list index)))))
+             (walk-let-binding (binding child-path)
+               (cond
+                 ((symbolp binding) nil)
+                 ((and (consp binding) (second binding))
+                  (walk (second binding) (append child-path (list 1))))))
+             (walk-let-bindings (bindings child-path)
+               (loop for binding in bindings
+                     for index from 0
+                     do (walk-let-binding binding
+                                          (append child-path (list index)))))
+             (slot-name-from-quote (form)
+               (let ((elements (%sexpr-proper-list-elements form)))
+                 (when (and (= 2 (length elements))
+                            (symbolp (first elements))
+                            (string= "QUOTE" (symbol-name (first elements)))
+                            (symbolp (second elements)))
+                   (symbol-name (second elements)))))
+             (record-place-write (place child-path)
+               (let ((elements (%sexpr-proper-list-elements place)))
+                 (cond
+                   ((symbolp place)
+                    (record-write "variable" child-path
+                                  "name" (symbol-name place)
+                                  "place" (printed place)))
+                   ((and elements
+                         (symbolp (first elements))
+                         (string= "SLOT-VALUE" (symbol-name (first elements)))
+                         (>= (length elements) 3))
+                    (record-write "slot" child-path
+                                  "object" (printed (second elements))
+                                  "slot" (or (slot-name-from-quote
+                                              (third elements))
+                                             (printed (third elements)))
+                                  "place" (printed place))
+                    (walk (second elements) (append child-path (list 1)))
+                    (unless (%sexpr-effect-constant-form-p (third elements))
+                      (walk (third elements) (append child-path (list 2)))))
+                   ((and elements
+                         (symbolp (first elements))
+                         (member (symbol-name (first elements))
+                                 '("AREF" "CAR" "CDR" "CAAR" "CADR" "CDAR"
+                                   "CDDR" "ELT" "GETF" "GETHASH" "NTH" "SVREF")
+                                 :test #'string=))
+                    (record-write "generalized_place" child-path
+                                  "operator" (symbol-name (first elements))
+                                  "place" (printed place))
+                    (walk-sequence (rest elements) child-path 1))
+                   (t
+                    (record-write "generalized_place" child-path
+                                  "place" (printed place))
+                    (when elements
+                      (walk-sequence (rest elements) child-path 1))))))
+             (method-body-offset (elements)
+               (loop for tail on (cddr elements)
+                     for index from 2
+                     when (consp (first tail))
+                       return (1+ index)))
+             (walk (current child-path)
+               (cond
+                 ((%sexpr-effect-constant-form-p current) nil)
+                 ((symbolp current)
+                  (record-read current child-path))
+                 (t
+                  (let ((elements (%sexpr-proper-list-elements current)))
+                    (cond
+                      ((null elements)
+                       (push (%json-object
+                              "kind" "dotted_or_circular_form"
+                              "path" (path-json child-path)
+                              "message"
+                              "Effect summary skipped a non-proper list.")
+                             notes))
+                      (t
+                       (let* ((operator (first elements))
+                              (operator-name
+                                (and (symbolp operator)
+                                     (symbol-name operator))))
+                         (cond
+                           ((member operator-name '("QUOTE" "FUNCTION" "DECLARE")
+                                    :test #'string=)
+                            nil)
+                           ((member operator-name '("DEFUN" "DEFMACRO")
+                                    :test #'string=)
+                            (push (%json-object
+                                   "kind" "definition_body_summary"
+                                   "path" (path-json child-path)
+                                   "message"
+                                   "Effects summarize the definition body, not evaluating the top-level definition form.")
+                                  notes)
+                            (walk-sequence (cdddr elements) child-path 3))
+                           ((string= operator-name "LAMBDA")
+                            (walk-sequence (cddr elements) child-path 2))
+                           ((string= operator-name "DEFMETHOD")
+                            (let ((offset (method-body-offset elements)))
+                              (when offset
+                                (walk-sequence (nthcdr offset elements)
+                                               child-path offset))))
+                           ((member operator-name '("LET" "LET*") :test #'string=)
+                            (walk-let-bindings (second elements)
+                                               (append child-path (list 1)))
+                            (walk-sequence (cddr elements) child-path 2))
+                           ((string= operator-name "SETQ")
+                            (loop for tail on (rest elements) by #'cddr
+                                  for index from 1 by 2
+                                  for name = (first tail)
+                                  for value = (second tail)
+                                  while name
+                                  do (when (symbolp name)
+                                       (record-write
+                                        "variable" (append child-path
+                                                           (list index))
+                                        "name" (symbol-name name)
+                                        "place" (printed name)))
+                                     (when (rest tail)
+                                       (walk value
+                                             (append child-path
+                                                     (list (1+ index)))))))
+                           ((string= operator-name "SETF")
+                            (loop for tail on (rest elements) by #'cddr
+                                  for index from 1 by 2
+                                  for place = (first tail)
+                                  for value = (second tail)
+                                  while place
+                                  do (record-place-write
+                                      place (append child-path (list index)))
+                                     (when (rest tail)
+                                       (walk value
+                                             (append child-path
+                                                     (list (1+ index)))))))
+                           ((string= operator-name "THE")
+                            (when (third elements)
+                              (walk (third elements)
+                                    (append child-path (list 2)))))
+                           ((%sexpr-effect-signaling-operator-p operator)
+                            (record-signal operator child-path current)
+                            (walk-sequence (rest elements) child-path 1))
+                           (t
+                            (when (%sexpr-effect-allocating-operator-p
+                                   operator)
+                              (setf allocates t))
+                            (cond
+                              ((member operator-name
+                                       '("FUNCALL" "APPLY" "SYMBOL-FUNCTION")
+                                       :test #'string=)
+                               (record-unknown-call operator
+                                                    "dynamic_function_designator"
+                                                    child-path current))
+                              ((and (symbolp operator)
+                                    (not (%sexpr-effect-special-operator-p
+                                          operator))
+                                    (not (fboundp operator)))
+                               (record-unknown-call operator
+                                                    "operator_not_fbound"
+                                                    child-path current)))
+                            (walk-sequence (rest elements) child-path 1)))))))))))
+      (walk form nil)
+      (%json-object
+       "reads" (%json-array (nreverse reads))
+       "writes" (%json-array (nreverse writes))
+       "allocates" (%sexpr-boolean-json allocates)
+       "calls_unknown" (%sexpr-boolean-json unknown-calls)
+       "unknown_calls" (%json-array (nreverse unknown-calls))
+       "may_signal" (%json-array (nreverse may-signal))
+       "notes" (%json-array (nreverse notes))))))
+
+(defun %dispatch-sexpr-effect-summary (server params id)
+  (let ((path (%json-getf params "path")))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      ((eq (%sexpr-child-path path) :invalid)
+       (%error-response id "protocol-error"
+                        "`path.child_path' must be an array of integers"))
+      (t
+       (let ((file (%sexpr-path-field path "file")))
+         (cond
+           ((not (stringp file))
+            (%error-response id "protocol-error" "`path.file' must be a string"))
+           (t
+            (multiple-value-bind (document error-response)
+                (%sexpr-read-document server file id)
+              (or error-response
+                  (let* ((actual-file
+                           (namestring
+                            (clpm.sexpr-edit:source-document-pathname
+                             document)))
+                         (forms (%sexpr-selected-forms document path)))
+                    (cond
+                      ((null forms)
+                       (%error-response id "eval-error"
+                                        "no form matched source path"))
+                      ((rest forms)
+                       (%success-response
+                        id
+                        (%json-object
+                         "status" "ambiguous"
+                         "file" actual-file
+                         "candidates"
+                         (%json-array
+                          (mapcar
+                           (lambda (form)
+                             (%sexpr-form-summary-json actual-file form))
+                           forms)))))
+                      (t
+                       (let* ((source-form (first forms))
+                              (pkg-name
+                                (clpm.sexpr-edit:source-form-package
+                                 source-form))
+                              (pkg (%reader-package-for-server server
+                                                               pkg-name)))
+                         (cond
+                           ((null pkg)
+                            (%error-response
+                             id "eval-error"
+                             (format nil "no such package: ~A" pkg-name)))
+                           (t
+                            (handler-case
+                                (let* ((source
+                                         (clpm.sexpr-edit:source-form-text
+                                          source-form))
+                                       (parsed (let ((*package* pkg))
+                                                 (%read-form source)))
+                                       (child-path (%sexpr-child-path path)))
+                                  (multiple-value-bind (selected present-p)
+                                      (%sexpr-form-at-child-path
+                                       parsed child-path)
+                                    (if present-p
+                                        (%success-response
+                                         id
+                                         (%json-object
+                                          "status" "ok"
+                                          "file" actual-file
+                                          "path" (%sexpr-path-json
+                                                  actual-file source-form)
+                                          "child_path"
+                                          (%json-array child-path)
+                                          "package"
+                                          (%public-package-name pkg server)
+                                          "form"
+                                          (%sexpr-print-form-json
+                                           selected pkg)
+                                          "effect"
+                                          (%sexpr-effect-summary-for-form
+                                           selected pkg)))
+                                        (%error-response
+                                         id "eval-error"
+                                         "child_path does not resolve to a form"))))
+                              (error (c)
+                                (%error-response id "eval-error"
+                                                 (princ-to-string c)))))))))))))))))))
+
 (defun %sexpr-scope-step (form next-index scope)
   (cond
     ((not (consp form)) scope)
@@ -6569,6 +6922,22 @@ macro shapes. Results are explicitly inferred and never reported as certain."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-macro-shape server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-effect-summary"
+  :summary "Summarize conservative evaluation effects for a source form."
+  :doc "Required: `path'. The path selects a top-level form and may include
+`child_path'. The summary reports syntactic variable reads, variable/slot or
+generalized-place writes, obvious allocation, explicit signaling forms, and
+unknown or dynamic calls. This is a conservative guardrail for structural
+rewrites, not a purity proof."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with file, selector, and optional child_path."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-effect-summary server params id))))
 
 (%register-method
  (make-method-spec

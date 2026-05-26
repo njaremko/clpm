@@ -250,6 +250,21 @@
 ")
     path))
 
+(defun make-effect-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-effect-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "effect.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defun effect-demo (x z)
+  (setf (slot-value x 'y) z)
+  (unknown-effect x)
+  42
+  x)
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -356,6 +371,8 @@
                    "sexpr-lint missing from methods")
       (assert-true (member "sexpr-macro-shape" method-names :test #'string=)
                    "sexpr-macro-shape missing from methods")
+      (assert-true (member "sexpr-effect-summary" method-names :test #'string=)
+                   "sexpr-effect-summary missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
@@ -1023,6 +1040,107 @@
                         "unfamiliar macro shape should stay unknown")
           (assert-true (lookup odd-result "uncertain")
                        "unknown macro shape should be uncertain"))
+        (let* ((effect-path (make-effect-source-file))
+               (effect-file (namestring effect-path))
+               (slot-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-effect-summary"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" effect-file
+                                   "top_level" 1
+                                   "child_path"
+                                   (list :array (list 3))))))
+               (slot-result (lookup slot-resp "result"))
+               (slot-effect (lookup slot-result "effect"))
+               (slot-writes (array-items (lookup slot-effect "writes")))
+               (slot-reads (array-items (lookup slot-effect "reads")))
+               (unknown-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-effect-summary"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" effect-file
+                                   "top_level" 1
+                                   "child_path"
+                                   (list :array (list 4))))))
+               (unknown-result (lookup unknown-resp "result"))
+               (unknown-effect (lookup unknown-result "effect"))
+               (constant-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-effect-summary"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" effect-file
+                                   "top_level" 1
+                                   "child_path"
+                                   (list :array (list 5))))))
+               (constant-result (lookup constant-resp "result"))
+               (constant-effect (lookup constant-result "effect"))
+               (variable-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-effect-summary"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" effect-file
+                                   "top_level" 1
+                                   "child_path"
+                                   (list :array (list 6))))))
+               (variable-result (lookup variable-resp "result"))
+               (variable-effect (lookup variable-result "effect")))
+          (assert-true slot-result "slot effect failed: ~S" slot-resp)
+          (assert-true (find "slot" slot-writes
+                             :key (lambda (write)
+                                    (lookup write "kind"))
+                             :test #'string=)
+                       "slot-value SETF should report a slot write: ~S"
+                       slot-effect)
+          (assert-true (find "X" slot-reads
+                             :key (lambda (read)
+                                    (lookup read "name"))
+                             :test #'string=)
+                       "slot-value SETF should read its object: ~S"
+                       slot-effect)
+          (assert-true unknown-result
+                       "unknown call effect failed: ~S" unknown-resp)
+          (assert-true (lookup unknown-effect "calls_unknown")
+                       "unknown function call should be marked unknown: ~S"
+                       unknown-effect)
+          (assert-equal 1
+                        (length (array-items
+                                 (lookup unknown-effect "unknown_calls")))
+                        "unknown function call should be listed once")
+          (assert-true constant-result
+                       "constant effect failed: ~S" constant-resp)
+          (assert-equal 0
+                        (length (array-items
+                                 (lookup constant-effect "reads")))
+                        "constant should have no reads")
+          (assert-equal 0
+                        (length (array-items
+                                 (lookup constant-effect "writes")))
+                        "constant should have no writes")
+          (assert-equal :false (lookup constant-effect "calls_unknown")
+                        "constant should not call unknown functions")
+          (assert-equal :false (lookup constant-effect "allocates")
+                        "constant should not allocate")
+          (assert-true variable-result
+                       "variable effect failed: ~S" variable-resp)
+          (assert-equal 1
+                        (length (array-items
+                                 (lookup variable-effect "reads")))
+                        "variable reference should have one read")
+          (assert-equal "X"
+                        (lookup (first (array-items
+                                        (lookup variable-effect "reads")))
+                                "name")
+                        "variable read should preserve the symbol name")
+          (assert-equal 0
+                        (length (array-items
+                                 (lookup variable-effect "writes")))
+                        "variable reference should not write")
+          (assert-equal :false (lookup variable-effect "calls_unknown")
+                        "variable reference should not call unknown functions"))
         (let* ((scope-path (make-scope-source-file))
                (scope-file (namestring scope-path))
                (bindings-resp
