@@ -5606,6 +5606,97 @@ accessors)."
            (error (c)
              (%error-response id "eval-error" (princ-to-string c))))))))))
 
+#+sbcl
+(defun %sexpr-specializer-json (specializer)
+  (cond
+    ((typep specializer 'class)
+     (%json-object
+      "kind" "class"
+      "name" (let ((name (class-name specializer)))
+               (and name (symbol-name name)))
+      "package" (let* ((name (class-name specializer))
+                       (pkg (and (symbolp name) (symbol-package name))))
+                  (and pkg (package-name pkg)))))
+    (t
+     (multiple-value-bind (eql-object eql-specializer-p)
+         (handler-case
+             (values (sb-mop:eql-specializer-object specializer) t)
+           (error () (values nil nil)))
+       (if eql-specializer-p
+           (%json-object
+            "kind" "eql"
+            "object" (%safe-prin1 eql-object))
+           (%json-object
+            "kind" "unknown"
+            "repr" (%safe-prin1 specializer)))))))
+
+#+sbcl
+(defun %sexpr-method-source-json (method)
+  (handler-case
+      (let ((source (sb-introspect:find-definition-source method)))
+        (and source (%definition-source-json source)))
+    (error () nil)))
+
+#+sbcl
+(defun %sexpr-method-json (method)
+  (%json-object
+   "qualifiers" (%json-array
+                 (mapcar #'%safe-prin1
+                         (sb-mop:method-qualifiers method)))
+   "lambda_list" (%safe-prin1 (sb-mop:method-lambda-list method))
+   "specializers" (%json-array
+                   (mapcar #'%sexpr-specializer-json
+                           (sb-mop:method-specializers method)))
+   "source" (%sexpr-method-source-json method)))
+
+(defun %dispatch-sexpr-generic-info (server params id)
+  (let* ((sym-name (%json-getf params "symbol"))
+         (pkg-name (%json-getf params "package"))
+         (sym (and (stringp sym-name)
+                   (%symbol-from-string sym-name pkg-name :server server)))
+         (function (and sym (fboundp sym) (fdefinition sym))))
+    (cond
+      ((not (stringp sym-name))
+       (%error-response id "protocol-error" "missing `symbol' param"))
+      ((or (null sym)
+           (null function)
+           (not (typep function 'generic-function)))
+       (%error-response id "eval-error"
+                        (format nil "not a generic function: ~A" sym-name)))
+      (t
+       #+sbcl
+       (%success-response
+        id
+        (%json-object
+         "name" (symbol-name sym)
+         "package" (and (symbol-package sym)
+                        (%public-package-name (symbol-package sym) server))
+         "lambda_list" (%safe-prin1
+                        (sb-mop:generic-function-lambda-list function))
+         "method_count" (length (sb-mop:generic-function-methods function))
+         "methods" (%json-array
+                    (mapcar #'%sexpr-method-json
+                            (sb-mop:generic-function-methods function)))))
+       #-sbcl
+       (%error-response id "eval-error"
+                        "sexpr-generic-info is SBCL-only")))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-generic-info"
+  :summary "Describe a generic function's lambda list and methods."
+  :doc "Required: `symbol'. Optional: `package'. Returns the generic
+function lambda list and each method's qualifiers, method lambda list,
+specializers, and best-effort source location."
+  :params (list (list :name "symbol" :type :string :required t
+                      :description "Generic function symbol.")
+                (list :name "package" :type :string :required nil
+                      :description "Resolve in this package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-generic-info server params id))))
+
 (%register-method
  (make-method-spec
   :name "function-info"

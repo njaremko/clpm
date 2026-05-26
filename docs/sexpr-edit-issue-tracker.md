@@ -200,7 +200,7 @@ Acceptance evidence:
 
 ### SE-012: CLOS And Generic Function Awareness
 
-Status: open
+Status: in-progress
 
 Expose class and generic function facts: class layout, direct superclasses, slots, readers/writers/accessors/initargs, generic function lambda list, methods, qualifiers, and specializers. Provide high-level `add-slot`, `rename-slot`, and `add-method` edit operations.
 

@@ -213,6 +213,8 @@
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
                    "sexpr-symbol-info missing from methods")
+      (assert-true (member "sexpr-generic-info" method-names :test #'string=)
+                   "sexpr-generic-info missing from methods")
       (assert-true (member "sexpr-system-graph" method-names :test #'string=)
                    "sexpr-system-graph missing from methods")
       (assert-true (member "sexpr-affected-files" method-names :test #'string=)
@@ -422,6 +424,56 @@
                        "FORMAT should include function kind: ~S" kinds)
           (assert-true definitions
                        "FORMAT should have definition entries"))
+        (let* ((setup-resp
+                 (clpm.repl:send-request
+                  sock "eval"
+                  :params
+                  (json-object
+                   "form"
+                   "(progn
+                      (defclass sexpr-formula-demo () ())
+                      (defclass sexpr-env-demo () ())
+                      (defgeneric sexpr-evaluate-demo (thing env))
+                      (defmethod sexpr-evaluate-demo
+                          ((thing sexpr-formula-demo)
+                           (env sexpr-env-demo))
+                        (list thing env))
+                      (defmethod sexpr-evaluate-demo :around
+                          ((thing sexpr-formula-demo) env)
+                        (call-next-method)))")))
+               (generic-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-generic-info"
+                  :params (json-object "symbol" "sexpr-evaluate-demo")))
+               (generic-result (lookup generic-resp "result"))
+               (methods (array-items (lookup generic-result "methods")))
+               (method-qualifiers
+                 (mapcar (lambda (method)
+                           (array-items (lookup method "qualifiers")))
+                         methods))
+               (specializer-names
+                 (loop for method in methods
+                       append
+                       (loop for specializer in
+                             (array-items (lookup method "specializers"))
+                             collect (lookup specializer "name")))))
+          (assert-true (lookup setup-resp "result")
+                       "generic setup failed: ~S" setup-resp)
+          (assert-true generic-result
+                       "generic-info failed: ~S" generic-resp)
+          (assert-equal "SEXPR-EVALUATE-DEMO"
+                        (lookup generic-result "name")
+                        "wrong generic function name")
+          (assert-equal 2 (lookup generic-result "method_count")
+                        "wrong method count")
+          (assert-true (member '(":AROUND") method-qualifiers
+                               :test #'equal)
+                       "missing :around qualifier: ~S"
+                       method-qualifiers)
+          (assert-true (member "SEXPR-FORMULA-DEMO" specializer-names
+                               :test #'string=)
+                       "missing formula specializer: ~S"
+                       specializer-names))
         (let* ((graph-resp
                  (clpm.repl:send-request
                   sock "sexpr-system-graph"
