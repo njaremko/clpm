@@ -248,7 +248,8 @@ Returns an integer when no decimal point or exponent is present, float otherwise
     (let ((text (get-output-stream-string buf)))
       (handler-case
           (if floatp
-              (let ((*read-default-float-format* 'double-float))
+              (let ((*read-default-float-format* 'double-float)
+                    (*read-eval* nil))
                 (with-input-from-string (s text)
                   (read s)))
               (parse-integer text))
