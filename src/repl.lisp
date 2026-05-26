@@ -3044,13 +3044,19 @@ default worker cannot be killed; use `reset' instead."
 (%register-method
  (make-method-spec
   :name "describe"
-  :summary "Return the CL:DESCRIBE output for a symbol."
-  :doc "Resolves `symbol' in `package' (default: the persistent package).
-Returns `{output: <text>}'."
-  :params (list (list :name "symbol" :type :string :required t
+  :summary "Return CL:DESCRIBE output for a symbol or form value."
+  :doc "Pass either `symbol' or `form'. `symbol' is resolved in `package'
+(default: the worker's persistent package). `form' is read and evaluated in
+the selected worker's REPL context, including *, **, ***, +, ++, +++, /, //,
+and ///. Optional: `package', `worker'. Returns `{output: <text>}'."
+  :params (list (list :name "symbol" :type :string :required nil
                       :description "Symbol name; matched case-insensitively.")
+                (list :name "form" :type :string :required nil
+                      :description "Form whose value is described.")
                 (list :name "package" :type :string :required nil
-                      :description "Package to resolve the symbol in."))
+                      :description "Reader/resolution package.")
+                (list :name "worker" :type :string :required nil
+                      :description "Worker whose package/history is used."))
   :handler
   (lambda (server params id ctx)
     (declare (ignore ctx))
@@ -4135,30 +4141,34 @@ server-owned debug session from a fresh connection."
 ;;; Source navigation and introspection (BRIDGE_V2 #130-#136, #140-#148).
 ;;; ----------------------------------------------------------------------------
 
+(defun %find-symbol-in-package (sym-name package)
+  "Resolve SYM-NAME in PACKAGE, preserving exact mixed-case matches first."
+  (and package
+       (or (multiple-value-bind (sym status)
+               (find-symbol sym-name package)
+             (and status sym))
+           (and (position #\: sym-name)
+                (handler-case
+                    (let ((*package* package)
+                          (*read-eval* nil))
+                      (multiple-value-bind (value end)
+                          (read-from-string sym-name nil nil)
+                        (and (= end (length sym-name))
+                             (symbolp value)
+                             value)))
+                  (error () nil)))
+           (multiple-value-bind (sym status)
+               (find-symbol (string-upcase sym-name) package)
+             (and status sym)))))
+
 (defun %symbol-from-string (sym-name pkg-name &key (server *server*))
   "Resolve SYM-NAME in PKG-NAME, defaulting to the server's persistent
 package. Returns the symbol or NIL."
-  (let* ((pkg (cond
-                 ((null pkg-name)
-                  (and server (server-current-package server)))
-                 (t (%resolve-package-for-server server pkg-name)))))
-    (and pkg
-         (or (multiple-value-bind (sym status)
-                 (find-symbol sym-name pkg)
-               (and status sym))
-             (and (position #\: sym-name)
-                  (handler-case
-                      (let ((*package* pkg)
-                            (*read-eval* nil))
-                        (multiple-value-bind (value end)
-                            (read-from-string sym-name nil nil)
-                          (and (= end (length sym-name))
-                               (symbolp value)
-                               value)))
-                    (error () nil)))
-             (multiple-value-bind (sym status)
-                 (find-symbol (string-upcase sym-name) pkg)
-               (and status sym))))))
+  (let ((pkg (cond
+               ((null pkg-name)
+                (and server (server-current-package server)))
+               (t (%resolve-package-for-server server pkg-name)))))
+    (%find-symbol-in-package sym-name pkg)))
 
 #+sbcl
 (defun %definition-source-json (def-source)
@@ -6293,33 +6303,86 @@ as a prin1 string, or NIL for `(values)')."
                                        (eval-result-code result))
                                    :details details)))))))))))
 
+(defun %describe-output (value package server)
+  "Return protocol-visible CL:DESCRIBE text for VALUE."
+  (%public-package-text
+   (with-output-to-string (s)
+     (let ((*package* (or package *package*)))
+       (describe value s)))
+   server))
+
 (defun %dispatch-describe (server params id)
-  (let* ((sym-name (%json-getf params "symbol"))
-         (pkg-name (%json-getf params "package"))
-         (pkg-default (server-current-package server)))
+  (let ((sym-name (%json-getf params "symbol"))
+        (form-text (%json-getf params "form"))
+        (pkg-name (%json-getf params "package"))
+        (worker-name (%json-getf params "worker")))
     (cond
-      ((not (stringp sym-name))
-       (%error-response id "protocol-error" "missing `symbol` param"))
-      (t
-       (let* ((pkg (or (and pkg-name
-                            (%resolve-package-for-server server pkg-name))
-                       (and (null pkg-name) pkg-default)
-                       (return-from %dispatch-describe
-                         (%error-response id "eval-error"
-                                          (format nil "no such package: ~A"
-                                                  pkg-name)))))
-              (sym (find-symbol (string-upcase sym-name) pkg)))
+      ((and sym-name form-text)
+       (%error-response id "protocol-error"
+                        "pass either `symbol' or `form', not both"))
+      ((and worker-name (not (stringp worker-name)))
+       (%error-response id "protocol-error" "`worker' must be a string"))
+      ((and pkg-name (not (stringp pkg-name)))
+       (%error-response id "protocol-error" "`package' must be a string"))
+      ((stringp form-text)
+       (let* ((worker (%ensure-worker
+                       server
+                       :name (or worker-name +default-worker-name+)))
+              (pkg (%worker-reader-package server worker pkg-name)))
          (cond
-           ((null sym)
+           ((null pkg)
             (%error-response id "eval-error"
-                             (format nil "no symbol ~A in ~A"
-                                     sym-name pkg-name)))
+                             (format nil "no such package: ~A" pkg-name)))
            (t
-            (let ((text (with-output-to-string (s)
-                          (let ((*package* pkg)) (describe sym s)))))
-              (%success-response id
-               (%json-object "output"
-                             (%public-package-text text server)))))))))))
+            (handler-case
+                (let* ((parsed (let ((*package* pkg))
+                                 (%read-form form-text)))
+                       (value (%call-with-worker-repl-context
+                               worker
+                               pkg
+                               (lambda () (eval parsed)))))
+                  (%success-response
+                   id
+                   (%json-object
+                    "output" (%describe-output value pkg server))))
+              (error (c)
+                (%error-response id "eval-error"
+                                 (princ-to-string c))))))))
+      ((stringp sym-name)
+       (multiple-value-bind (worker resolved-worker-name)
+           (%worker-for-inspection server worker-name)
+         (cond
+           ((null worker)
+            (%error-response id "eval-error"
+                             (format nil "no such worker: ~A"
+                                     resolved-worker-name)))
+           ((not (clpm.repl.compat:thread-alive-p (worker-thread worker)))
+            (%error-response id "eval-error"
+                             (format nil "worker is not alive: ~A"
+                                     resolved-worker-name)))
+           (t
+            (let ((pkg (%worker-reader-package server worker pkg-name)))
+              (cond
+                ((null pkg)
+                 (%error-response id "eval-error"
+                                  (format nil "no such package: ~A" pkg-name)))
+                (t
+                 (let ((sym (%find-symbol-in-package sym-name pkg)))
+                   (cond
+                     ((null sym)
+                      (%error-response id "eval-error"
+                                       (format nil "no symbol ~A in ~A"
+                                               sym-name
+                                               (%public-package-name
+                                                pkg server))))
+                     (t
+                      (%success-response
+                       id
+                       (%json-object
+                        "output" (%describe-output sym pkg server)))))))))))))
+      (t
+       (%error-response id "protocol-error"
+                        "missing `symbol' or `form' param")))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Server: accept loop

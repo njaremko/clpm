@@ -285,6 +285,22 @@
                      "expected description containing CAR, got ~S" output))))
 (format t "  OK~%")
 
+(format t "Test: describe form uses REPL history~%")
+(with-daemon
+    (lambda (sock)
+      (do-eval sock "(list :describe-history 42)")
+      (let* ((resp (clpm.repl:send-request
+                    sock "describe"
+                    :params (list :object (list (cons "form" "*")))))
+             (result (lookup resp "result"))
+             (output (and result (lookup result "output"))))
+        (assert-true result "expected describe result, got ~S" resp)
+        (assert-true (and (stringp output)
+                          (search "DESCRIBE-HISTORY" output
+                                  :test #'char-equal))
+                     "expected description of last value, got ~S" output))))
+(format t "  OK~%")
+
 (format t "Test: reset clears redefinition log~%")
 (with-daemon
     (lambda (sock)
