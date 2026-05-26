@@ -54,7 +54,17 @@
   form
   before-text
   after-text
+  structural-diff
   diagnostics)
+
+(defstruct edit-change
+  kind
+  operation
+  before-form
+  after-forms
+  operator
+  added-argument-texts
+  removed-argument-texts)
 
 (defun %read-file-string (pathname)
   (with-open-file (s pathname :direction :input :external-format :utf-8)
@@ -475,6 +485,116 @@ a load operation."
                           :external-format :utf-8)
     (write-string text s)))
 
+(defun %document-form-at-ordinal (document ordinal)
+  (find ordinal (source-document-forms document)
+        :key #'source-form-ordinal))
+
+(defun %document-forms-from-ordinal (document ordinal count)
+  (loop for i from ordinal
+        repeat count
+        for form = (%document-form-at-ordinal document i)
+        when form
+          collect form))
+
+(defun %proper-list-elements (value)
+  (let ((seen (make-hash-table :test 'eq))
+        (tail value)
+        (elements '()))
+    (loop
+      (cond
+        ((null tail)
+         (return (nreverse elements)))
+        ((consp tail)
+         (when (gethash tail seen)
+           (return nil))
+         (setf (gethash tail seen) t)
+         (push (car tail) elements)
+         (setf tail (cdr tail)))
+        (t
+         (return nil))))))
+
+(defun %definition-operator-token-p (operator)
+  (member operator
+          '("defun" "defmacro" "defgeneric" "defmethod" "defclass"
+            "define-condition" "defvar" "defparameter" "defconstant"
+            "defstruct" "defpackage" "in-package")
+          :test #'string=))
+
+(defun %operator-name (form)
+  (when (and (consp form) (symbolp (first form)))
+    (string-downcase (symbol-name (first form)))))
+
+(defun %edit-argument-texts (forms package)
+  (mapcar (lambda (form) (%print-edit-form form package)) forms))
+
+(defun %prefix-equal-p (prefix values)
+  (and (<= (length prefix) (length values))
+       (loop for expected in prefix
+             for actual in values
+             always (equal expected actual))))
+
+(defun %call-argument-diff (old-args new-args package)
+  (cond
+    ((%prefix-equal-p old-args new-args)
+     (values (%edit-argument-texts (nthcdr (length old-args) new-args)
+                                   package)
+             nil))
+    ((%prefix-equal-p new-args old-args)
+     (values nil
+             (%edit-argument-texts (nthcdr (length new-args) old-args)
+                                   package)))
+    (t
+     (values nil nil))))
+
+(defun %changed-call-edit-change (operation before-form after-forms package)
+  (when (and (= 1 (length after-forms))
+             before-form)
+    (let* ((after-form (first after-forms))
+           (old-form (source-form-form before-form))
+           (new-form (source-form-form after-form))
+           (old-elements (%proper-list-elements old-form))
+           (new-elements (%proper-list-elements new-form))
+           (old-operator (%operator-name old-form))
+           (new-operator (%operator-name new-form)))
+      (when (and old-elements new-elements
+                 old-operator
+                 (string= old-operator new-operator)
+                 (not (%definition-operator-token-p old-operator))
+                 (not (equal (rest old-elements) (rest new-elements))))
+        (multiple-value-bind (added removed)
+            (%call-argument-diff (rest old-elements) (rest new-elements)
+                                 package)
+          (make-edit-change :kind :changed-call
+                            :operation operation
+                            :before-form before-form
+                            :after-forms after-forms
+                            :operator old-operator
+                            :added-argument-texts added
+                            :removed-argument-texts removed))))))
+
+(defun %top-level-edit-change (operation before-form after-forms)
+  (let ((insert-p (member operation '("insert-before" "insert-after")
+                          :test #'string=)))
+    (make-edit-change
+     :kind (cond
+             (insert-p
+              :inserted-top-level)
+             ((string= operation "delete")
+              :deleted-top-level)
+             ((string= operation "splice")
+              :spliced-top-level)
+             (t
+              :changed-top-level))
+     :operation operation
+     :before-form (and (not insert-p) before-form)
+     :after-forms after-forms)))
+
+(defun %edit-structural-diff (operation before-form after-forms package)
+  (let ((top-level (%top-level-edit-change operation before-form after-forms))
+        (changed-call (%changed-call-edit-change operation before-form
+                                                 after-forms package)))
+    (remove nil (list top-level changed-call))))
+
 (defun %select-unique-form (document top-level kind name)
   (let ((forms (find-source-forms document
                                   :top-level top-level
@@ -521,28 +641,35 @@ the resulting source reads successfully."
            (clean-text (and text (%trim-edit-text text)))
            (start (source-form-start target))
            (end (source-form-end target))
+           (after-form-count 0)
            (after
              (case op
                (:replace
                 (%require-edit-form-count "replace" clean-text package 1 1)
+                (setf after-form-count 1)
                 (%replace-range before start end clean-text))
                (:insert-before
                 (%require-edit-form-count "insert-before" clean-text
                                           package 1 1)
+                (setf after-form-count 1)
                 (%insert-before-range before start clean-text))
                (:insert-after
                 (%require-edit-form-count "insert-after" clean-text
                                           package 1 1)
+                (setf after-form-count 1)
                 (%insert-after-range before end clean-text))
                (:delete
                 (%replace-range before start end ""))
                (:wrap
+                (setf after-form-count 1)
                 (%replace-range
                  before start end
                  (%wrapped-form-text clean-text (source-form-form target)
                                      package)))
                (:splice
-                (%require-edit-form-count "splice" clean-text package 1 nil)
+                (setf after-form-count
+                      (length (%require-edit-form-count "splice" clean-text
+                                                        package 1 nil)))
                 (%replace-range before start end clean-text))
                (t
                 (error 'source-edit-error
@@ -552,10 +679,20 @@ the resulting source reads successfully."
               (%source-document-readable-or-error pathname after
                                                   initial-package-name)))
         (%write-file-string pathname after)
-        (make-edit-result :file (namestring pathname)
-                          :operation (string-downcase (symbol-name op))
-                          :form target
-                          :before-text (source-form-text target)
-                          :after-text after
-                          :diagnostics (source-document-diagnostics
-                                        new-document))))))
+        (let* ((operation-token (string-downcase (symbol-name op)))
+               (after-start-ordinal
+                 (case op
+                   (:insert-after (1+ (source-form-ordinal target)))
+                   (t (source-form-ordinal target))))
+               (after-forms (%document-forms-from-ordinal
+                             new-document after-start-ordinal after-form-count)))
+          (make-edit-result :file (namestring pathname)
+                            :operation operation-token
+                            :form target
+                            :before-text (source-form-text target)
+                            :after-text after
+                            :structural-diff
+                            (%edit-structural-diff operation-token target
+                                                   after-forms package)
+                            :diagnostics (source-document-diagnostics
+                                          new-document)))))))

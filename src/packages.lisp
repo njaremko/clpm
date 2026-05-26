@@ -423,7 +423,16 @@
            #:edit-result-form
            #:edit-result-before-text
            #:edit-result-after-text
-           #:edit-result-diagnostics))
+           #:edit-result-structural-diff
+           #:edit-result-diagnostics
+           #:edit-change
+           #:edit-change-kind
+           #:edit-change-operation
+           #:edit-change-before-form
+           #:edit-change-after-forms
+           #:edit-change-operator
+           #:edit-change-added-argument-texts
+           #:edit-change-removed-argument-texts))
 
 (defpackage #:clpm.commands
   (:use #:cl #:clpm.log #:clpm.project #:clpm.registry #:clpm.solver #:clpm.fetch

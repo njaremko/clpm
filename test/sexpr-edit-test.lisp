@@ -86,6 +86,17 @@
     (write-file path (source-text))
     path))
 
+(defun make-diff-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-diff-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "diff.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(foo x)
+")
+    path))
+
 (defun make-macro-source-file ()
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "/tmp/clpm-sexpr-edit-macro-~A/"
@@ -273,6 +284,66 @@
                           "replaced form should still resolve")
             (assert-true (search ":changed" (lookup form "text"))
                          "replaced form text is stale: ~S" show-resp)))
+        (let* ((diff-path (make-diff-source-file))
+               (diff-file (namestring diff-path))
+               (call-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-apply-edit"
+                  :params (json-object
+                           "operation" "replace"
+                           "path" (json-object "file" diff-file
+                                               "top_level" 1)
+                           "text" "(foo x y)")))
+               (call-result (lookup call-resp "result"))
+               (call-changes (array-items (lookup call-result
+                                                  "structural_diff")))
+               (changed-call (find "changed_call" call-changes
+                                   :key (lambda (change)
+                                          (lookup change "kind"))
+                                   :test #'string=))
+               (added-args (and changed-call
+                                (array-items
+                                 (lookup changed-call
+                                         "added_arguments")))))
+          (assert-true call-result "changed call edit failed: ~S"
+                       call-resp)
+          (assert-true changed-call
+                       "missing changed_call structural diff: ~S"
+                       call-result)
+          (assert-equal "foo" (lookup changed-call "operator")
+                        "wrong changed call operator")
+          (assert-equal '("y") added-args
+                        "wrong added call arguments"))
+        (let* ((diff-path (make-diff-source-file))
+               (diff-file (namestring diff-path))
+               (insert-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-apply-edit"
+                  :params (json-object
+                           "operation" "insert-after"
+                           "path" (json-object "file" diff-file
+                                               "top_level" 1)
+                           "text" "(defun created () :ok)")))
+               (insert-result (lookup insert-resp "result"))
+               (insert-changes (array-items (lookup insert-result
+                                                    "structural_diff")))
+               (inserted (find "inserted_top_level" insert-changes
+                               :key (lambda (change)
+                                      (lookup change "kind"))
+                               :test #'string=))
+               (after-forms (and inserted
+                                 (array-items
+                                  (lookup inserted "after_forms"))))
+               (inserted-form (first after-forms)))
+          (assert-true insert-result "insert edit failed: ~S"
+                       insert-resp)
+          (assert-true inserted
+                       "missing inserted_top_level structural diff: ~S"
+                       insert-result)
+          (assert-equal "defun" (lookup inserted-form "kind")
+                        "inserted form kind should be defun")
+          (assert-equal "CREATED" (lookup inserted-form "name")
+                        "inserted form name should be recorded"))
         (let* ((macro-path (make-macro-source-file))
                (macro-file (namestring macro-path))
                (macro-resp

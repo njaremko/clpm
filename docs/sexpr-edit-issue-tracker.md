@@ -118,7 +118,7 @@ Acceptance evidence:
 
 ### SE-006: Form-Aware Structural Diff
 
-Status: open
+Status: in-progress
 
 Return a structural diff for every transaction. The initial diff must identify changed top-level forms, inserted forms, deleted forms, and changed calls where the operator is the same but arguments differ. It should include a compact human diff as secondary output, but the machine-readable structural diff is the primary artifact.
 

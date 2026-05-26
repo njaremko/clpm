@@ -4553,6 +4553,33 @@ macroexpands|specializes). Returns
                          "diagnostics"
                          (%sexpr-diagnostics-json document)))))))))))))))
 
+(defun %sexpr-keyword-json (value)
+  (etypecase value
+    (keyword (substitute #\_ #\-
+                         (string-downcase (symbol-name value))))
+    (string value)))
+
+(defun %sexpr-edit-change-json (file change)
+  (%json-object
+   "kind" (%sexpr-keyword-json
+           (clpm.sexpr-edit:edit-change-kind change))
+   "operation" (clpm.sexpr-edit:edit-change-operation change)
+   "before_form" (let ((form (clpm.sexpr-edit:edit-change-before-form
+                              change)))
+                   (and form (%sexpr-form-summary-json file form)))
+   "after_forms" (%json-array
+                  (mapcar (lambda (form)
+                            (%sexpr-form-summary-json file form))
+                          (clpm.sexpr-edit:edit-change-after-forms
+                           change)))
+   "operator" (clpm.sexpr-edit:edit-change-operator change)
+   "added_arguments" (%json-array
+                      (clpm.sexpr-edit:edit-change-added-argument-texts
+                       change))
+   "removed_arguments" (%json-array
+                        (clpm.sexpr-edit:edit-change-removed-argument-texts
+                         change))))
+
 (defun %sexpr-edit-result-json (result)
   (let ((form (clpm.sexpr-edit:edit-result-form result))
         (file (clpm.sexpr-edit:edit-result-file result)))
@@ -4562,6 +4589,11 @@ macroexpands|specializes). Returns
      "changed" t
      "form" (%sexpr-form-summary-json file form)
      "before_text" (clpm.sexpr-edit:edit-result-before-text result)
+     "structural_diff" (%json-array
+                        (mapcar (lambda (change)
+                                  (%sexpr-edit-change-json file change))
+                                (clpm.sexpr-edit:edit-result-structural-diff
+                                 result)))
      "diagnostics" (%json-array
                     (mapcar #'%sexpr-diagnostic-json
                             (clpm.sexpr-edit:edit-result-diagnostics
