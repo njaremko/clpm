@@ -193,6 +193,8 @@
                    "sexpr-macroexpand-at missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
                    "sexpr-bindings-at missing from methods")
+      (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
+                   "sexpr-symbol-info missing from methods")
       (let* ((list-resp
                (clpm.repl:send-request
                 sock "sexpr-list-top-level-forms"
@@ -315,7 +317,29 @@
             (assert-true (member "RESOLVE" locals :test #'string=)
                          "missing local function in ~S" locals)
             (assert-true (member "CURRENT" symbol-macros :test #'string=)
-                         "missing symbol macro in ~S" symbol-macros)))))))
+                         "missing symbol macro in ~S" symbol-macros)))
+        (let* ((symbol-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-symbol-info"
+                  :params (json-object "symbol" "format"
+                                       "package" "CL")))
+               (symbol-result (lookup symbol-resp "result"))
+               (kinds (array-items (lookup symbol-result "kinds")))
+               (definitions (array-items (lookup symbol-result
+                                                "definitions"))))
+          (assert-true symbol-result "symbol-info failed: ~S" symbol-resp)
+          (assert-equal "FORMAT" (lookup symbol-result "symbol")
+                        "wrong symbol name")
+          (assert-equal "COMMON-LISP" (lookup symbol-result "home_package")
+                        "wrong home package")
+          (assert-equal "external" (lookup symbol-result "package_status")
+                        "FORMAT should be external in CL")
+          (assert-true (lookup symbol-result "external")
+                       "FORMAT should be exported from CL")
+          (assert-true (member "function" kinds :test #'string=)
+                       "FORMAT should include function kind: ~S" kinds)
+          (assert-true definitions
+                       "FORMAT should have definition entries"))))))
 (format t "  RPC source lenses OK~%")
 
 (format t "~%SexprEdit tests PASSED!~%")

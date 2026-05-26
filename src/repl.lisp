@@ -5068,6 +5068,86 @@ inhabits: :function, :macro, :generic-function, :special-operator,
     (when (find-package sym) (push :package tags))
     (nreverse tags)))
 
+(defun %symbol-kinds-json (sym)
+  (%json-array
+   (mapcar (lambda (kind)
+             (string-downcase (symbol-name kind)))
+           (%symbol-kinds sym))))
+
+(defun %symbol-package-status-json (status)
+  (and status (string-downcase (symbol-name status))))
+
+(defun %symbol-external-p (sym)
+  (let ((pkg (symbol-package sym)))
+    (and pkg
+         (eq :external
+             (nth-value 1 (find-symbol (symbol-name sym) pkg))))))
+
+(defun %dispatch-sexpr-symbol-info (server params id)
+  (let* ((sym-name (%json-getf params "symbol"))
+         (pkg-name (%json-getf params "package"))
+         (kind-str (%json-getf params "kind"))
+         (kind-kw (and (stringp kind-str)
+                       (intern (string-upcase kind-str) :keyword)))
+         (pkg (cond
+                ((null pkg-name)
+                 (and server (server-current-package server)))
+                ((stringp pkg-name)
+                 (%resolve-package-for-server server pkg-name))
+                (t nil)))
+         (sym (and (stringp sym-name)
+                   (%symbol-from-string sym-name pkg-name :server server))))
+    (cond
+      ((not (stringp sym-name))
+       (%error-response id "protocol-error" "missing `symbol' param"))
+      ((and pkg-name (not (stringp pkg-name)))
+       (%error-response id "protocol-error" "`package' must be a string"))
+      ((and pkg-name (null pkg))
+       (%error-response id "eval-error"
+                        (format nil "no such package: ~A" pkg-name)))
+      ((null sym)
+       (%error-response id "eval-error"
+                        (format nil "no symbol ~A in ~A"
+                                sym-name
+                                (or pkg-name "current package"))))
+      (t
+       (multiple-value-bind (visible-symbol status)
+           (and pkg (find-symbol (symbol-name sym) pkg))
+         (declare (ignore visible-symbol))
+         (%success-response
+          id
+          (%json-object
+           "symbol" (symbol-name sym)
+           "home_package" (%public-package-name (symbol-package sym) server)
+           "query_package" (and pkg (%public-package-name pkg server))
+           "package_status" (%symbol-package-status-json status)
+           "external" (and (%symbol-external-p sym) t)
+           "kinds" (%symbol-kinds-json sym)
+           "definitions" (%json-array (%find-definitions sym kind-kw))
+           "references" (%json-array (%xref-entries sym :references))
+           "callers" (%json-array (%xref-entries sym :callers))
+           "callees" (%json-array (%xref-entries sym :callees)))))))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-symbol-info"
+  :summary "Return package, namespace, definition, and xref facts for a symbol."
+  :doc "Required: `symbol'. Optional: `package' and `kind'. The symbol is
+resolved like other REPL introspection methods, preserving exact mixed-case
+matches before trying uppercase. The response reports the home package,
+query-package visibility status, whether the symbol is external from its home
+package, namespace kinds, definitions, references, callers, and callees."
+  :params (list (list :name "symbol" :type :string :required t
+                      :description "Symbol name; matched case-insensitively after exact lookup.")
+                (list :name "package" :type :string :required nil
+                      :description "Package used to resolve the symbol.")
+                (list :name "kind" :type :string :required nil
+                      :description "Optional definition kind filter."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-symbol-info server params id))))
+
 (defun %apropos-entries (pattern pkg &optional server)
   "Build [{name, package, kinds, external}, ...] for symbols matching PATTERN.
 PKG is a package object or NIL (search all)."

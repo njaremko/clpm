@@ -160,7 +160,7 @@ Acceptance evidence:
 
 ### SE-009: Symbol Facts And Scope-Aware Rename
 
-Status: open
+Status: in-progress
 
 Expose `sexpr-symbol-info` and `sexpr-rename-symbol`. Symbol facts combine package lookup, definitions, xref data, export status, and known namespace kind. Rename must support at least function namespace references within one package and must detect shadowing hazards before editing.
 
