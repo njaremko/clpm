@@ -146,7 +146,7 @@ Acceptance evidence:
 
 ### SE-008: Bindings And Scope Explanation
 
-Status: open
+Status: in-progress
 
 Implement a conservative `sexpr-bindings-at` / `sexpr-explain-scope` query for ordinary lexical forms: lambda lists, `let`, `let*`, `flet`, `labels`, `macrolet`, and `symbol-macrolet`. The result should distinguish lexical variables, dynamic declarations when visible, local functions, local macros, and symbol macros.
 

@@ -96,6 +96,24 @@
 ")
     path))
 
+(defun make-scope-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-scope-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "scope.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+(defun scoped (cell env)
+  (let ((value (car cell)))
+    (symbol-macrolet ((current (cdr cell)))
+      (flet ((resolve () value))
+        (list current (resolve) env)))))
+")
+    path))
+
+(defun entry-names (array)
+  (loop for entry in (array-items array)
+        collect (lookup entry "name")))
+
 (defun with-daemon (fn)
   (let* ((sock (format nil "/tmp/clpm-sexpr-edit-~A.sock"
                       (random (expt 2 32))))
@@ -173,6 +191,8 @@
                    "sexpr-apply-edit missing from methods")
       (assert-true (member "sexpr-macroexpand-at" method-names :test #'string=)
                    "sexpr-macroexpand-at missing from methods")
+      (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
+                   "sexpr-bindings-at missing from methods")
       (let* ((list-resp
                (clpm.repl:send-request
                 sock "sexpr-list-top-level-forms"
@@ -267,7 +287,35 @@
                        "WHEN should expand: ~S" macro-result)
           (assert-true (search "IF" (lookup macro-result "expansion"))
                        "WHEN expansion should contain IF: ~S"
-                       macro-result))))))
+                       macro-result))
+        (let* ((scope-path (make-scope-source-file))
+               (scope-file (namestring scope-path))
+               (bindings-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-bindings-at"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" scope-file
+                                   "top_level" 1
+                                   "child_path"
+                                   (list :array (list 3 2 2 2))))))
+               (bindings-result (lookup bindings-resp "result"))
+               (scope (lookup bindings-result "scope")))
+          (assert-true bindings-result "bindings-at failed: ~S"
+                       bindings-resp)
+          (assert-equal "ok" (lookup bindings-result "status")
+                        "bindings-at should resolve uniquely")
+          (let ((lexical (entry-names (lookup scope "lexical_variables")))
+                (locals (entry-names (lookup scope "local_functions")))
+                (symbol-macros (entry-names (lookup scope "symbol_macros"))))
+            (dolist (name '("CELL" "ENV" "VALUE"))
+              (assert-true (member name lexical :test #'string=)
+                           "missing lexical binding ~A in ~S"
+                           name lexical))
+            (assert-true (member "RESOLVE" locals :test #'string=)
+                         "missing local function in ~S" locals)
+            (assert-true (member "CURRENT" symbol-macros :test #'string=)
+                         "missing symbol macro in ~S" symbol-macros)))))))
 (format t "  RPC source lenses OK~%")
 
 (format t "~%SexprEdit tests PASSED!~%")

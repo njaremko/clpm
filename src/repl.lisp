@@ -4686,6 +4686,207 @@ macroexpands|specializes). Returns
                                 (%error-response id "eval-error"
                                                  (princ-to-string c)))))))))))))))))))
 
+(defun %sexpr-child-path (path)
+  (let ((raw (%sexpr-path-field path "child_path")))
+    (cond
+      ((null raw) nil)
+      ((and (%json-array-p raw)
+            (every #'integerp (cadr raw)))
+       (cadr raw))
+      (t :invalid))))
+
+(defun %lambda-list-binding-name (item)
+  (cond
+    ((symbolp item) item)
+    ((and (consp item) (symbolp (first item))) (first item))
+    ((and (consp item)
+          (consp (first item))
+          (symbolp (second (first item))))
+     (second (first item)))
+    (t nil)))
+
+(defun %lambda-list-keyword-p (item)
+  (and (symbolp item)
+       (member (symbol-name item)
+               '("&OPTIONAL" "&REST" "&KEY" "&ALLOW-OTHER-KEYS" "&AUX"
+                 "&BODY" "&WHOLE" "&ENVIRONMENT")
+               :test #'string=)))
+
+(defun %lambda-list-bindings (lambda-list)
+  (let ((bindings '()))
+    (dolist (item lambda-list (nreverse bindings))
+      (unless (%lambda-list-keyword-p item)
+        (let ((name (%lambda-list-binding-name item)))
+          (when name
+            (push name bindings)))))))
+
+(defun %binding-list-name (binding)
+  (cond
+    ((symbolp binding) binding)
+    ((and (consp binding) (symbolp (first binding))) (first binding))
+    (t nil)))
+
+(defun %scope-entry (name kind introduced-by)
+  (%json-object "name" (symbol-name name)
+                "kind" kind
+                "introduced_by" introduced-by))
+
+(defun %scope-add-symbols (scope slot symbols kind introduced-by)
+  (dolist (symbol symbols)
+    (when (symbolp symbol)
+      (push (%scope-entry symbol kind introduced-by)
+            (getf scope slot))))
+  scope)
+
+(defun %scope-add-binding-list (scope slot bindings kind introduced-by)
+  (dolist (binding bindings)
+    (let ((name (%binding-list-name binding)))
+      (when name
+        (push (%scope-entry name kind introduced-by)
+              (getf scope slot)))))
+  scope)
+
+(defun %sexpr-list-child (form index)
+  (when (and (integerp index) (<= 0 index) (listp form))
+    (nth index form)))
+
+(defun %sexpr-scope-step (form next-index scope)
+  (cond
+    ((not (consp form)) scope)
+    ((not (symbolp (first form))) scope)
+    (t
+     (let ((operator (symbol-name (first form))))
+       (cond
+         ((and (member operator '("DEFUN" "DEFMACRO") :test #'string=)
+               (>= next-index 3))
+          (%scope-add-symbols scope :lexical
+                              (%lambda-list-bindings (third form))
+                              "lexical-variable" "lambda-list"))
+         ((and (string= operator "LAMBDA")
+               (>= next-index 2))
+          (%scope-add-symbols scope :lexical
+                              (%lambda-list-bindings (second form))
+                              "lexical-variable" "lambda-list"))
+         ((and (member operator '("LET" "LET*") :test #'string=)
+               (>= next-index 2))
+          (%scope-add-binding-list scope :lexical (second form)
+                                   "lexical-variable"
+                                   (string-downcase operator)))
+         ((and (member operator '("FLET" "LABELS") :test #'string=)
+               (>= next-index 2))
+          (%scope-add-binding-list scope :functions (second form)
+                                   "local-function"
+                                   (string-downcase operator)))
+         ((and (string= operator "MACROLET")
+               (>= next-index 2))
+          (%scope-add-binding-list scope :macros (second form)
+                                   "local-macro" "macrolet"))
+         ((and (string= operator "SYMBOL-MACROLET")
+               (>= next-index 2))
+          (%scope-add-binding-list scope :symbol-macros (second form)
+                                   "symbol-macro" "symbol-macrolet"))
+         (t scope))))))
+
+(defun %sexpr-scope-at-child-path (form child-path)
+  (let ((scope (list :lexical nil
+                    :functions nil
+                    :macros nil
+                    :symbol-macros nil
+                    :warnings nil))
+        (current form))
+    (dolist (index child-path)
+      (setf scope (%sexpr-scope-step current index scope))
+      (setf current (%sexpr-list-child current index))
+      (when (null current)
+        (push (%json-object "kind" "invalid-child-path"
+                            "message" "child_path does not resolve to a form")
+              (getf scope :warnings))
+        (return)))
+    scope))
+
+(defun %sexpr-scope-json (scope)
+  (%json-object
+   "lexical_variables" (%json-array (nreverse (getf scope :lexical)))
+   "local_functions" (%json-array (nreverse (getf scope :functions)))
+   "macros" (%json-array (nreverse (getf scope :macros)))
+   "symbol_macros" (%json-array (nreverse (getf scope :symbol-macros)))
+   "warnings" (%json-array (nreverse (getf scope :warnings)))))
+
+(defun %dispatch-sexpr-bindings-at (server params id)
+  (let ((path (%json-getf params "path")))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      ((eq (%sexpr-child-path path) :invalid)
+       (%error-response id "protocol-error"
+                        "`path.child_path' must be an array of integers"))
+      (t
+       (let ((file (%sexpr-path-field path "file")))
+         (cond
+           ((not (stringp file))
+            (%error-response id "protocol-error" "`path.file' must be a string"))
+           (t
+            (multiple-value-bind (document error-response)
+                (%sexpr-read-document server file id)
+              (or error-response
+                  (let* ((actual-file
+                           (namestring
+                            (clpm.sexpr-edit:source-document-pathname
+                             document)))
+                         (forms (%sexpr-selected-forms document path)))
+                    (cond
+                      ((null forms)
+                       (%error-response id "eval-error"
+                                        "no form matched source path"))
+                      ((rest forms)
+                       (%success-response
+                        id
+                        (%json-object
+                         "status" "ambiguous"
+                         "file" actual-file
+                         "candidates" (%json-array
+                                       (mapcar
+                                        (lambda (form)
+                                          (%sexpr-form-summary-json
+                                           actual-file form))
+                                        forms))
+                         "diagnostics" (%sexpr-diagnostics-json document))))
+                      (t
+                       (let* ((form (first forms))
+                              (pkg-name
+                                (clpm.sexpr-edit:source-form-package form))
+                              (pkg (%reader-package-for-server server
+                                                               pkg-name)))
+                         (cond
+                           ((null pkg)
+                            (%error-response
+                             id "eval-error"
+                             (format nil "no such package: ~A" pkg-name)))
+                           (t
+                            (handler-case
+                                (let* ((source
+                                         (clpm.sexpr-edit:source-form-text
+                                          form))
+                                       (parsed (let ((*package* pkg))
+                                                 (%read-form source)))
+                                       (child-path (%sexpr-child-path path))
+                                       (scope (%sexpr-scope-at-child-path
+                                               parsed child-path)))
+                                  (%success-response
+                                   id
+                                   (%json-object
+                                    "status" "ok"
+                                    "file" actual-file
+                                    "path" (%sexpr-path-json actual-file
+                                                             form)
+                                    "child_path"
+                                    (%json-array child-path)
+                                    "package" pkg-name
+                                    "scope" (%sexpr-scope-json scope))))
+                              (error (c)
+                                (%error-response id "eval-error"
+                                                 (princ-to-string c)))))))))))))))))))
+
 (%register-method
  (make-method-spec
   :name "sexpr-list-top-level-forms"
@@ -4759,6 +4960,23 @@ returns candidates without expanding anything."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-macroexpand-at server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-bindings-at"
+  :summary "Explain conservative lexical bindings visible at a source child path."
+  :doc "Required: `path'. The path selects a top-level form and may include
+`child_path', an array of zero-based list positions into the parsed form.
+The first implementation is intentionally conservative and syntactic: it
+recognizes lambda lists, `let', `let*', `flet', `labels', `macrolet', and
+`symbol-macrolet'. Unknown macros are not guessed; later macro contracts will
+extend this query."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with file, selector, and optional child_path."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-bindings-at server params id))))
 
 ;;; ----------------------------------------------------------------------------
 ;;; compile-file / load-file with structured diagnostics
