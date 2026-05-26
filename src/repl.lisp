@@ -4414,11 +4414,22 @@ macroexpands|specializes). Returns
    "file" file
    "top_level" (clpm.sexpr-edit:source-form-ordinal form)
    "kind" (clpm.sexpr-edit:source-form-kind form)
+   "name" (clpm.sexpr-edit:source-form-name form)
+   "package" (clpm.sexpr-edit:source-form-package form)))
+
+(defun %sexpr-form-refinement-json (form)
+  (%json-object
+   "top_level" (clpm.sexpr-edit:source-form-ordinal form)
+   "package" (clpm.sexpr-edit:source-form-package form)
+   "kind" (clpm.sexpr-edit:source-form-kind form)
    "name" (clpm.sexpr-edit:source-form-name form)))
 
 (defun %sexpr-form-summary-json (file form)
   (%json-object
    "path" (%sexpr-path-json file form)
+   "refinement_keys" (%json-array
+                      (list "top_level" "package" "kind" "name"))
+   "refinement" (%sexpr-form-refinement-json form)
    "ordinal" (clpm.sexpr-edit:source-form-ordinal form)
    "kind" (clpm.sexpr-edit:source-form-kind form)
    "name" (clpm.sexpr-edit:source-form-name form)
@@ -4473,11 +4484,31 @@ macroexpands|specializes). Returns
 (defun %sexpr-selected-forms (document path)
   (let ((top-level (%sexpr-path-field path "top_level"))
         (kind (%sexpr-selector-kind path))
-        (name (%sexpr-path-field path "name")))
-    (clpm.sexpr-edit:find-source-forms document
-                                       :top-level top-level
-                                       :kind kind
-                                       :name name)))
+        (name (%sexpr-path-field path "name"))
+        (package (%sexpr-path-field path "package")))
+    (let ((forms (clpm.sexpr-edit:find-source-forms document
+                                                    :top-level top-level
+                                                    :kind kind
+                                                    :name name)))
+      (if (stringp package)
+          (remove-if-not
+           (lambda (form)
+             (and (clpm.sexpr-edit:source-form-package form)
+                  (string-equal package
+                                (clpm.sexpr-edit:source-form-package form))))
+           forms)
+          forms))))
+
+(defun %sexpr-ambiguous-forms-result (file forms)
+  (%json-object
+   "status" "ambiguous"
+   "file" file
+   "refinement_keys" (%json-array
+                      (list "top_level" "package" "kind" "name"))
+   "candidates" (%json-array
+                 (mapcar (lambda (form)
+                           (%sexpr-form-summary-json file form))
+                         forms))))
 
 (defun %sexpr-diagnostics-json (document)
   (%json-array
@@ -4806,19 +4837,38 @@ macroexpands|specializes). Returns
             (%error-response id "protocol-error" "`path.file' must be a string"))
            (t
             (handler-case
-                (%success-response
-                 id
-                 (%sexpr-edit-result-json
-                  (funcall
-                   edit-function
-                   file operation
-                   :root (and server (server-project-root server))
-                   :initial-package-name (%sexpr-current-package-name server)
-                   :top-level (%sexpr-path-field path "top_level")
-                   :kind (%sexpr-selector-kind path)
-                   :name (%sexpr-path-field path "name")
-                   :text text)
-                  :dry-run dry-run))
+                (multiple-value-bind (document error-response)
+                    (%sexpr-read-document server file id)
+                  (or error-response
+                      (let* ((actual-file
+                               (namestring
+                                (clpm.sexpr-edit:source-document-pathname
+                                 document)))
+                             (forms (%sexpr-selected-forms document path)))
+                        (cond
+                          ((null forms)
+                           (%error-response id "eval-error"
+                                            "no form matched source path"))
+                          ((rest forms)
+                           (%success-response
+                            id
+                            (%sexpr-ambiguous-forms-result actual-file
+                                                           forms)))
+                          (t
+                           (%success-response
+                            id
+                            (%sexpr-edit-result-json
+                             (funcall
+                              edit-function
+                              file operation
+                              :root (and server (server-project-root server))
+                              :initial-package-name
+                              (%sexpr-current-package-name server)
+                              :top-level
+                              (clpm.sexpr-edit:source-form-ordinal
+                               (first forms))
+                              :text text)
+                             :dry-run dry-run)))))))
               (clpm.sexpr-edit:source-edit-error (c)
                 (%error-response
                  id "eval-error"
@@ -7142,6 +7192,15 @@ macroexpands|specializes). Returns
     (%json-object
      "kind" (getf site :kind)
      "caller" (clpm.sexpr-edit:source-form-name source-form)
+     "refinement_keys" (%json-array
+                        (list "caller" "argument_count"
+                              "path.child_path"))
+     "refinement" (%json-object
+                   "caller"
+                   (clpm.sexpr-edit:source-form-name source-form)
+                   "argument_count" (getf site :argument-count)
+                   "child_path" (%json-array
+                                 (getf site :child-path)))
      "operator" (and (getf site :operator)
                      (%sexpr-callee-json (getf site :operator) server))
      "path" (%sexpr-path-with-child-json file source-form

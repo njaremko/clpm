@@ -448,7 +448,7 @@ Acceptance evidence:
 
 ### SE-032: Ambiguity Management
 
-Status: open
+Status: done
 
 Every ambiguous selector or edit request must return a structured ambiguity response with candidates, snippets, and refinement keys. The agent should never have to infer ambiguity from a surprising edit.
 

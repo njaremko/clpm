@@ -102,6 +102,24 @@
     (write-file path (source-text))
     path))
 
+(defun make-package-ambiguity-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-ambiguity-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "ambiguous.lisp" dir)))
+    (write-file path "(defpackage #:sexpr-amb-a (:use #:cl))
+(defpackage #:sexpr-amb-b (:use #:cl))
+
+(in-package #:sexpr-amb-a)
+
+(defun duplicated () :a)
+
+(in-package #:sexpr-amb-b)
+
+(defun duplicated () :b)
+")
+    path))
+
 (defun make-diff-source-file ()
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "/tmp/clpm-sexpr-edit-diff-~A/"
@@ -651,7 +669,88 @@
           (assert-equal "ambiguous" (lookup ambiguous-result "status")
                         "duplicate selector should be ambiguous")
           (assert-equal 2 (length candidates)
-                        "ambiguity should return two candidates"))
+                        "ambiguity should return two candidates")
+          (assert-true (lookup (first candidates) "refinement")
+                       "ambiguity candidates should carry refinements")
+          (assert-true (member "top_level"
+                               (array-items
+                                (lookup (first candidates)
+                                        "refinement_keys"))
+                               :test #'string=)
+                       "ambiguity candidates should expose refinement keys"))
+        (let* ((package-path (make-package-ambiguity-source-file))
+               (package-file (namestring package-path))
+               (setup-resp
+                 (clpm.repl:send-request
+                  sock "eval"
+                  :params (json-object
+                           "form" "(progn
+                                      (defpackage #:sexpr-amb-a (:use #:cl))
+                                      (defpackage #:sexpr-amb-b (:use #:cl)))")))
+               (package-ambiguous-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-show-form"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" package-file
+                                   "kind" "defun"
+                                   "name" "duplicated"))))
+               (package-ambiguous-result
+                 (lookup package-ambiguous-resp "result"))
+               (package-candidates
+                 (array-items
+                  (lookup package-ambiguous-result "candidates")))
+               (package-refinements
+                 (mapcar (lambda (candidate)
+                           (lookup (lookup candidate "refinement")
+                                   "package"))
+                         package-candidates))
+               (package-show-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-show-form"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" package-file
+                                   "kind" "defun"
+                                   "name" "duplicated"
+                                   "package" "SEXPR-AMB-A"))))
+               (package-show-result (lookup package-show-resp "result"))
+               (before-ambiguous-edit (read-file-string package-path))
+               (ambiguous-edit-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-apply-edit"
+                  :params (json-object
+                           "operation" "replace"
+                           "path" (json-object
+                                   "file" package-file
+                                   "kind" "defun"
+                                   "name" "duplicated")
+                           "text" "(defun duplicated () :changed)")))
+               (ambiguous-edit-result
+                 (lookup ambiguous-edit-resp "result")))
+          (assert-true (lookup setup-resp "result")
+                       "package setup failed: ~S" setup-resp)
+          (assert-equal "ambiguous"
+                        (lookup package-ambiguous-result "status")
+                        "same-name definitions in packages should be ambiguous")
+          (assert-true (and (member "SEXPR-AMB-A" package-refinements
+                                    :test #'string=)
+                            (member "SEXPR-AMB-B" package-refinements
+                                    :test #'string=))
+                       "package ambiguity should expose package refinements: ~S"
+                       package-ambiguous-result)
+          (assert-equal "ok" (lookup package-show-result "status")
+                        "package refinement should select one definition")
+          (assert-true (search ":a" (lookup (lookup package-show-result
+                                                    "form")
+                                            "text"))
+                       "package refinement selected wrong form: ~S"
+                       package-show-result)
+          (assert-equal "ambiguous" (lookup ambiguous-edit-result "status")
+                        "ambiguous edit should return structured ambiguity")
+          (assert-equal before-ambiguous-edit
+                        (read-file-string package-path)
+                        "ambiguous edit should leave source unchanged"))
         (let* ((before (read-file-string path))
                (plan-resp
                  (clpm.repl:send-request
@@ -1848,6 +1947,11 @@
                              "keyword" ":formula")))
                  (convert-result (lookup convert-resp "result"))
                  (after-convert (read-file-string lambda-path))
+                 (updated-sites
+                   (array-items (lookup convert-result
+                                        "updated_call_sites")))
+                 (updated-refinement
+                   (lookup (first updated-sites) "refinement"))
                  (dynamic-caveats
                    (array-items (lookup convert-result
                                         "dynamic_caveats"))))
@@ -1864,6 +1968,12 @@
                                  after-convert)
                          "convert did not update direct call site: ~A"
                          after-convert)
+            (assert-true updated-refinement
+                         "call-site response should expose refinement data")
+            (assert-true (lookup updated-refinement "caller")
+                         "call-site refinement should include caller")
+            (assert-true (lookup updated-refinement "argument_count")
+                         "call-site refinement should include argument shape")
             (assert-equal 1 (length dynamic-caveats)
                           "convert should report APPLY as a dynamic caveat")))
         (let* ((structural-path (make-structural-move-source-file))
