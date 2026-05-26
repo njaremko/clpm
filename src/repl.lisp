@@ -1007,7 +1007,7 @@ KIND is one of :real-ms or :cons-bytes."))
 
 (defstruct worker
   "One eval thread. Most clients only ever touch the worker named
-\"default\"; named / concurrent workers (#170-#173) give the LLM a
+\"default\"; named and concurrent workers give the LLM a
 sandboxed slot to run an experiment in without polluting the main
 session's package, history, or redefinition log.
 
@@ -1048,7 +1048,7 @@ lands in the right bucket.")
   ;; Plist of v2 opt-ins parsed out of the request params. Examples:
   ;;   :stream t       -- emit `event:stdout' / `event:stderr' chunks
   ;;   :query-interactive t -- support bidirectional `query' for reads
-  ;;   :debug t        -- pause in the debugger on error (see #111)
+  ;;   :debug t        -- pause in the debugger on error
   ;;   :print-length N -- bind *print-length* for the duration
   ;;   ...
   options
@@ -3112,7 +3112,7 @@ unwinds. Any in-flight evals are interrupted via the unwind-protect."
     (%success-response id (%json-object)))))
 
 ;;; ----------------------------------------------------------------------------
-;;; File watching (BRIDGE_V2 #180-#182)
+;;; File watching
 ;;;
 ;;; A file watch is a background thread that observes a directory's `*.glob`
 ;;; entries. It uses Watchman when available, otherwise it polls every 1 s.
@@ -4138,7 +4138,7 @@ server-owned debug session from a fresh connection."
     (%debug-orphan-error id))))
 
 ;;; ----------------------------------------------------------------------------
-;;; Source navigation and introspection (BRIDGE_V2 #130-#136, #140-#148).
+;;; Source navigation and introspection
 ;;; ----------------------------------------------------------------------------
 
 (defun %find-symbol-in-package (sym-name package)
@@ -4398,7 +4398,7 @@ macroexpands|specializes). Returns
              (%error-response id "eval-error" (princ-to-string c))))))))))
 
 ;;; ----------------------------------------------------------------------------
-;;; compile-file / load-file with structured diagnostics (#130, #131).
+;;; compile-file / load-file with structured diagnostics
 ;;; ----------------------------------------------------------------------------
 
 (defun %compile-condition-severity (condition)
@@ -4465,7 +4465,7 @@ result carries `success', `output_truename', `warnings_p', `failure_p'."
              (%error-response id "eval-error" (princ-to-string c))))))))))
 
 ;;; ----------------------------------------------------------------------------
-;;; Introspection (#140-#148)
+;;; Introspection
 ;;; ----------------------------------------------------------------------------
 
 (defun %symbol-kinds (sym)
@@ -5117,7 +5117,7 @@ recorded by ASDF, plus its declared and resolved dependencies."
                       (error () nil))))))))))
 
 ;;; ----------------------------------------------------------------------------
-;;; Inspector (#120-#125)
+;;; Inspector
 ;;;
 ;;; An inspector session is a stack of focused values. Each call to
 ;;; inspect-into pushes a new frame; inspect-pop pops one. The session
@@ -5502,7 +5502,7 @@ thing across render, navigation, and mutation."
     (t nil)))
 
 ;;; ----------------------------------------------------------------------------
-;;; Image and ASDF management (#190-#194)
+;;; Image and ASDF management
 ;;; ----------------------------------------------------------------------------
 
 (%register-method
@@ -5615,7 +5615,7 @@ directory."
         "after_bytes" #+sbcl (sb-ext:get-bytes-consed) #-sbcl 0))))))
 
 ;;; ----------------------------------------------------------------------------
-;;; Trace (#160-#162)
+;;; Trace
 ;;; ----------------------------------------------------------------------------
 
 (defun %local-trace-enabled-p (entry server)
@@ -6122,7 +6122,7 @@ keeps the worker fast-path identical to v1."
       (maybe-bool "record_signals" :record-signals)
       (maybe-bool "concurrent" :concurrent)
       (maybe-string "worker" :worker)
-      ;; #211: `break_on' accepts a type name ("error"), the special
+      ;; `break_on' accepts a type name ("error"), the special
       ;; strings "none" / "nil", or boolean false. The latter values
       ;; explicitly disable *break-on-signals* for the eval, overriding
       ;; any global default the daemon was started with.
@@ -6228,9 +6228,9 @@ as a prin1 string, or NIL for `(values)')."
            (incf (server-eval-count server))
            (clpm.repl.compat:send-message mailbox job)
            (let ((result
-                   ;; #212: poll the reply mailbox so we can notice a
-                   ;; worker thread that died mid-eval (and never gets
-                   ;; to send us a result).
+                  ;; Poll the reply mailbox so we can notice a worker
+                  ;; thread that died mid-eval and never gets to send
+                  ;; us a result.
                    (loop
                      (let ((msg (clpm.repl.compat:receive-message-no-hang
                                  reply-box)))
@@ -6825,8 +6825,8 @@ Used by both the inline path and the threaded path."
                 "id" id "method" method
                 "elapsed_ms" elapsed
                 "error" error-code)
-    ;; Slowlog (#214): any eval over the threshold gets a dedicated
-    ;; log entry so a future operator can find pathological forms.
+    ;; Slow evals get a dedicated log entry so a future operator can
+    ;; find pathological forms.
     (when (and (string= method "eval")
                (>= elapsed +slow-eval-threshold-ms+))
       (let* ((form (and params (%json-getf params "form")))
