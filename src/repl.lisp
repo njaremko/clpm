@@ -6675,6 +6675,110 @@ external symbol count, and a small head of exported symbols."
              "export_count" export-count
              "exports_head" (%json-array (sort exports #'string<)))))))))))
 
+(defun %dispatch-class-info (server params id name-key)
+  (let* ((name (%json-getf params name-key))
+         (pkg-name (%json-getf params "package"))
+         (sym (and (stringp name)
+                   (%symbol-from-string name pkg-name :server server)))
+         (class (and sym (find-class sym nil))))
+    (cond
+      ((not (stringp name))
+       (%error-response id "protocol-error"
+                        (format nil "missing `~A' param" name-key)))
+      ((null class)
+       (%error-response id "eval-error"
+                        (format nil "no such class: ~A" name)))
+      (t
+       (handler-case
+           #+sbcl
+         (progn
+           (sb-mop:finalize-inheritance class)
+           (let* ((direct-supers
+                    (mapcar (lambda (c) (symbol-name (class-name c)))
+                            (sb-mop:class-direct-superclasses class)))
+                  (direct-subs
+                    (mapcar (lambda (c) (symbol-name (class-name c)))
+                            (sb-mop:class-direct-subclasses class)))
+                  (precedence
+                    (mapcar (lambda (c) (symbol-name (class-name c)))
+                            (sb-mop:class-precedence-list class)))
+                  (all-direct-slots
+                    (loop for c in (sb-mop:class-precedence-list class)
+                          append (handler-case
+                                     (sb-mop:class-direct-slots c)
+                                   (error () nil))))
+                  (direct-slot-names
+                    (let ((names (make-hash-table :test 'eq)))
+                      (dolist (slot (sb-mop:class-direct-slots class) names)
+                        (setf (gethash (sb-mop:slot-definition-name slot)
+                                       names)
+                              t))))
+                  (direct-slot-defs
+                    (let ((defs (make-hash-table :test 'eq)))
+                      (dolist (slot all-direct-slots defs)
+                        (let* ((slot-name
+                                 (sb-mop:slot-definition-name slot))
+                               (prior (gethash slot-name defs)))
+                          (setf (gethash slot-name defs)
+                                (append prior (list slot)))))))
+                  (slots
+                    (loop for slot in (sb-mop:class-slots class)
+                          for slot-name = (sb-mop:slot-definition-name slot)
+                          for source-slots = (gethash slot-name
+                                                      direct-slot-defs)
+                          collect
+                          (%json-object
+                           "name" (symbol-name slot-name)
+                           "direct" (and (gethash slot-name
+                                                   direct-slot-names)
+                                         t)
+                           "type" (%safe-prin1
+                                   (sb-mop:slot-definition-type slot))
+                           "initargs" (%json-array
+                                       (mapcar #'%safe-prin1
+                                               (handler-case
+                                                   (sb-mop:slot-definition-initargs
+                                                    slot)
+                                                 (error () nil))))
+                           "initform" (let ((iff (sb-mop:slot-definition-initform slot)))
+                                        (and iff (%safe-prin1 iff)))
+                           "readers" (%json-array
+                                      (mapcar #'symbol-name
+                                              (remove-duplicates
+                                               (loop for source-slot in source-slots
+                                                     append
+                                                     (handler-case
+                                                         (sb-mop:slot-definition-readers
+                                                          source-slot)
+                                                       (error () nil)))
+                                               :test #'eq)))
+                           "writers" (%json-array
+                                      (mapcar #'%safe-prin1
+                                              (remove-duplicates
+                                               (loop for source-slot in source-slots
+                                                     append
+                                                     (handler-case
+                                                         (sb-mop:slot-definition-writers
+                                                          source-slot)
+                                                       (error () nil)))
+                                               :test #'equal)))))))
+             (%success-response
+              id
+              (%json-object
+               "name" (symbol-name (class-name class))
+               "package" (and (symbol-package (class-name class))
+                              (%public-package-name
+                               (symbol-package (class-name class))
+                               server))
+               "direct_supers" (%json-array direct-supers)
+               "direct_subs" (%json-array direct-subs)
+               "precedence" (%json-array precedence)
+               "slots" (%json-array slots)))))
+         #-sbcl
+         (%error-response id "eval-error" "class-info is SBCL-only")
+         (error (c)
+           (%error-response id "eval-error" (princ-to-string c))))))))
+
 (%register-method
  (make-method-spec
   :name "class-info"
@@ -6689,95 +6793,23 @@ accessors)."
   :handler
   (lambda (server params id ctx)
     (declare (ignore ctx))
-    (let* ((name (%json-getf params "name"))
-           (pkg-name (%json-getf params "package"))
-           (sym (and (stringp name)
-                     (%symbol-from-string name pkg-name :server server)))
-           (class (and sym (find-class sym nil))))
-      (cond
-        ((null class)
-         (%error-response id "eval-error"
-                          (format nil "no such class: ~A" name)))
-        (t
-         (handler-case
-             #+sbcl
-           (progn
-             (sb-mop:finalize-inheritance class)
-             (let* ((direct-supers
-                      (mapcar (lambda (c) (symbol-name (class-name c)))
-                              (sb-mop:class-direct-superclasses class)))
-                    (direct-subs
-                      (mapcar (lambda (c) (symbol-name (class-name c)))
-                              (sb-mop:class-direct-subclasses class)))
-                    (precedence
-                      (mapcar (lambda (c) (symbol-name (class-name c)))
-                              (sb-mop:class-precedence-list class)))
-                    (all-direct-slots
-                      (loop for c in (sb-mop:class-precedence-list class)
-                            append (handler-case
-                                       (sb-mop:class-direct-slots c)
-                                     (error () nil))))
-                    (direct-slot-names
-                      (let ((names (make-hash-table :test 'eq)))
-                        (dolist (slot (sb-mop:class-direct-slots class) names)
-                          (setf (gethash (sb-mop:slot-definition-name slot)
-                                         names)
-                                t))))
-                    (direct-slot-defs
-                      (let ((defs (make-hash-table :test 'eq)))
-                        (dolist (slot all-direct-slots defs)
-                          (let* ((slot-name
-                                   (sb-mop:slot-definition-name slot))
-                                 (prior (gethash slot-name defs)))
-                            (setf (gethash slot-name defs)
-                                  (append prior (list slot)))))))
-                    (slots
-                      (loop for slot in (sb-mop:class-slots class)
-                            for slot-name = (sb-mop:slot-definition-name slot)
-                            for source-slots = (gethash slot-name
-                                                        direct-slot-defs)
-                            collect
-                            (%json-object
-                             "name" (symbol-name slot-name)
-                             "direct" (and (gethash slot-name
-                                                     direct-slot-names)
-                                           t)
-                             "type" (%safe-prin1
-                                     (sb-mop:slot-definition-type slot))
-                             "initform" (let ((iff (sb-mop:slot-definition-initform slot)))
-                                          (and iff (%safe-prin1 iff)))
-                             "readers" (%json-array
-                                        (mapcar #'symbol-name
-                                                (remove-duplicates
-                                                 (loop for source-slot in source-slots
-                                                       append
-                                                       (handler-case
-                                                           (sb-mop:slot-definition-readers
-                                                            source-slot)
-                                                         (error () nil)))
-                                                 :test #'eq)))
-                             "writers" (%json-array
-                                        (mapcar #'%safe-prin1
-                                                (remove-duplicates
-                                                 (loop for source-slot in source-slots
-                                                       append
-                                                       (handler-case
-                                                           (sb-mop:slot-definition-writers
-                                                            source-slot)
-                                                         (error () nil)))
-                                                 :test #'equal)))))))
-               (%success-response
-                id
-                (%json-object
-                 "name" (symbol-name (class-name class))
-                 "direct_supers" (%json-array direct-supers)
-                 "direct_subs" (%json-array direct-subs)
-                 "precedence" (%json-array precedence)
-                 "slots" (%json-array slots)))))
-           #-sbcl
-           (%error-response id "eval-error" "class-info is SBCL-only")
-           (error (c)
-             (%error-response id "eval-error" (princ-to-string c))))))))))
+    (%dispatch-class-info server params id "name"))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-class-info"
+  :summary "Return CLOS class layout and slot metadata."
+  :doc "Required: `symbol'. Optional: `package'. This is the SexprEdit CLOS
+lens for class layout: direct superclasses, subclasses, precedence, effective
+slots, direct-slot markers, initargs, readers, writers, types, and initforms."
+  :params (list (list :name "symbol" :type :string :required t
+                      :description "Class symbol.")
+                (list :name "package" :type :string :required nil
+                      :description "Resolve in this package."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-class-info server params id "symbol"))))
 
 #+sbcl
 (defun %sexpr-specializer-json (specializer)

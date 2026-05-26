@@ -293,6 +293,8 @@
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
                    "sexpr-symbol-info missing from methods")
+      (assert-true (member "sexpr-class-info" method-names :test #'string=)
+                   "sexpr-class-info missing from methods")
       (assert-true (member "sexpr-generic-info" method-names :test #'string=)
                    "sexpr-generic-info missing from methods")
       (assert-true (member "sexpr-system-graph" method-names :test #'string=)
@@ -851,6 +853,51 @@
                        "FORMAT should include function kind: ~S" kinds)
           (assert-true definitions
                        "FORMAT should have definition entries"))
+        (let* ((setup-resp
+                 (clpm.repl:send-request
+                  sock "eval"
+                  :params
+                  (json-object
+                   "form"
+                   "(defclass sexpr-workbook-demo ()
+                      ((cells :initarg :cells
+                              :accessor sexpr-workbook-cells)
+                       (mode :initarg :mode
+                             :reader sexpr-workbook-mode
+                             :initform :automatic)))")))
+               (class-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-class-info"
+                  :params (json-object "symbol" "sexpr-workbook-demo")))
+               (class-result (lookup class-resp "result"))
+               (slots (array-items (lookup class-result "slots")))
+               (cells-slot (find "CELLS" slots
+                                 :key (lambda (slot)
+                                        (lookup slot "name"))
+                                 :test #'string=))
+               (initargs (and cells-slot
+                              (array-items (lookup cells-slot
+                                                   "initargs"))))
+               (readers (and cells-slot
+                             (array-items (lookup cells-slot
+                                                  "readers")))))
+          (assert-true (lookup setup-resp "result")
+                       "class setup failed: ~S" setup-resp)
+          (assert-true class-result
+                       "class-info failed: ~S" class-resp)
+          (assert-equal "SEXPR-WORKBOOK-DEMO"
+                        (lookup class-result "name")
+                        "wrong class name")
+          (assert-true cells-slot
+                       "class-info missing CELLS slot: ~S" class-result)
+          (assert-true (lookup cells-slot "direct")
+                       "CELLS slot should be direct")
+          (assert-true (member ":CELLS" initargs :test #'string=)
+                       "CELLS slot missing initarg: ~S" cells-slot)
+          (assert-true (member "SEXPR-WORKBOOK-CELLS" readers
+                               :test #'string=)
+                       "CELLS slot missing accessor reader: ~S"
+                       cells-slot))
         (let* ((setup-resp
                  (clpm.repl:send-request
                   sock "eval"
