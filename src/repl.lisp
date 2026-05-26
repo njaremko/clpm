@@ -1439,6 +1439,11 @@ must not block the eval response."
           (error "trailing form after first expression")))
       value)))
 
+(defun %read-control-form (form-text)
+  "Read one REPL control option form without read-time evaluation."
+  (let ((*read-eval* nil))
+    (%read-form form-text)))
+
 (defun %read-region-form (stream)
   "Read the next form from STREAM, returning EOF when the region is exhausted."
   (read stream nil 'eof))
@@ -1597,15 +1602,15 @@ time so the handler doesn't have to do work when a condition arrives."
                                  (cadr args-array))
             for parsed-type = (handler-case
                                   (and (stringp type-text)
-                                       (read-from-string type-text))
+                                       (%read-control-form type-text))
                                 (error () nil))
             for parsed-restart = (handler-case
                                      (and (stringp restart-text)
-                                          (read-from-string restart-text))
+                                          (%read-control-form restart-text))
                                    (error () nil))
             for parsed-args = (handler-case
                                   (loop for s in arg-forms
-                                        collect (eval (read-from-string
+                                        collect (eval (%read-control-form
                                                        (princ-to-string s))))
                                 (error () nil))
             when (and parsed-type parsed-restart)
@@ -2052,7 +2057,7 @@ sessions."
                        (cond
                          (break-on-none? nil)
                          ((stringp break-on-spec)
-                          (handler-case (read-from-string break-on-spec)
+                          (handler-case (%read-control-form break-on-spec)
                             (error () nil)))
                          (t nil))))
                 (flet ((on-condition (c)

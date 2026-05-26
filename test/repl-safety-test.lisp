@@ -112,6 +112,22 @@
                    "expected 3, got ~S" resp))))
 (format t "  break_on none OK~%")
 
+(format t "Test: break_on disables read-time eval~%")
+(with-daemon
+  (lambda (sock)
+    (do-rpc sock "eval"
+            (list (cons "form"
+                        "(when (boundp 'cl-user::*break-on-read-eval-ran*) (makunbound 'cl-user::*break-on-read-eval-ran*))")))
+    (let* ((resp (do-rpc sock "eval"
+                         (list (cons "form"
+                                     "(if (boundp 'cl-user::*break-on-read-eval-ran*) cl-user::*break-on-read-eval-ran* nil)")
+                               (cons "break_on"
+                                     "#.(progn (setf (symbol-value (intern \"*BREAK-ON-READ-EVAL-RAN*\" \"CL-USER\")) t) 'error)"))))
+           (result (lookup resp "result")))
+      (assert-true (string= "NIL" (lookup result "value"))
+                   "break_on read-time eval escaped: ~S" resp))))
+(format t "  break_on read safety OK~%")
+
 ;;; ----------------------------------------------------------------------------
 ;;; #212: killing a named worker mid-life and re-using its name surfaces the
 ;;; worker_restarted result flag.
