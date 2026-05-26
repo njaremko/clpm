@@ -99,9 +99,41 @@
 
 ;;; Helper functions
 
+(defparameter +condition-initarg-names+
+  '(:tool :install-hints
+    :file :line :detail
+    :url :status
+    :expected :actual :artifact
+    :key-id
+    :systems :conflict-chain :explanation
+    :system :log-file :exit-code
+    :native-dep :required-by)
+  "Condition initargs accepted after the format arguments to `signal-error`.")
+
+(defun %condition-initarg-tail-p (args)
+  (and (evenp (length args))
+       (loop for tail on args by #'cddr
+             for key = (first tail)
+             always (and (keywordp key)
+                         (member key +condition-initarg-names+)))))
+
+(defun %split-signal-error-args (args)
+  (labels ((scan (format-args rest)
+             (cond
+               ((null rest) (values (nreverse format-args) '()))
+               ((%condition-initarg-tail-p rest)
+                (values (nreverse format-args) rest))
+               (t
+                (scan (cons (first rest) format-args) (rest rest))))))
+    (scan '() args)))
+
 (defun signal-error (condition-type message &rest args)
   "Signal a CLPM error with a formatted message."
-  (error condition-type :message (apply #'format nil message args)))
+  (multiple-value-bind (format-args initargs)
+      (%split-signal-error-args args)
+    (apply #'error condition-type
+           :message (apply #'format nil message format-args)
+           initargs)))
 
 (defun format-error (condition &optional stream)
   "Format an error condition for user display."

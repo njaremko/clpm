@@ -120,6 +120,18 @@
           (setf failed t)))
       (assert-true failed "Expected invalid workspace member path traversal to fail"))))
 
+(format t "Testing workspace parse errors preserve file context...~%")
+
+(let ((file "synthetic.clpm.workspace"))
+  (handler-case
+      (clpm.workspace::parse-workspace
+       '(:workspace :format 1 :members ("/absolute"))
+       :file file)
+    (clpm.errors:clpm-parse-error (c)
+      (assert-string= file (slot-value c 'clpm.errors::file)))
+    (:no-error (&rest values)
+      (declare (ignore values))
+      (fail "Expected absolute workspace member path to fail"))))
+
 (format t "~%Workspace discovery tests PASSED!~%")
 (sb-ext:exit :code 0)
-
