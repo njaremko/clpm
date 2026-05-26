@@ -4772,7 +4772,8 @@ external symbol count, and a small head of exported symbols."
   :name "class-info"
   :summary "Describe a CL class: supers, subs, precedence, slots."
   :doc "Required: `name' (symbol). Returns direct supers, direct subs,
-precedence list, slot specs (name, type, initform, accessors)."
+precedence list, and effective slot specs (name, direct, type, initform,
+accessors)."
   :params (list (list :name "name" :type :string :required t
                       :description "Class symbol.")
                 (list :name "package" :type :string :required nil
@@ -4803,22 +4804,60 @@ precedence list, slot specs (name, type, initform, accessors)."
                     (precedence
                       (mapcar (lambda (c) (symbol-name (class-name c)))
                               (sb-mop:class-precedence-list class)))
+                    (all-direct-slots
+                      (loop for c in (sb-mop:class-precedence-list class)
+                            append (handler-case
+                                       (sb-mop:class-direct-slots c)
+                                     (error () nil))))
+                    (direct-slot-names
+                      (let ((names (make-hash-table :test 'eq)))
+                        (dolist (slot (sb-mop:class-direct-slots class) names)
+                          (setf (gethash (sb-mop:slot-definition-name slot)
+                                         names)
+                                t))))
+                    (direct-slot-defs
+                      (let ((defs (make-hash-table :test 'eq)))
+                        (dolist (slot all-direct-slots defs)
+                          (let* ((slot-name
+                                   (sb-mop:slot-definition-name slot))
+                                 (prior (gethash slot-name defs)))
+                            (setf (gethash slot-name defs)
+                                  (append prior (list slot)))))))
                     (slots
-                      (loop for slot in (sb-mop:class-direct-slots class)
+                      (loop for slot in (sb-mop:class-slots class)
+                            for slot-name = (sb-mop:slot-definition-name slot)
+                            for source-slots = (gethash slot-name
+                                                        direct-slot-defs)
                             collect
                             (%json-object
-                             "name" (symbol-name
-                                     (sb-mop:slot-definition-name slot))
+                             "name" (symbol-name slot-name)
+                             "direct" (and (gethash slot-name
+                                                     direct-slot-names)
+                                           t)
                              "type" (%safe-prin1
                                      (sb-mop:slot-definition-type slot))
                              "initform" (let ((iff (sb-mop:slot-definition-initform slot)))
                                           (and iff (%safe-prin1 iff)))
                              "readers" (%json-array
                                         (mapcar #'symbol-name
-                                                (sb-mop:slot-definition-readers slot)))
+                                                (remove-duplicates
+                                                 (loop for source-slot in source-slots
+                                                       append
+                                                       (handler-case
+                                                           (sb-mop:slot-definition-readers
+                                                            source-slot)
+                                                         (error () nil)))
+                                                 :test #'eq)))
                              "writers" (%json-array
                                         (mapcar #'%safe-prin1
-                                                (sb-mop:slot-definition-writers slot)))))))
+                                                (remove-duplicates
+                                                 (loop for source-slot in source-slots
+                                                       append
+                                                       (handler-case
+                                                           (sb-mop:slot-definition-writers
+                                                            source-slot)
+                                                         (error () nil)))
+                                                 :test #'equal)))))))
                (%success-response
                 id
                 (%json-object

@@ -192,6 +192,40 @@
 (format t "  class-info OK~%")
 
 ;;; ----------------------------------------------------------------------------
+;;; class-info should include effective slots, not just slots declared directly
+;;; on the queried class.
+
+(format t "Test: class-info includes inherited slots~%")
+(with-daemon
+  (lambda (sock)
+    (let ((define (clpm.repl:send-request
+                   sock "eval"
+                   :params
+                   (list :object
+                         (list
+                          (cons "form"
+                                "(progn
+                                   (defclass intro-base ()
+                                     ((base-slot :initarg :base-slot
+                                                 :reader intro-base-slot)))
+                                   (defclass intro-child (intro-base)
+                                     ((child-slot :initarg :child-slot
+                                                  :accessor intro-child-slot))))"))))))
+      (assert-true (lookup define "result")
+                   "class setup failed: ~S" define))
+    (let* ((resp (do-rpc sock "class-info"
+                         (list (cons "name" "intro-child")
+                               (cons "package" "common-lisp-user"))))
+           (result (lookup resp "result"))
+           (slots (array-items (lookup result "slots")))
+           (slot-names (mapcar (lambda (slot) (lookup slot "name")) slots)))
+      (assert-true (find "BASE-SLOT" slot-names :test #'string=)
+                   "inherited slot missing: ~S" slots)
+      (assert-true (find "CHILD-SLOT" slot-names :test #'string=)
+                   "direct slot missing: ~S" slots))))
+(format t "  inherited slot class-info OK~%")
+
+;;; ----------------------------------------------------------------------------
 ;;; #146 function-info: CAR is a function, has a docstring.
 
 (format t "Test: function-info CL:CAR~%")
