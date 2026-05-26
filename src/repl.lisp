@@ -4608,6 +4608,84 @@ macroexpands|specializes). Returns
               (clpm.sexpr-edit:source-path-error (c)
                 (%error-response id "eval-error" (princ-to-string c)))))))))))
 
+(defun %dispatch-sexpr-macroexpand-at (server params id)
+  (let ((path (%json-getf params "path"))
+        (recursive (%json-true-p (%json-getf params "recursive"))))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      (t
+       (let ((file (%sexpr-path-field path "file")))
+         (cond
+           ((not (stringp file))
+            (%error-response id "protocol-error" "`path.file' must be a string"))
+           (t
+            (multiple-value-bind (document error-response)
+                (%sexpr-read-document server file id)
+              (or error-response
+                  (let* ((actual-file
+                           (namestring
+                            (clpm.sexpr-edit:source-document-pathname
+                             document)))
+                         (forms (%sexpr-selected-forms document path)))
+                    (cond
+                      ((null forms)
+                       (%error-response id "eval-error"
+                                        "no form matched source path"))
+                      ((rest forms)
+                       (%success-response
+                        id
+                        (%json-object
+                         "status" "ambiguous"
+                         "file" actual-file
+                         "candidates" (%json-array
+                                       (mapcar
+                                        (lambda (form)
+                                          (%sexpr-form-summary-json
+                                           actual-file form))
+                                        forms))
+                         "diagnostics" (%sexpr-diagnostics-json document))))
+                      (t
+                       (let* ((form (first forms))
+                              (pkg-name
+                                (clpm.sexpr-edit:source-form-package form))
+                              (pkg (%reader-package-for-server server
+                                                               pkg-name)))
+                         (cond
+                           ((null pkg)
+                            (%error-response
+                             id "eval-error"
+                             (format nil "no such package: ~A" pkg-name)))
+                           (t
+                            (handler-case
+                                (let* ((source
+                                         (clpm.sexpr-edit:source-form-text
+                                          form))
+                                       (parsed (let ((*package* pkg))
+                                                 (%read-form source))))
+                                  (multiple-value-bind (expansion expanded-p)
+                                      (if recursive
+                                          (macroexpand parsed)
+                                          (macroexpand-1 parsed))
+                                    (%success-response
+                                     id
+                                     (%json-object
+                                      "status" "ok"
+                                      "file" actual-file
+                                      "path" (%sexpr-path-json actual-file
+                                                               form)
+                                      "package" pkg-name
+                                      "recursive" (if recursive t :false)
+                                      "source" source
+                                      "expansion"
+                                      (let ((*package* pkg)
+                                            (*print-pretty* nil))
+                                        (%safe-prin1 expansion))
+                                      "expanded_p" (and expanded-p t)))))
+                              (error (c)
+                                (%error-response id "eval-error"
+                                                 (princ-to-string c)))))))))))))))))))
+
 (%register-method
  (make-method-spec
   :name "sexpr-list-top-level-forms"
@@ -4663,6 +4741,24 @@ and unreadable edited files return errors and leave the file unchanged."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-apply-edit server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-macroexpand-at"
+  :summary "Macroexpand the source form selected by a structural path."
+  :doc "Required: `path'. Optional: `recursive' boolean. The selected form is
+read in the package recorded by the source index and expanded in the live
+daemon image. The response includes the original source text, expansion,
+package, path, and `expanded_p'. If the selector is ambiguous, the response
+returns candidates without expanding anything."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with file plus selector.")
+                (list :name "recursive" :type :boolean :required nil
+                      :description "Fully macroexpand instead of one step."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-macroexpand-at server params id))))
 
 ;;; ----------------------------------------------------------------------------
 ;;; compile-file / load-file with structured diagnostics

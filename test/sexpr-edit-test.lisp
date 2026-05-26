@@ -86,6 +86,16 @@
     (write-file path (source-text))
     path))
 
+(defun make-macro-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-macro-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "macro.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+(when t :ok)
+")
+    path))
+
 (defun with-daemon (fn)
   (let* ((sock (format nil "/tmp/clpm-sexpr-edit-~A.sock"
                       (random (expt 2 32))))
@@ -161,6 +171,8 @@
                    "sexpr-show-form missing from methods")
       (assert-true (member "sexpr-apply-edit" method-names :test #'string=)
                    "sexpr-apply-edit missing from methods")
+      (assert-true (member "sexpr-macroexpand-at" method-names :test #'string=)
+                   "sexpr-macroexpand-at missing from methods")
       (let* ((list-resp
                (clpm.repl:send-request
                 sock "sexpr-list-top-level-forms"
@@ -238,7 +250,24 @@
             (assert-equal "ok" (lookup show-result "status")
                           "replaced form should still resolve")
             (assert-true (search ":changed" (lookup form "text"))
-                         "replaced form text is stale: ~S" show-resp)))))))
+                         "replaced form text is stale: ~S" show-resp)))
+        (let* ((macro-path (make-macro-source-file))
+               (macro-file (namestring macro-path))
+               (macro-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-macroexpand-at"
+                  :params (json-object
+                           "path" (json-object "file" macro-file
+                                               "top_level" 1))))
+               (macro-result (lookup macro-resp "result")))
+          (assert-true macro-result "macroexpand-at failed: ~S" macro-resp)
+          (assert-equal "ok" (lookup macro-result "status")
+                        "macroexpand-at should resolve uniquely")
+          (assert-true (lookup macro-result "expanded_p")
+                       "WHEN should expand: ~S" macro-result)
+          (assert-true (search "IF" (lookup macro-result "expansion"))
+                       "WHEN expansion should contain IF: ~S"
+                       macro-result))))))
 (format t "  RPC source lenses OK~%")
 
 (format t "~%SexprEdit tests PASSED!~%")

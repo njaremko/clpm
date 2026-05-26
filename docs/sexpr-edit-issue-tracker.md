@@ -132,7 +132,7 @@ Acceptance evidence:
 
 ### SE-007: Macroexpand At Path
 
-Status: open
+Status: in-progress
 
 Add `sexpr-macroexpand-at` and `sexpr-macroexpand-1-at` methods. The tool should read the selected source form in the correct package, expand it in the daemon image, and return the expansion, whether expansion occurred, source path, package, and any condition diagnostics.
 
