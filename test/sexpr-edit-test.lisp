@@ -158,6 +158,20 @@
 ")
     path))
 
+(defun make-package-diagnostic-source-file (package-name)
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-package-diag-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "package-diag.lisp" dir)))
+    (write-file path
+                (format nil "(in-package #:cl-user)
+
+(defun uses-internal-symbol ()
+  ~A::hidden)
+"
+                        (string-downcase package-name)))
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -244,6 +258,9 @@
       (assert-true (member "sexpr-update-defpackage" method-names
                            :test #'string=)
                    "sexpr-update-defpackage missing from methods")
+      (assert-true (member "sexpr-package-diagnostics" method-names
+                           :test #'string=)
+                   "sexpr-package-diagnostics missing from methods")
       (assert-true (member "sexpr-macroexpand-at" method-names :test #'string=)
                    "sexpr-macroexpand-at missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
@@ -497,6 +514,83 @@
                                               (read-file-string
                                                package-path))
                             "duplicate export was inserted twice"))))
+        (let* ((suffix (random (expt 2 32)))
+               (conflict-a (format nil "SEXPR-CONFLICT-A-~A" suffix))
+               (conflict-b (format nil "SEXPR-CONFLICT-B-~A" suffix))
+               (setup-resp
+                 (clpm.repl:send-request
+                  sock "eval"
+                  :params
+                  (json-object
+                   "form"
+                   (format nil "(let ((a (make-package ~S :use nil))
+                                      (b (make-package ~S :use nil)))
+                                  (export (intern ~S a) a)
+                                  (export (intern ~S b) b)
+                                  :ok)"
+                           conflict-a conflict-b "COLLIDE" "COLLIDE"))))
+               (diag-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-package-diagnostics"
+                  :params
+                  (json-object
+                   "use_packages" (list :array
+                                        (list conflict-a conflict-b)))))
+               (diag-result (lookup diag-resp "result"))
+               (diagnostics (array-items (lookup diag-result "diagnostics")))
+               (conflict (find "package_conflict" diagnostics
+                               :key (lambda (diagnostic)
+                                      (lookup diagnostic "kind"))
+                               :test #'string=))
+               (packages (and conflict
+                              (array-items (lookup conflict "packages")))))
+          (assert-true (lookup setup-resp "result")
+                       "package conflict setup failed: ~S" setup-resp)
+          (assert-true diag-result
+                       "package diagnostics failed: ~S" diag-resp)
+          (assert-true conflict
+                       "missing package conflict diagnostic: ~S"
+                       diag-result)
+          (assert-equal "COLLIDE" (lookup conflict "symbol")
+                        "wrong conflict symbol")
+          (assert-true (member conflict-a packages :test #'string=)
+                       "conflict missing first package: ~S" conflict)
+          (assert-true (member conflict-b packages :test #'string=)
+                       "conflict missing second package: ~S" conflict))
+        (let* ((internal-package
+                 (format nil "SEXPR-INTERNAL-SOURCE-~A"
+                         (random (expt 2 32))))
+               (setup-resp
+                 (clpm.repl:send-request
+                  sock "eval"
+                  :params (json-object
+                           "form"
+                           (format nil "(make-package ~S :use nil)"
+                                   internal-package))))
+               (diag-path
+                 (make-package-diagnostic-source-file internal-package))
+               (diag-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-package-diagnostics"
+                  :params (json-object "file" (namestring diag-path))))
+               (diag-result (lookup diag-resp "result"))
+               (diagnostics (array-items (lookup diag-result "diagnostics")))
+               (internal (find "internal_symbol_reference" diagnostics
+                               :key (lambda (diagnostic)
+                                      (lookup diagnostic "kind"))
+                               :test #'string=)))
+          (assert-true (lookup setup-resp "result")
+                       "internal package setup failed: ~S" setup-resp)
+          (assert-true diag-result
+                       "source package diagnostics failed: ~S"
+                       diag-resp)
+          (assert-true internal
+                       "missing internal symbol diagnostic: ~S"
+                       diag-result)
+          (assert-equal "HIDDEN" (lookup internal "symbol")
+                        "wrong internal symbol")
+          (assert-equal internal-package (lookup internal "package")
+                        "wrong internal symbol package"))
         (let* ((bad-path (make-validation-source-file
                           "(defun broken ()"))
                (bad-resp

@@ -4883,6 +4883,155 @@ macroexpands|specializes). Returns
          (clpm.sexpr-edit:source-path-error (c)
            (%error-response id "eval-error" (princ-to-string c))))))))
 
+(defun %sexpr-package-array (server raw)
+  (cond
+    ((null raw) nil)
+    ((not (%json-array-p raw))
+     :invalid)
+    (t
+     (loop for name in (%json-array-items raw)
+           unless (stringp name)
+             do (return :invalid)
+           collect (or (%resolve-package-for-server server name)
+                       (return (list :missing name)))))))
+
+(defun %sexpr-package-conflict-diagnostics (packages server)
+  (let ((by-name (make-hash-table :test 'equal))
+        (diagnostics '()))
+    (dolist (package packages)
+      (do-external-symbols (symbol package)
+        (push (cons package symbol)
+              (gethash (symbol-name symbol) by-name))))
+    (maphash
+     (lambda (name entries)
+       (let ((symbols (remove-duplicates (mapcar #'cdr entries))))
+         (when (rest symbols)
+           (push
+            (%json-object
+             "kind" "package_conflict"
+             "symbol" name
+             "packages" (%json-array
+                         (mapcar
+                          (lambda (entry)
+                            (%public-package-name (car entry) server))
+                          (remove-duplicates entries :key #'car)))
+             "message" (format nil
+                               "Multiple packages export distinct symbols named ~A"
+                               name))
+            diagnostics))))
+     by-name)
+    (nreverse diagnostics)))
+
+(defun %symbol-internal-to-other-package-p (symbol current-package)
+  (let ((home (symbol-package symbol)))
+    (and home
+         (not (eq home current-package))
+         (multiple-value-bind (visible status)
+             (find-symbol (symbol-name symbol) home)
+           (and (eq visible symbol)
+                (eq status :internal))))))
+
+(defun %sexpr-internal-symbol-diagnostic (file top-level-form child-path
+                                          symbol current-package server)
+  (let ((home (symbol-package symbol)))
+    (%json-object
+     "kind" "internal_symbol_reference"
+     "symbol" (symbol-name symbol)
+     "package" (%public-package-name home server)
+     "referencing_package" (%public-package-name current-package server)
+     "path" (%json-object
+             "file" file
+             "top_level" (clpm.sexpr-edit:source-form-ordinal top-level-form)
+             "kind" (clpm.sexpr-edit:source-form-kind top-level-form)
+             "name" (clpm.sexpr-edit:source-form-name top-level-form)
+             "child_path" (%json-array child-path))
+     "message" (format nil
+                       "~A::~A references an internal symbol from ~A"
+                       (package-name home)
+                       (symbol-name symbol)
+                       (package-name home)))))
+
+(defun %sexpr-source-package-diagnostics (server document)
+  (let ((file (namestring (clpm.sexpr-edit:source-document-pathname document)))
+        (diagnostics '()))
+    (dolist (top-level-form (clpm.sexpr-edit:source-document-forms document))
+      (let ((current-package
+              (or (and (clpm.sexpr-edit:source-form-package top-level-form)
+                       (find-package
+                        (clpm.sexpr-edit:source-form-package top-level-form)))
+                  (find-package "COMMON-LISP-USER"))))
+        (labels ((walk (form child-path)
+                   (when (and (symbolp form)
+                              (%symbol-internal-to-other-package-p
+                               form current-package))
+                     (push
+                      (%sexpr-internal-symbol-diagnostic
+                       file top-level-form child-path form current-package
+                       server)
+                      diagnostics))
+                   (let ((elements (%sexpr-proper-list-elements form)))
+                     (when elements
+                       (loop for child in elements
+                             for index from 0
+                             do (walk child (append child-path
+                                                    (list index))))))))
+          (walk (clpm.sexpr-edit:source-form-form top-level-form) nil))))
+    (nreverse diagnostics)))
+
+(defun %dispatch-sexpr-package-diagnostics (server params id)
+  (let* ((file (%json-getf params "file"))
+         (package-name (%json-getf params "package"))
+         (use-packages-raw (%json-getf params "use_packages"))
+         (package (and package-name
+                       (stringp package-name)
+                       (%resolve-package-for-server server package-name)))
+         (use-packages (%sexpr-package-array server use-packages-raw)))
+    (cond
+      ((and file (not (stringp file)))
+       (%error-response id "protocol-error" "`file' must be a string"))
+      ((and package-name (not (stringp package-name)))
+       (%error-response id "protocol-error" "`package' must be a string"))
+      ((and package-name (null package))
+       (%error-response id "eval-error"
+                        (format nil "no such package: ~A" package-name)))
+      ((eq use-packages :invalid)
+       (%error-response id "protocol-error"
+                        "`use_packages' must be an array of package names"))
+      ((and (consp use-packages) (eq (first use-packages) :missing))
+       (%error-response id "eval-error"
+                        (format nil "no such package: ~A"
+                                (second use-packages))))
+      (t
+       (multiple-value-bind (document error-response)
+           (if file
+               (%sexpr-read-document server file id)
+               (values nil nil))
+         (or error-response
+             (let* ((conflict-packages
+                      (cond
+                        (use-packages use-packages)
+                        (package (package-use-list package))
+                        (t nil)))
+                    (diagnostics
+                      (append
+                       (and conflict-packages
+                            (%sexpr-package-conflict-diagnostics
+                             conflict-packages server))
+                       (and document
+                            (%sexpr-source-package-diagnostics
+                             server document)))))
+               (%success-response
+                id
+                (%json-object
+                 "file" (and document
+                             (namestring
+                              (clpm.sexpr-edit:source-document-pathname
+                               document)))
+                 "package" (and package
+                                (%public-package-name package server))
+                 "diagnostics" (%json-array diagnostics)
+                 "diagnostic_count" (length diagnostics))))))))))
+
 (defun %dispatch-sexpr-macroexpand-at (server params id)
   (let ((path (%json-getf params "path"))
         (recursive (%json-true-p (%json-getf params "recursive"))))
@@ -5281,6 +5430,26 @@ leave the file unchanged."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-update-defpackage server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-package-diagnostics"
+  :summary "Report package conflicts and explicit internal-symbol references."
+  :doc "Optional: `file', `package', and `use_packages'. With
+`use_packages', the method reports exported-name conflicts among those
+packages. With `package' and no explicit `use_packages', it checks the
+package's current use-list. With `file', it reads source forms and reports
+symbols that definitely refer to another package's internal symbol."
+  :params (list (list :name "file" :type :string :required nil
+                      :description "Source file to inspect for internal-symbol references.")
+                (list :name "package" :type :string :required nil
+                      :description "Package whose use-list should be checked.")
+                (list :name "use_packages" :type :array :required nil
+                      :description "Candidate packages to check for export conflicts."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-package-diagnostics server params id))))
 
 (%register-method
  (make-method-spec
