@@ -105,6 +105,26 @@
 (format t "  default isolation OK~%")
 
 ;;; ----------------------------------------------------------------------------
+;;; Read-only worker queries should not create typo'd workers.
+
+(format t "Test: current-package rejects unknown named worker~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((resp (do-rpc sock "current-package"
+                         (list (cons "worker" "ghost"))))
+           (err (lookup resp "error")))
+      (assert-true err "expected unknown-worker error, got ~S" resp)
+      (assert-true (search "no such worker" (lookup err "message"))
+                   "wrong unknown-worker message: ~S" err))
+    (let* ((workers (do-rpc sock "list-workers"))
+           (entries (array-items (lookup (lookup workers "result")
+                                         "entries")))
+           (names (mapcar (lambda (w) (lookup w "name")) entries)))
+      (assert-true (not (find "ghost" names :test #'string=))
+                   "current-package spawned ghost worker: ~S" names))))
+(format t "  current-package unknown-worker OK~%")
+
+;;; ----------------------------------------------------------------------------
 ;;; Named workers don't share REPL history bindings.
 
 (format t "Test: named workers keep independent history~%")

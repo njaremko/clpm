@@ -2672,18 +2672,29 @@ event log."
   :name "current-package"
   :summary "Return the persistent eval *package* as a string."
   :doc "Returns `{package: \"FOO\"}'. Pass `worker' to inspect a named
-worker's package; otherwise the default worker is reported."
+worker's package; otherwise the default worker is reported. The default
+worker is created lazily; named workers must already exist."
   :params (list (list :name "worker" :type :string :required nil
                       :description "Name of the worker (default: \"default\")."))
   :handler
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (let* ((wname (or (%json-getf params "worker") +default-worker-name+))
-           (w (%ensure-worker server :name wname)))
-      (%success-response
-       id (%json-object "worker" (worker-name w)
-                        "package" (%public-package-name
-                                   (worker-package w) server)))))))
+           (default? (string= wname +default-worker-name+))
+           (w (or (%find-worker server wname)
+                  (and default? (%ensure-worker server :name wname)))))
+      (cond
+        ((null w)
+         (%error-response id "eval-error"
+                          (format nil "no such worker: ~A" wname)))
+        ((not (clpm.repl.compat:thread-alive-p (worker-thread w)))
+         (%error-response id "eval-error"
+                          (format nil "worker is not alive: ~A" wname)))
+        (t
+         (%success-response
+          id (%json-object "worker" (worker-name w)
+                           "package" (%public-package-name
+                                      (worker-package w) server)))))))))
 
 (%register-method
  (make-method-spec
