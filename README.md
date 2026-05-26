@@ -141,7 +141,8 @@ daemon; it never starts one implicitly. Transport fields such as
   `call debug-continue`, and `call debug-abort`.
 - **Inspector sessions.** `call inspect --form FORM` returns paginated parts of any
   value; `inspect-into` / `inspect-pop` walk the structure; `inspect-eval`
-  binds `*` to the focus; `inspect-mutate` replaces an element.
+  binds `*` to the focus while preserving REPL history; `inspect-mutate`
+  replaces an element.
 - **Compile diagnostics.** `call compile-file --path PATH` returns warnings/errors with
   file + line positions, suitable for surfacing in an editor.
 - **ASDF rehydration.** `call load-system --name SYSTEM` recompiles and reloads
@@ -149,7 +150,7 @@ daemon; it never starts one implicitly. Transport fields such as
   `call test-system --name SYSTEM` runs ASDF `test-op` without discarding state.
 - **Source navigation.** `call find-definition`, `call xref`, `call apropos`,
   `call documentation`, `call arglist`, `call complete-symbol`,
-  `call disassemble`, and `call describe-system`.
+  `call describe`, `call disassemble`, and `call describe-system`.
 - **Named workers.** `eval --worker NAME` runs on an isolated worker with
   its own `*package*`, history, and redefinition log. `call list-workers`
   and `call kill-worker --name NAME` manage them.
