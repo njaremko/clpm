@@ -265,6 +265,27 @@
 ")
     path))
 
+(defun make-rewrite-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-rewrite-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "rewrite.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defun rewrite-progn (x)
+  (progn (list x) x))
+
+(defun rewrite-inline (y)
+  (let ((x (unknown-effect y)))
+    (+ x x)))
+
+(defun rewrite-special (y)
+  (let ((x y))
+    (declare (special x))
+    x))
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -373,6 +394,9 @@
                    "sexpr-macro-shape missing from methods")
       (assert-true (member "sexpr-effect-summary" method-names :test #'string=)
                    "sexpr-effect-summary missing from methods")
+      (assert-true (member "sexpr-classify-rewrite" method-names
+                           :test #'string=)
+                   "sexpr-classify-rewrite missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
@@ -1141,6 +1165,83 @@
                         "variable reference should not write")
           (assert-equal :false (lookup variable-effect "calls_unknown")
                         "variable reference should not call unknown functions"))
+        (let* ((rewrite-path (make-rewrite-source-file))
+               (rewrite-file (namestring rewrite-path))
+               (progn-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-classify-rewrite"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" rewrite-file
+                                   "top_level" 1
+                                   "child_path"
+                                   (list :array (list 3)))
+                           "rewrite" "splice-progn")))
+               (progn-result (lookup progn-resp "result"))
+               (progn-classification
+                 (lookup progn-result "classification"))
+               (inline-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-classify-rewrite"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" rewrite-file
+                                   "top_level" 2
+                                   "child_path"
+                                   (list :array (list 3)))
+                           "rewrite" "inline-let")))
+               (inline-result (lookup inline-resp "result"))
+               (inline-classification
+                 (lookup inline-result "classification"))
+               (inline-reasons
+                 (array-items (lookup inline-classification "reasons")))
+               (special-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-classify-rewrite"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" rewrite-file
+                                   "top_level" 3
+                                   "child_path"
+                                   (list :array (list 3)))
+                           "rewrite" "inline-let")))
+               (special-result (lookup special-resp "result"))
+               (special-classification
+                 (lookup special-result "classification"))
+               (special-reasons
+                 (array-items (lookup special-classification "reasons"))))
+          (assert-true progn-result
+                       "progn rewrite classification failed: ~S"
+                       progn-resp)
+          (assert-equal "safe"
+                        (lookup progn-classification "classification")
+                        "body-position PROGN splice should be safe")
+          (assert-true (lookup progn-classification "safe")
+                       "safe PROGN classification should set safe true")
+          (assert-true inline-result
+                       "inline rewrite classification failed: ~S"
+                       inline-resp)
+          (assert-equal "unsafe"
+                        (lookup inline-classification "classification")
+                        "effectful repeated LET value should be unsafe")
+          (assert-true (find "would_duplicate_effects" inline-reasons
+                             :key (lambda (reason)
+                                    (lookup reason "kind"))
+                             :test #'string=)
+                       "inline classifier missing duplicate effect reason: ~S"
+                       inline-classification)
+          (assert-true special-result
+                       "special declaration rewrite classification failed: ~S"
+                       special-resp)
+          (assert-equal "unsafe"
+                        (lookup special-classification "classification")
+                        "SPECIAL declaration boundary should be unsafe")
+          (assert-true (find "declaration_scope" special-reasons
+                             :key (lambda (reason)
+                                    (lookup reason "kind"))
+                             :test #'string=)
+                       "inline classifier missing declaration-scope reason: ~S"
+                       special-classification))
         (let* ((scope-path (make-scope-source-file))
                (scope-file (namestring scope-path))
                (bindings-resp

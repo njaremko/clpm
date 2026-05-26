@@ -286,7 +286,7 @@ Acceptance evidence:
 
 ### SE-019: Semantic-Preserving Rewrite Classification
 
-Status: open
+Status: in-progress
 
 Classify common rewrites as safe, unsafe, or unknown under explicit reasons. The classifier should understand simple body-position `progn` splicing, single-use let inlining, duplicate-evaluation risk, declaration scope, and special binding hazards.
 

@@ -6417,6 +6417,266 @@ macroexpands|specializes). Returns
        "may_signal" (%json-array (nreverse may-signal))
        "notes" (%json-array (nreverse notes))))))
 
+(defun %sexpr-form-operator-name (form)
+  (let ((elements (%sexpr-proper-list-elements form)))
+    (when (and elements (symbolp (first elements)))
+      (symbol-name (first elements)))))
+
+(defun %sexpr-parent-at-child-path (form child-path)
+  (cond
+    ((null child-path)
+     (values nil nil nil))
+    (t
+     (let ((parent-path (butlast child-path))
+           (child-index (car (last child-path))))
+       (multiple-value-bind (parent present-p)
+           (%sexpr-form-at-child-path form parent-path)
+         (values parent child-index present-p))))))
+
+(defun %sexpr-body-position-p (parent child-index)
+  (let ((operator (%sexpr-form-operator-name parent)))
+    (cond
+      ((null operator) nil)
+      ((member operator '("DEFUN" "DEFMACRO") :test #'string=)
+       (>= child-index 3))
+      ((string= operator "LAMBDA")
+       (>= child-index 2))
+      ((member operator '("LET" "LET*" "FLET" "LABELS" "MACROLET"
+                          "SYMBOL-MACROLET")
+               :test #'string=)
+       (>= child-index 2))
+      ((member operator '("PROGN" "LOCALLY") :test #'string=)
+       (>= child-index 1))
+      ((member operator '("WHEN" "UNLESS") :test #'string=)
+       (>= child-index 2))
+      (t nil))))
+
+(defun %sexpr-rewrite-reason-json (kind message &rest pairs)
+  (apply #'%json-object
+         "kind" kind
+         "message" message
+         pairs))
+
+(defun %sexpr-effect-summary-effectful-p (effect)
+  (or (%json-true-p (%json-getf effect "allocates"))
+      (%json-true-p (%json-getf effect "calls_unknown"))
+      (not (null (%json-array-items (%json-getf effect "writes"))))
+      (not (null (%json-array-items (%json-getf effect "may_signal"))))))
+
+(defun %sexpr-count-symbol-references (symbol forms)
+  (labels ((walk (form)
+             (cond
+               ((eq form symbol) 1)
+               ((atom form) 0)
+               ((%sexpr-quoted-form-p form) 0)
+               ((let ((operator (%sexpr-form-operator-name form)))
+                  (and operator
+                       (member operator '("FUNCTION" "DECLARE")
+                               :test #'string=)))
+                0)
+               (t
+                (reduce #'+
+                        (%sexpr-proper-list-elements form)
+                        :key #'walk
+                        :initial-value 0)))))
+    (reduce #'+ forms :key #'walk :initial-value 0)))
+
+(defun %sexpr-special-declaration-for-p (symbol forms)
+  (labels ((special-clause-p (form)
+             (let ((elements (%sexpr-proper-list-elements form)))
+               (and elements
+                    (symbolp (first elements))
+                    (string= "SPECIAL" (symbol-name (first elements)))
+                    (member symbol (rest elements)))))
+           (walk (form)
+             (let ((elements (%sexpr-proper-list-elements form)))
+               (cond
+                 ((null elements) nil)
+                 ((and (symbolp (first elements))
+                       (string= "DECLARE" (symbol-name (first elements))))
+                  (some #'special-clause-p (rest elements)))
+                 (t
+                  (some #'walk elements))))))
+    (some #'walk forms)))
+
+(defun %sexpr-classify-progn-splice (selected parent child-index)
+  (let ((reasons '()))
+    (unless (string= "PROGN" (or (%sexpr-form-operator-name selected) ""))
+      (push (%sexpr-rewrite-reason-json
+             "not_progn"
+             "The selected form is not a PROGN form.")
+            reasons))
+    (unless (%sexpr-body-position-p parent child-index)
+      (push (%sexpr-rewrite-reason-json
+             "not_body_position"
+             "PROGN splicing is only classified safe in body position.")
+            reasons))
+    (if reasons
+        (values "unsafe" (nreverse reasons))
+        (values "safe" nil))))
+
+(defun %sexpr-let-single-binding (selected)
+  (let ((elements (%sexpr-proper-list-elements selected)))
+    (when (and elements
+               (symbolp (first elements))
+               (string= "LET" (symbol-name (first elements)))
+               (listp (second elements))
+               (= 1 (length (second elements))))
+      (let ((binding (first (second elements))))
+        (when (and (consp binding)
+                   (symbolp (first binding))
+                   (second binding))
+          (values (first binding) (second binding) (cddr elements) t))))))
+
+(defun %sexpr-classify-let-inline (selected package)
+  (multiple-value-bind (name value body supported-p)
+      (%sexpr-let-single-binding selected)
+    (cond
+      ((not supported-p)
+       (values "unknown"
+               (list (%sexpr-rewrite-reason-json
+                      "unsupported_let_shape"
+                      "Only a LET with exactly one explicit binding is classified."))))
+      (t
+       (let* ((effect (%sexpr-effect-summary-for-form value package))
+              (use-count (%sexpr-count-symbol-references name body))
+              (reasons '()))
+         (when (%sexpr-special-declaration-for-p name body)
+           (push (%sexpr-rewrite-reason-json
+                  "declaration_scope"
+                  "Inlining would cross a SPECIAL declaration for the bound name.")
+                 reasons))
+         (when (and (> use-count 1)
+                    (%sexpr-effect-summary-effectful-p effect))
+           (push (%sexpr-rewrite-reason-json
+                  "would_duplicate_effects"
+                  "Inlining this binding would evaluate an effectful value more than once."
+                  "uses" use-count
+                  "effect" effect)
+                 reasons))
+         (cond
+           (reasons
+            (values "unsafe" (nreverse reasons)))
+           ((zerop use-count)
+            (values "unknown"
+                    (list (%sexpr-rewrite-reason-json
+                           "unused_binding"
+                           "Inlining an unused binding is better modeled as deletion."))))
+           (t
+            (values "safe" nil))))))))
+
+(defun %sexpr-classify-rewrite-json (rewrite selected parent child-index package)
+  (multiple-value-bind (classification reasons)
+      (cond
+        ((string= rewrite "splice-progn")
+         (%sexpr-classify-progn-splice selected parent child-index))
+        ((string= rewrite "inline-let")
+         (%sexpr-classify-let-inline selected package))
+        (t
+         (values "unknown"
+                 (list (%sexpr-rewrite-reason-json
+                        "unsupported_rewrite"
+                        "This rewrite classifier only supports splice-progn and inline-let.")))))
+    (%json-object
+     "rewrite" rewrite
+     "classification" classification
+     "safe" (%sexpr-boolean-json (string= classification "safe"))
+     "reasons" (%json-array reasons))))
+
+(defun %dispatch-sexpr-classify-rewrite (server params id)
+  (let ((path (%json-getf params "path"))
+        (rewrite (%json-getf params "rewrite")))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      ((not (stringp rewrite))
+       (%error-response id "protocol-error" "missing `rewrite' param"))
+      ((eq (%sexpr-child-path path) :invalid)
+       (%error-response id "protocol-error"
+                        "`path.child_path' must be an array of integers"))
+      (t
+       (let ((file (%sexpr-path-field path "file")))
+         (cond
+           ((not (stringp file))
+            (%error-response id "protocol-error" "`path.file' must be a string"))
+           (t
+            (multiple-value-bind (document error-response)
+                (%sexpr-read-document server file id)
+              (or error-response
+                  (let* ((actual-file
+                           (namestring
+                            (clpm.sexpr-edit:source-document-pathname
+                             document)))
+                         (forms (%sexpr-selected-forms document path)))
+                    (cond
+                      ((null forms)
+                       (%error-response id "eval-error"
+                                        "no form matched source path"))
+                      ((rest forms)
+                       (%success-response
+                        id
+                        (%json-object
+                         "status" "ambiguous"
+                         "file" actual-file
+                         "candidates"
+                         (%json-array
+                          (mapcar
+                           (lambda (form)
+                             (%sexpr-form-summary-json actual-file form))
+                           forms)))))
+                      (t
+                       (let* ((source-form (first forms))
+                              (pkg-name
+                                (clpm.sexpr-edit:source-form-package
+                                 source-form))
+                              (pkg (%reader-package-for-server server
+                                                               pkg-name)))
+                         (cond
+                           ((null pkg)
+                            (%error-response
+                             id "eval-error"
+                             (format nil "no such package: ~A" pkg-name)))
+                           (t
+                            (handler-case
+                                (let* ((source
+                                         (clpm.sexpr-edit:source-form-text
+                                          source-form))
+                                       (parsed (let ((*package* pkg))
+                                                 (%read-form source)))
+                                       (child-path (%sexpr-child-path path)))
+                                  (multiple-value-bind (selected present-p)
+                                      (%sexpr-form-at-child-path
+                                       parsed child-path)
+                                    (multiple-value-bind (parent child-index
+                                                          parent-present-p)
+                                        (%sexpr-parent-at-child-path
+                                         parsed child-path)
+                                      (if (and present-p parent-present-p)
+                                          (%success-response
+                                           id
+                                           (%json-object
+                                            "status" "ok"
+                                            "file" actual-file
+                                            "path" (%sexpr-path-json
+                                                    actual-file source-form)
+                                            "child_path"
+                                            (%json-array child-path)
+                                            "package"
+                                            (%public-package-name pkg server)
+                                            "form"
+                                            (%sexpr-print-form-json
+                                             selected pkg)
+                                            "classification"
+                                            (%sexpr-classify-rewrite-json
+                                             rewrite selected parent
+                                             child-index pkg)))
+                                          (%error-response
+                                           id "eval-error"
+                                           "child_path must select a nested source form")))))
+                              (error (c)
+                                (%error-response id "eval-error"
+                                                 (princ-to-string c)))))))))))))))))))
+
 (defun %dispatch-sexpr-effect-summary (server params id)
   (let ((path (%json-getf params "path")))
     (cond
@@ -6938,6 +7198,23 @@ rewrites, not a purity proof."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-effect-summary server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-classify-rewrite"
+  :summary "Classify whether a local structural rewrite is safe."
+  :doc "Required: `path' and `rewrite'. Supported rewrites are
+`splice-progn' and `inline-let'. The result is one of safe, unsafe, or
+unknown with machine-readable reasons such as non-body PROGN splicing,
+duplicated effectful LET values, or declaration-scope hazards."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with file, selector, and child_path.")
+                (list :name "rewrite" :type :string :required t
+                      :description "Rewrite classifier name: splice-progn or inline-let."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-classify-rewrite server params id))))
 
 (%register-method
  (make-method-spec
