@@ -5843,6 +5843,126 @@ macroexpands|specializes). Returns
                               "source_only" (length source-only)
                               "image_only" (length image-only))))))))))))
 
+(defun %sexpr-quoted-form-p (form)
+  (let ((elements (%sexpr-proper-list-elements form)))
+    (and (= 2 (length elements))
+         (symbolp (first elements))
+         (string= "QUOTE" (symbol-name (first elements))))))
+
+(defun %sexpr-contains-quoted-form-p (form)
+  (or (%sexpr-quoted-form-p form)
+      (let ((elements (%sexpr-proper-list-elements form)))
+        (and elements
+             (some #'%sexpr-contains-quoted-form-p elements)))))
+
+(defun %sexpr-lint-json (kind certainty message file source-form child-path
+                         form package suggestion)
+  (%json-object
+   "kind" kind
+   "certainty" certainty
+   "message" message
+   "path" (%sexpr-path-with-child-json file source-form child-path)
+   "form" (%sexpr-print-form-json form package)
+   "suggestion" suggestion))
+
+(defun %sexpr-lint-source-form (server file source-form)
+  (declare (ignore server))
+  (let ((package (or (and (clpm.sexpr-edit:source-form-package source-form)
+                          (find-package
+                           (clpm.sexpr-edit:source-form-package
+                            source-form)))
+                     (find-package "COMMON-LISP-USER")))
+        (lints '()))
+    (labels ((literal-eq-argument-p (value)
+               (or (numberp value) (stringp value) (characterp value)))
+             (lint (kind certainty message child-path form suggestion)
+               (push (%sexpr-lint-json kind certainty message file
+                                       source-form child-path form package
+                                       suggestion)
+                     lints))
+             (walk (form child-path)
+               (let ((elements (%sexpr-proper-list-elements form)))
+                 (when elements
+                   (let ((operator (first elements)))
+                     (cond
+                       ((and (symbolp operator)
+                             (member (symbol-name operator)
+                                     '("QUOTE" "FUNCTION")
+                                     :test #'string=))
+                        nil)
+                       (t
+                        (when (and (symbolp operator)
+                                   (string= "EQ" (symbol-name operator))
+                                   (some #'literal-eq-argument-p
+                                         (rest elements)))
+                          (lint
+                           "eq_literal" "high"
+                           "EQ is only portable for object identity, not numeric or string value comparison."
+                           child-path form
+                           "Inspect whether EQL, EQUAL, STRING=, or = is intended."))
+                        (when (and (symbolp operator)
+                                   (string= "SETF" (symbol-name operator)))
+                          (loop for tail on (rest elements) by #'cddr
+                                for place = (first tail)
+                                while place
+                                do (when (%sexpr-contains-quoted-form-p
+                                          place)
+                                     (lint
+                                      "mutating_quoted_constant" "high"
+                                      "This SETF place mutates structure reached through a quoted constant."
+                                      child-path form
+                                      "Introduce a fresh copy or construct the data at runtime before mutation."))))
+                        (when (and (symbolp operator)
+                                   (member (symbol-name operator)
+                                           '("RPLACA" "RPLACD" "NCONC")
+                                           :test #'string=)
+                                   (some #'%sexpr-quoted-form-p
+                                         (rest elements)))
+                          (lint
+                           "mutating_quoted_constant" "high"
+                           "This destructive operation receives a quoted constant."
+                           child-path form
+                           "Use freshly allocated data before destructive updates."))
+                        (when (and (symbolp operator)
+                                   (string= "EVAL" (symbol-name operator)))
+                          (lint
+                           "eval_where_macroexpand_may_suffice" "medium"
+                           "EVAL appears in source; macroexpansion or direct function calls are often safer."
+                           child-path form
+                           "Inspect macroexpand-at and callers before keeping runtime EVAL."))
+                        (loop for child in elements
+                              for index from 0
+                              do (walk child
+                                       (append child-path
+                                               (list index)))))))))))
+      (walk (clpm.sexpr-edit:source-form-form source-form) nil))
+    (nreverse lints)))
+
+(defun %dispatch-sexpr-lint (server params id)
+  (let ((file (%json-getf params "file")))
+    (cond
+      ((not (stringp file))
+       (%error-response id "protocol-error" "missing `file' param"))
+      (t
+       (multiple-value-bind (document error-response)
+           (%sexpr-read-document server file id)
+         (or error-response
+             (let* ((actual-file
+                      (namestring
+                       (clpm.sexpr-edit:source-document-pathname document)))
+                    (lints
+                      (mapcan
+                       (lambda (source-form)
+                         (%sexpr-lint-source-form server actual-file
+                                                  source-form))
+                       (clpm.sexpr-edit:source-document-forms document))))
+               (%success-response
+                id
+                 (%json-object
+                  "file" actual-file
+                  "lints" (%json-array lints)
+                 "lint_count" (length lints))))))))))
+
 (defun %sexpr-child-path (path)
   (let ((raw (%sexpr-path-field path "child_path")))
     (cond
@@ -6294,6 +6414,21 @@ file. SBCL definition-source write dates are used when available."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-compare-image-source server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-lint"
+  :summary "Run structural Lisp-specific lint checks on a source file."
+  :doc "Required: `file'. The first lint layer reports stable, structured
+diagnostics for high-confidence `eq' literal comparisons, mutation of quoted
+constants, and medium-confidence runtime `eval' use. Each lint includes a
+source path, printed form, certainty, and suggested next inspection or edit."
+  :params (list (list :name "file" :type :string :required t
+                      :description "Relative or absolute Lisp source path."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-lint server params id))))
 
 (%register-method
  (make-method-spec

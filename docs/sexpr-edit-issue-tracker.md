@@ -324,7 +324,7 @@ Acceptance evidence:
 
 ### SE-022: Lisp-Aware Linting
 
-Status: open
+Status: in-progress
 
 Add a lint layer for Lisp-specific hazards: undefined functions, undefined variables, unused lexical variables, accidental specials, missing or stale exports, duplicate methods, unreachable reader branches, suspicious quoted package symbols, `eq` on numbers or strings, mutation of quoted constants, invalid generalized places, misplaced declarations, macrolet capture risk, package locks, and `eval` where macroexpansion would suffice.
 

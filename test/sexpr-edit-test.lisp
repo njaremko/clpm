@@ -218,6 +218,20 @@
                         value))
     path))
 
+(defun make-lint-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-lint-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "lint.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defun lint-demo (x)
+  (setf (car '(1 2)) 3)
+  (list (eq x 1)
+        (eval '(+ 1 2))))
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -320,6 +334,8 @@
       (assert-true (member "sexpr-compare-image-source" method-names
                            :test #'string=)
                    "sexpr-compare-image-source missing from methods")
+      (assert-true (member "sexpr-lint" method-names :test #'string=)
+                   "sexpr-lint missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
@@ -915,6 +931,29 @@
                                :test #'string=)
                          "eval-defined function should be image-only: ~S"
                          compare-result)))
+        (let* ((lint-path (make-lint-source-file))
+               (lint-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-lint"
+                  :params (json-object "file" (namestring lint-path))))
+               (lint-result (lookup lint-resp "result"))
+               (lints (array-items (lookup lint-result "lints")))
+               (kinds (mapcar (lambda (lint)
+                                 (lookup lint "kind"))
+                               lints)))
+          (assert-true lint-result "sexpr-lint failed: ~S" lint-resp)
+          (dolist (kind '("eq_literal"
+                          "mutating_quoted_constant"
+                          "eval_where_macroexpand_may_suffice"))
+            (assert-true (member kind kinds :test #'string=)
+                         "missing lint kind ~A in ~S" kind lint-result))
+          (dolist (lint lints)
+            (assert-true (lookup lint "path")
+                         "lint missing source path: ~S" lint)
+            (assert-true (lookup lint "suggestion")
+                         "lint missing suggestion: ~S" lint)
+            (assert-true (lookup lint "certainty")
+                         "lint missing certainty: ~S" lint)))
         (let* ((scope-path (make-scope-source-file))
                (scope-file (namestring scope-path))
                (bindings-resp
