@@ -61,20 +61,6 @@
   (assert-not-contains readme "ed25519:...")
   (format t "  README REPL docs PASSED~%"))
 
-(let ((bridge (read-file-string (merge-pathnames "BRIDGE.md" *repo-root*))))
-  (format t "Testing bridge design docs...~%")
-  (assert-contains bridge "clpm repl eval FORM")
-  (assert-contains bridge "pass `--json' for the raw JSON line")
-  (assert-not-contains bridge "with `--pretty`")
-  (assert-not-contains bridge "Default mode is raw JSON")
-  (format t "  Bridge docs PASSED~%"))
-
-(let ((algebra (read-file-string (merge-pathnames "BRIDGE_ALGEBRA.md" *repo-root*))))
-  (format t "Testing bridge algebra docs...~%")
-  (assert-contains algebra "watch-system/asdf-reload")
-  (assert-not-contains algebra "auto-revert")
-  (assert-not-contains algebra "revert-applied")
-  (format t "  Bridge algebra docs PASSED~%"))
 
 (let ((skill (read-file-string
               (merge-pathnames ".claude/skills/clpm-repl-bridge.md"

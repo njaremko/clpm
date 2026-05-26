@@ -489,7 +489,7 @@ sbcl --eval '(require :asdf)'
 ## Testing
 
 ```bash
-sh test/all-tests.sh
+test/all-tests.sh
 ```
 
 ## License
