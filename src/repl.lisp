@@ -4396,7 +4396,6 @@ result carries `success', `output_truename', `warnings_p', `failure_p'."
                       :description "Absolute path to the source file."))
   :handler
   (lambda (server params id ctx)
-    (declare (ignore server))
     (let ((path (%json-getf params "path")))
       (cond
         ((not (stringp path))
