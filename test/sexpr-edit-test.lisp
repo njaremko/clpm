@@ -192,6 +192,17 @@
 ")
     path))
 
+(defun make-add-method-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-add-method-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "methods.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defgeneric add-demo (thing env))
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -278,6 +289,8 @@
       (assert-true (member "sexpr-update-defpackage" method-names
                            :test #'string=)
                    "sexpr-update-defpackage missing from methods")
+      (assert-true (member "sexpr-add-method" method-names :test #'string=)
+                   "sexpr-add-method missing from methods")
       (assert-true (member "sexpr-package-diagnostics" method-names
                            :test #'string=)
                    "sexpr-package-diagnostics missing from methods")
@@ -898,6 +911,50 @@
                                :test #'string=)
                        "CELLS slot missing accessor reader: ~S"
                        cells-slot))
+        (let* ((method-path (make-add-method-source-file))
+               (method-file (namestring method-path))
+               (before (read-file-string method-path))
+               (plan-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-add-method"
+                  :params
+                  (json-object
+                   "file" method-file
+                   "generic" "add-demo"
+                   "lambda_list" "((thing add-formula-demo) env)"
+                   "body" "(list thing env)"
+                   "dry_run" t)))
+               (plan-result (lookup plan-resp "result"))
+               (plan-diff (and plan-result
+                               (array-items
+                                (lookup plan-result
+                                        "structural_diff")))))
+          (assert-true plan-result "add-method dry-run failed: ~S"
+                       plan-resp)
+          (assert-true (lookup plan-result "dry_run")
+                       "add-method plan should be marked dry-run")
+          (assert-true plan-diff
+                       "add-method plan should include structural diff")
+          (assert-equal before (read-file-string method-path)
+                        "add-method dry-run changed the file")
+          (let* ((apply-resp
+                   (clpm.repl:send-request
+                    sock "sexpr-add-method"
+                    :params
+                    (json-object
+                     "file" method-file
+                     "generic" "add-demo"
+                     "lambda_list" "((thing add-formula-demo) env)"
+                     "body" "(list thing env)")))
+                 (apply-result (lookup apply-resp "result"))
+                 (after (read-file-string method-path)))
+            (assert-true apply-result "add-method apply failed: ~S"
+                         apply-resp)
+            (assert-true (search "(defmethod add-demo ((thing add-formula-demo) env)
+  (list thing env))"
+                                 after)
+                         "add-method did not insert expected defmethod: ~S"
+                         after)))
         (let* ((setup-resp
                  (clpm.repl:send-request
                   sock "eval"

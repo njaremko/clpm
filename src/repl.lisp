@@ -4891,6 +4891,114 @@ macroexpands|specializes). Returns
          (clpm.sexpr-edit:source-path-error (c)
            (%error-response id "eval-error" (princ-to-string c))))))))
 
+(defun %sexpr-string-array (raw)
+  (cond
+    ((null raw) nil)
+    ((not (%json-array-p raw)) :invalid)
+    ((every #'stringp (%json-array-items raw))
+     (%json-array-items raw))
+    (t :invalid)))
+
+(defun %sexpr-indent-body-text (text)
+  (with-output-to-string (out)
+    (with-input-from-string (in text)
+      (loop for line = (read-line in nil nil)
+            while line
+            do (write-string "  " out)
+               (write-string line out)
+               (terpri out)))))
+
+(defun %sexpr-trim-source-text (text)
+  (string-trim '(#\Space #\Tab #\Newline #\Return #\Page) text))
+
+(defun %sexpr-add-method-text (generic qualifiers lambda-list body)
+  (let ((qualifier-text
+          (if qualifiers
+              (format nil " ~{~A~^ ~}" qualifiers)
+              "")))
+    (format nil "(defmethod ~A~A ~A~%~A)"
+            generic
+            qualifier-text
+            (%sexpr-trim-source-text lambda-list)
+            (string-right-trim '(#\Newline #\Return)
+                               (%sexpr-indent-body-text
+                                (%sexpr-trim-source-text body))))))
+
+(defun %sexpr-add-method-target (document generic)
+  (let ((matches
+          (remove-if-not
+           (lambda (form)
+             (and (member (clpm.sexpr-edit:source-form-kind form)
+                          '("defgeneric" "defmethod")
+                          :test #'string=)
+                  (clpm.sexpr-edit:source-form-name form)
+                  (string-equal generic
+                                (clpm.sexpr-edit:source-form-name form))))
+           (clpm.sexpr-edit:source-document-forms document))))
+    (car (last matches))))
+
+(defun %dispatch-sexpr-add-method (server params id)
+  (let* ((file (%json-getf params "file"))
+         (generic (%json-getf params "generic"))
+         (qualifiers (%sexpr-string-array (%json-getf params "qualifiers")))
+         (lambda-list (%json-getf params "lambda_list"))
+         (body (%json-getf params "body"))
+         (dry-run (%json-true-p (%json-getf params "dry_run"))))
+    (cond
+      ((not (stringp file))
+       (%error-response id "protocol-error" "missing `file' param"))
+      ((not (stringp generic))
+       (%error-response id "protocol-error" "missing `generic' param"))
+      ((eq qualifiers :invalid)
+       (%error-response id "protocol-error"
+                        "`qualifiers' must be an array of strings"))
+      ((not (stringp lambda-list))
+       (%error-response id "protocol-error" "missing `lambda_list' param"))
+      ((not (stringp body))
+       (%error-response id "protocol-error" "missing `body' param"))
+      (t
+       (handler-case
+           (multiple-value-bind (document error-response)
+               (%sexpr-read-document server file id)
+             (or error-response
+                 (let ((target (%sexpr-add-method-target document generic)))
+                   (cond
+                     ((null target)
+                      (%error-response
+                       id "eval-error"
+                       (format nil
+                               "no defgeneric or defmethod matched ~A"
+                               generic)))
+                     (t
+                      (%success-response
+                       id
+                       (%sexpr-edit-result-json
+                        (funcall
+                         (if dry-run
+                             #'clpm.sexpr-edit:plan-source-edit
+                             #'clpm.sexpr-edit:apply-source-edit)
+                         file "insert-after"
+                         :root (and server (server-project-root server))
+                         :initial-package-name
+                         (%sexpr-current-package-name server)
+                         :top-level
+                         (clpm.sexpr-edit:source-form-ordinal target)
+                         :text (%sexpr-add-method-text
+                                generic qualifiers lambda-list body))
+                        :dry-run dry-run)))))))
+         (clpm.sexpr-edit:source-edit-error (c)
+           (%error-response
+            id "eval-error"
+            (clpm.sexpr-edit:source-edit-error-message c)
+            :details
+            (%json-object
+             "diagnostics"
+             (%json-array
+              (mapcar #'%sexpr-diagnostic-json
+                      (clpm.sexpr-edit:source-edit-error-diagnostics c))))))
+         (clpm.sexpr-edit:source-path-error (c)
+           (%error-response id "eval-error" (princ-to-string c))))))))
+
 (defun %sexpr-package-array (server raw)
   (cond
     ((null raw) nil)
@@ -5844,6 +5952,32 @@ leave the file unchanged."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-update-defpackage server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-add-method"
+  :summary "Insert a defmethod after the matching generic/method group."
+  :doc "Required: `file', `generic', `lambda_list', and `body'. Optional
+`qualifiers' is an array of qualifier tokens and `dry_run' plans the edit
+without writing. The generated defmethod is inserted after the last matching
+`defgeneric' or `defmethod' and goes through the same transactional read
+validation as `sexpr-apply-edit'."
+  :params (list (list :name "file" :type :string :required t
+                      :description "Relative or absolute Lisp source path.")
+                (list :name "generic" :type :string :required t
+                      :description "Generic function name.")
+                (list :name "lambda_list" :type :string :required t
+                      :description "Method lambda list source.")
+                (list :name "body" :type :string :required t
+                      :description "One or more method body forms.")
+                (list :name "qualifiers" :type :array :required nil
+                      :description "Method qualifier tokens, e.g. :around.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Plan without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-add-method server params id))))
 
 (%register-method
  (make-method-spec
