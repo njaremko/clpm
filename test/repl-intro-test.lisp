@@ -128,6 +128,19 @@
                    "MAPCAR missing: ~S" candidates))))
 (format t "  complete-symbol OK~%")
 
+(format t "Test: complete-symbol accepts package-qualified prefixes~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((resp (do-rpc sock "complete-symbol"
+                          (list (cons "prefix" "cl:map")
+                                (cons "limit" 20))))
+           (candidates (array-items
+                        (lookup (lookup resp "result") "candidates"))))
+      (assert-true (find "CL:MAPCAR" candidates :test #'string=)
+                   "CL:MAPCAR missing for qualified prefix: ~S"
+                   candidates))))
+(format t "  qualified complete-symbol OK~%")
+
 ;;; ----------------------------------------------------------------------------
 ;;; #144 package-info: COMMON-LISP has many exports.
 

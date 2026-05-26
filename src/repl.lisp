@@ -4544,6 +4544,58 @@ null>}'."
 #-sbcl
 (defun %arglist-of (sym) (declare (ignore sym)) nil)
 
+(defun %split-qualified-symbol-prefix (prefix)
+  "Return package, marker, and symbol prefix from PREFIX if package-qualified.
+
+The marker is either \":\" for external-symbol completion or \"::\" for
+internal+external completion. Unqualified prefixes return NIL values."
+  (let ((double (search "::" prefix)))
+    (cond
+      (double
+       (values (subseq prefix 0 double)
+               "::"
+               (subseq prefix (+ double 2))))
+      (t
+       (let ((single (position #\: prefix)))
+         (when single
+           (values (subseq prefix 0 single)
+                   ":"
+                   (subseq prefix (1+ single)))))))))
+
+(defun %symbol-name-prefix-p (prefix symbol)
+  "True when SYMBOL's name starts with PREFIX, case-insensitively."
+  (let ((name (symbol-name symbol)))
+    (and (>= (length name) (length prefix))
+         (string-equal prefix name :end2 (length prefix)))))
+
+(defun %completion-symbol-visible-p (symbol package include-internals?)
+  "True when SYMBOL should appear for PACKAGE-qualified completion."
+  (multiple-value-bind (_ status)
+      (find-symbol (symbol-name symbol) package)
+    (declare (ignore _))
+    (and status
+         (or include-internals?
+             (eq status :external)))))
+
+(defun %completion-candidate-name (symbol qualifier marker)
+  "Render SYMBOL as a completion candidate, preserving unqualified legacy output."
+  (cond
+    (qualifier
+     (format nil "~A~A~A" qualifier marker (symbol-name symbol)))
+    (t (symbol-name symbol))))
+
+(defun %completion-response (id names limit)
+  "Build a complete-symbol success response from candidate NAMES."
+  (let* ((unique (remove-duplicates names :test #'string=))
+         (sorted (sort unique #'string<))
+         (head (subseq sorted 0 (min limit (length sorted)))))
+    (%success-response
+     id
+     (%json-object
+      "candidates" (%json-array head)
+      "total" (length unique)
+      "truncated" (> (length sorted) limit)))))
+
 (%register-method
  (make-method-spec
   :name "arglist"
@@ -4580,8 +4632,11 @@ element of the lambda list (including lambda-list keywords like
  (make-method-spec
   :name "complete-symbol"
   :summary "List symbols whose name starts with PREFIX."
-  :doc "Required: `prefix' (case-insensitive). Optional: `package'
-(otherwise external symbols across all packages), `limit' (default 50)."
+  :doc "Required: `prefix' (case-insensitive). `prefix' may be
+package-qualified (`cl:map' for external symbols or `pkg::name' for
+internal and external symbols). Optional: `package' otherwise restricts
+completion to one package; with neither, external symbols across all
+packages are considered. Optional: `limit' (default 50)."
   :params (list (list :name "prefix" :type :string :required t
                       :description "Case-insensitive starts-with match.")
                 (list :name "package" :type :string :required nil
@@ -4594,32 +4649,52 @@ element of the lambda list (including lambda-list keywords like
     (let* ((prefix (%json-getf params "prefix"))
            (pkg-name (%json-getf params "package"))
            (pkg (and pkg-name (%resolve-package-for-server server pkg-name)))
-           (limit (or (%json-getf params "limit") 50))
-           (upat (and (stringp prefix) (string-upcase prefix)))
+           (limit (max 0 (or (%json-getf params "limit") 50)))
            (names '()))
-      (cond
-        ((null upat)
-         (%error-response id "protocol-error" "missing `prefix' param"))
-        (t
-         (flet ((add (s)
-                  (let ((n (symbol-name s)))
-                    (when (and (>= (length n) (length upat))
-                               (string= upat n :end2 (length upat)))
-                      (push n names)))))
-           (cond
-             (pkg (do-symbols (s pkg) (add s)))
-             (t
-              (dolist (p (list-all-packages))
-                (do-external-symbols (s p) (add s))))))
-         (let* ((unique (remove-duplicates names :test #'string=))
-                (sorted (sort unique #'string<))
-                (head (subseq sorted 0 (min limit (length sorted)))))
-           (%success-response
-            id
-            (%json-object
-             "candidates" (%json-array head)
-             "total" (length unique)
-             "truncated" (> (length sorted) limit))))))))))
+      (labels ((add-candidate (symbol qualifier marker)
+                 (push (%completion-candidate-name symbol qualifier marker)
+                       names))
+               (finish ()
+                 (%completion-response id names limit)))
+        (cond
+          ((not (stringp prefix))
+           (%error-response id "protocol-error" "missing `prefix' param"))
+          ((and pkg-name (null pkg))
+           (%error-response id "eval-error"
+                            (format nil "no such package: ~A" pkg-name)))
+          (t
+           (multiple-value-bind (qualifier marker symbol-prefix)
+               (%split-qualified-symbol-prefix prefix)
+             (let* ((qualified? (and qualifier marker))
+                    (target-package
+                      (cond
+                        (qualified?
+                         (%resolve-package-for-server server qualifier))
+                        (pkg pkg)
+                        (t nil)))
+                    (include-internals? (and marker (string= marker "::")))
+                    (candidate-qualifier
+                      (and qualified? (string-upcase qualifier)))
+                    (needle (or symbol-prefix prefix)))
+               (cond
+                 ((and qualified? (null target-package))
+                  (%error-response id "eval-error"
+                                   (format nil "no such package: ~A"
+                                           qualifier)))
+                 (target-package
+                  (do-symbols (s target-package)
+                    (when (and (%symbol-name-prefix-p needle s)
+                               (or (not qualified?)
+                                   (%completion-symbol-visible-p
+                                    s target-package include-internals?)))
+                      (add-candidate s candidate-qualifier marker)))
+                  (finish))
+                 (t
+                  (dolist (p (list-all-packages))
+                    (do-external-symbols (s p)
+                      (when (%symbol-name-prefix-p needle s)
+                        (add-candidate s nil nil))))
+                  (finish))))))))))))
 
 (%register-method
  (make-method-spec
