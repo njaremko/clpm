@@ -348,7 +348,7 @@ Acceptance evidence:
 
 ### SE-024: ASDF System Graph And Affected Files
 
-Status: open
+Status: in-progress
 
 Return ASDF system graphs with components, dependencies, source directories, and affected files for a source path. Edits to package files should know which later files must be recompiled or reloaded.
 

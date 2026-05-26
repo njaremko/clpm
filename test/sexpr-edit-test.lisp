@@ -37,6 +37,13 @@
   (when (and (consp a) (eq (car a) :array))
     (cadr a)))
 
+(defun string-suffix-p (suffix string)
+  (let ((suffix-length (length suffix))
+        (string-length (length string)))
+    (and (<= suffix-length string-length)
+         (string= suffix string
+                  :start2 (- string-length suffix-length)))))
+
 (defun json-object (&rest pairs)
   (list :object
         (loop for (k v) on pairs by #'cddr
@@ -206,6 +213,10 @@
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
                    "sexpr-symbol-info missing from methods")
+      (assert-true (member "sexpr-system-graph" method-names :test #'string=)
+                   "sexpr-system-graph missing from methods")
+      (assert-true (member "sexpr-affected-files" method-names :test #'string=)
+                   "sexpr-affected-files missing from methods")
       (let* ((list-resp
                (clpm.repl:send-request
                 sock "sexpr-list-top-level-forms"
@@ -410,7 +421,48 @@
           (assert-true (member "function" kinds :test #'string=)
                        "FORMAT should include function kind: ~S" kinds)
           (assert-true definitions
-                       "FORMAT should have definition entries"))))))
+                       "FORMAT should have definition entries"))
+        (let* ((graph-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-system-graph"
+                  :params (json-object "name" "clpm")))
+               (graph-result (lookup graph-resp "result"))
+               (components (array-items (lookup graph-result
+                                                "components")))
+               (component-names (mapcar (lambda (component)
+                                          (lookup component "name"))
+                                        components)))
+          (assert-true graph-result "system graph failed: ~S" graph-resp)
+          (assert-true (member "packages" component-names :test #'string=)
+                       "system graph missing packages component")
+          (assert-true (member "sexpr_edit" component-names :test #'string=)
+                       "system graph missing sexpr_edit component")
+          (let* ((affected-resp
+                   (clpm.repl:send-request
+                    sock "sexpr-affected-files"
+                    :params (json-object
+                             "name" "clpm"
+                             "file" (namestring
+                                     (truename "src/packages.lisp")))))
+                 (affected-result (lookup affected-resp "result"))
+                 (affected-files (array-items
+                                  (lookup affected-result
+                                          "affected_files"))))
+            (assert-true affected-result
+                         "affected files failed: ~S" affected-resp)
+            (assert-true
+             (some (lambda (affected-file)
+                     (string-suffix-p "src/sexpr_edit.lisp"
+                                      affected-file))
+                   affected-files)
+             "packages.lisp should affect sexpr_edit.lisp: ~S"
+             affected-result)
+            (assert-true
+             (some (lambda (affected-file)
+                     (string-suffix-p "src/repl.lisp" affected-file))
+                   affected-files)
+             "packages.lisp should affect repl.lisp: ~S"
+             affected-result)))))))
 (format t "  RPC source lenses OK~%")
 
 (format t "~%SexprEdit tests PASSED!~%")

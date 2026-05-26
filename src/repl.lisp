@@ -5685,6 +5685,219 @@ response. Bounded by the daemon's 1 MB output cap."
                           (namestring (asdf:system-source-directory system))
                         (error () nil))))
 
+(defstruct sexpr-asdf-node
+  index
+  key
+  name
+  kind
+  source-file
+  children
+  dependencies)
+
+(defun %asdf-component-kind-json (component)
+  (string-downcase (symbol-name (class-name (class-of component)))))
+
+(defun %asdf-component-dependencies (component)
+  (handler-case (asdf:component-sideway-dependencies component)
+    (error () nil)))
+
+(defun %asdf-dependency-name (dependency)
+  (cond
+    ((stringp dependency) dependency)
+    ((symbolp dependency) (string-downcase (symbol-name dependency)))
+    ((consp dependency) (%asdf-dependency-name (first dependency)))
+    (t (princ-to-string dependency))))
+
+(defun %asdf-key-token (key)
+  (format nil "~{~A~^/~}" key))
+
+(defun %asdf-key-json-array (key)
+  (%json-array key))
+
+(defun %asdf-component-source-file (component)
+  (let ((path (%asdf-component-pathname component)))
+    (when (and path
+               (pathname-name path)
+               (not (%asdf-component-children component)))
+      (namestring path))))
+
+(defun %asdf-system-source-file-json (system)
+  (handler-case
+      (let ((path (asdf:system-source-file system)))
+        (and path (namestring path)))
+    (error () nil)))
+
+(defun %asdf-system-source-directory-json (system)
+  (handler-case
+      (namestring (asdf:system-source-directory system))
+    (error () nil)))
+
+(defun %asdf-dependency-keys (dependencies sibling-keys)
+  (loop for dependency in dependencies
+        for name = (%asdf-dependency-name dependency)
+        for key = (cdr (assoc name sibling-keys :test #'string=))
+        when key
+          collect key))
+
+(defun %asdf-build-system-graph (system)
+  (let ((nodes '())
+        (nodes-by-key (make-hash-table :test 'equal))
+        (index 0))
+    (labels ((record-node (component key child-keys dependency-keys)
+               (let ((node (make-sexpr-asdf-node
+                            :index index
+                            :key key
+                            :name (asdf:component-name component)
+                            :kind (%asdf-component-kind-json component)
+                            :source-file (%asdf-component-source-file
+                                          component)
+                            :children child-keys
+                            :dependencies dependency-keys)))
+                 (incf index)
+                 (setf (gethash key nodes-by-key) node)
+                 (push node nodes)))
+             (walk (component key dependency-keys)
+               (let* ((children (%asdf-component-children component))
+                      (child-keys
+                        (mapcar (lambda (child)
+                                  (append key
+                                          (list (asdf:component-name child))))
+                                children))
+                      (sibling-keys
+                        (loop for child in children
+                              for child-key in child-keys
+                              collect (cons (asdf:component-name child)
+                                            child-key))))
+                 (record-node component key child-keys dependency-keys)
+                 (loop for child in children
+                       for child-key in child-keys
+                       for child-dependencies =
+                          (%asdf-dependency-keys
+                           (%asdf-component-dependencies child)
+                           sibling-keys)
+                       do (walk child child-key child-dependencies)))))
+      (walk system (list (asdf:component-name system)) nil)
+      (values (nreverse nodes) nodes-by-key))))
+
+(defun %sexpr-asdf-node-json (node)
+  (%json-object
+   "index" (sexpr-asdf-node-index node)
+   "key" (%asdf-key-token (sexpr-asdf-node-key node))
+   "path" (%asdf-key-json-array (sexpr-asdf-node-key node))
+   "name" (sexpr-asdf-node-name node)
+   "kind" (sexpr-asdf-node-kind node)
+   "source_file" (sexpr-asdf-node-source-file node)
+   "children" (%json-array
+               (mapcar #'%asdf-key-token
+                       (sexpr-asdf-node-children node)))
+   "depends_on" (%json-array
+                 (mapcar #'%asdf-key-token
+                         (sexpr-asdf-node-dependencies node)))))
+
+(defun %normalized-existing-pathname-name (path)
+  (handler-case
+      (namestring (truename path))
+    (error ()
+      (namestring (pathname path)))))
+
+(defun %asdf-node-matches-file-p (node file-name)
+  (let ((node-file (sexpr-asdf-node-source-file node)))
+    (and node-file
+         (string= (%normalized-existing-pathname-name node-file)
+                  file-name))))
+
+(defun %asdf-dependent-map (nodes)
+  (let ((dependents (make-hash-table :test 'equal)))
+    (dolist (node nodes)
+      (dolist (dependency (sexpr-asdf-node-dependencies node))
+        (push (sexpr-asdf-node-key node)
+              (gethash dependency dependents))))
+    dependents))
+
+(defun %asdf-affected-nodes (nodes nodes-by-key file)
+  (let* ((file-name (%normalized-existing-pathname-name file))
+         (dependents (%asdf-dependent-map nodes))
+         (queue (loop for node in nodes
+                      when (%asdf-node-matches-file-p node file-name)
+                        collect (sexpr-asdf-node-key node)))
+         (seen (make-hash-table :test 'equal))
+         (affected '()))
+    (loop while queue
+          for key = (pop queue)
+          for node = (gethash key nodes-by-key)
+          when (and node (not (gethash key seen)))
+            do (setf (gethash key seen) t)
+               (push node affected)
+               (setf queue
+                     (append (sexpr-asdf-node-children node)
+                             (gethash key dependents)
+                             queue)))
+    (sort affected #'< :key #'sexpr-asdf-node-index)))
+
+(defun %asdf-source-files-json (nodes)
+  (%json-array
+   (remove-duplicates
+    (loop for node in nodes
+          for file = (sexpr-asdf-node-source-file node)
+          when file collect file)
+    :test #'string=)))
+
+(defun %sexpr-system-graph-response (id name)
+  (handler-case
+      (let ((system (asdf:find-system name nil)))
+        (unless system
+          (return-from %sexpr-system-graph-response
+            (%error-response id "eval-error"
+                             (format nil "no such system: ~A" name))))
+        (multiple-value-bind (nodes nodes-by-key)
+            (%asdf-build-system-graph system)
+          (declare (ignore nodes-by-key))
+          (%success-response
+           id
+           (%json-object
+            "name" (asdf:component-name system)
+            "source_file" (%asdf-system-source-file-json system)
+            "source_directory" (%asdf-system-source-directory-json system)
+            "depends_on" (%json-array
+                          (mapcar #'%asdf-dependency-name
+                                  (%asdf-component-dependencies system)))
+            "components" (%json-array
+                          (mapcar #'%sexpr-asdf-node-json nodes))
+            "source_files" (%asdf-source-files-json nodes)))))
+    (error (c)
+      (%error-response id "eval-error" (princ-to-string c)))))
+
+(defun %sexpr-affected-files-response (id name file)
+  (handler-case
+      (let ((system (asdf:find-system name nil)))
+        (unless system
+          (return-from %sexpr-affected-files-response
+            (%error-response id "eval-error"
+                             (format nil "no such system: ~A" name))))
+        (multiple-value-bind (nodes nodes-by-key)
+            (%asdf-build-system-graph system)
+          (let* ((affected (%asdf-affected-nodes nodes nodes-by-key file))
+                 (matched (remove-if-not
+                           (lambda (node)
+                             (%asdf-node-matches-file-p
+                              node
+                              (%normalized-existing-pathname-name file)))
+                           nodes)))
+            (%success-response
+             id
+             (%json-object
+              "system" (asdf:component-name system)
+              "file" (%normalized-existing-pathname-name file)
+              "matched_components" (%json-array
+                                    (mapcar #'%sexpr-asdf-node-json
+                                            matched))
+              "affected_components" (%json-array
+                                     (mapcar #'%sexpr-asdf-node-json
+                                             affected))
+              "affected_files" (%asdf-source-files-json affected))))))
+    (error (c)
+      (%error-response id "eval-error" (princ-to-string c)))))
+
 (defun %asdf-operation-response (id name operation force thunk)
   "Run THUNK for ASDF system NAME and return a structured terminal response."
   (handler-case
@@ -5808,6 +6021,50 @@ recorded by ASDF, plus its declared and resolved dependencies."
                            (error () nil))
            "author" (handler-case (asdf:system-author sys)
                       (error () nil))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-system-graph"
+  :summary "Return an ordered ASDF component graph for structural editing."
+  :doc "Required: `name'. Returns the ASDF system source file, source
+directory, declared dependencies, ordered components, component dependency
+edges, and concrete source files known to ASDF."
+  :params (list (list :name "name" :type :string :required t
+                      :description "ASDF system name."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server ctx))
+    (let ((name (%json-getf params "name")))
+      (cond
+        ((not (stringp name))
+         (%error-response id "protocol-error" "missing `name' param"))
+        (t
+         (%sexpr-system-graph-response id name)))))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-affected-files"
+  :summary "Return ASDF source files affected by editing one source path."
+  :doc "Required: `name' and `file'. The result starts from the component
+whose source file matches `file', then follows ASDF sibling dependency edges
+and includes descendant source files for affected modules. This is conservative
+for structural-edit validation."
+  :params (list (list :name "name" :type :string :required t
+                      :description "ASDF system name.")
+                (list :name "file" :type :string :required t
+                      :description "Edited source file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore server ctx))
+    (let ((name (%json-getf params "name"))
+          (file (%json-getf params "file")))
+      (cond
+        ((not (stringp name))
+         (%error-response id "protocol-error" "missing `name' param"))
+        ((not (stringp file))
+         (%error-response id "protocol-error" "missing `file' param"))
+        (t
+         (%sexpr-affected-files-response id name file)))))))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Inspector
