@@ -250,6 +250,43 @@
 ")
     path))
 
+(defun make-macro-contract-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-contract-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "contracts.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(define-editing-contract with-bound
+  :kind :binding-macro
+  :lambda-list ((resource value) &body body)
+  :introduced-bindings ((resource :lexical))
+  :body-position :body
+  :safe-to-wrap t)
+
+(defmacro with-bound ((resource value) &body body)
+  `(let ((,resource ,value))
+     ,@body))
+
+(defun contract-scope (input)
+  (with-bound (resource input)
+    resource))
+
+(define-editing-contract define-widget
+  :kind :definition
+  :name-position 0
+  :lambda-list-position 1
+  :body-position :body)
+
+(define-widget sample-widget (x)
+  x)
+
+(define-editing-contract malformed-contract
+  :kind :binding-macro
+  :introduced-bindings (not-a-binding))
+")
+    path))
+
 (defun make-effect-source-file ()
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "/tmp/clpm-sexpr-edit-effect-~A/"
@@ -496,6 +533,9 @@
                    "sexpr-lint missing from methods")
       (assert-true (member "sexpr-macro-shape" method-names :test #'string=)
                    "sexpr-macro-shape missing from methods")
+      (assert-true (member "sexpr-macro-contracts" method-names
+                            :test #'string=)
+                   "sexpr-macro-contracts missing from methods")
       (assert-true (member "sexpr-effect-summary" method-names :test #'string=)
                    "sexpr-effect-summary missing from methods")
       (assert-true (member "sexpr-classify-rewrite" method-names
@@ -1303,6 +1343,84 @@
                         "unfamiliar macro shape should stay unknown")
           (assert-true (lookup odd-result "uncertain")
                        "unknown macro shape should be uncertain"))
+        (let* ((contract-path (make-macro-contract-source-file))
+               (contract-file (namestring contract-path))
+               (contracts-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-macro-contracts"
+                  :params (json-object "file" contract-file)))
+               (contracts-result (lookup contracts-resp "result"))
+               (contracts
+                 (array-items (lookup contracts-result "contracts")))
+               (contract-diagnostics
+                 (array-items (lookup contracts-result "diagnostics")))
+               (with-contract
+                 (find "WITH-BOUND" contracts
+                       :key (lambda (contract)
+                              (lookup contract "macro"))
+                       :test #'string=))
+               (shape-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-macro-shape"
+                  :params (json-object "file" contract-file
+                                       "name" "with-bound")))
+               (shape-result (lookup shape-resp "result"))
+               (scope-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-bindings-at"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" contract-file
+                                   "kind" "defun"
+                                   "name" "contract-scope"
+                                   "child_path"
+                                   (list :array (list 3 2))))))
+               (scope-result (lookup scope-resp "result"))
+               (lexical-bindings
+                 (array-items
+                  (lookup (lookup scope-result "scope")
+                          "lexical_variables")))
+               (resource-binding
+                 (find "RESOURCE" lexical-bindings
+                       :key (lambda (binding)
+                              (lookup binding "name"))
+                       :test #'string=))
+               (list-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-list-top-level-forms"
+                  :params (json-object "file" contract-file)))
+               (list-result (lookup list-resp "result"))
+               (forms (array-items (lookup list-result "forms")))
+               (widget-form
+                 (find "SAMPLE-WIDGET" forms
+                       :key (lambda (form)
+                              (lookup form "name"))
+                       :test #'string=)))
+          (assert-true contracts-result
+                       "macro contracts failed: ~S" contracts-resp)
+          (assert-true with-contract
+                       "missing explicit with-bound contract: ~S"
+                       contracts-result)
+          (assert-equal 1 (length contract-diagnostics)
+                        "malformed contract should produce one diagnostic")
+          (assert-true shape-result
+                       "contract-backed macro shape failed: ~S"
+                       shape-resp)
+          (assert-equal :false (lookup shape-result "inferred")
+                        "explicit contract shape should not be inferred")
+          (assert-equal "binding_macro" (lookup shape-result "kind")
+                        "explicit contract should drive macro shape")
+          (assert-true resource-binding
+                       "contract binding should appear in bindings-at: ~S"
+                       scope-result)
+          (assert-equal "editing-contract:WITH-BOUND"
+                        (lookup resource-binding "introduced_by")
+                        "contract binding should record its source")
+          (assert-true widget-form
+                       "contracted definition macro missing from index: ~S"
+                       list-result)
+          (assert-equal "definition" (lookup widget-form "kind")
+                        "contracted definition macro should be classified"))
         (let* ((effect-path (make-effect-source-file))
                (effect-file (namestring effect-path))
                (slot-resp

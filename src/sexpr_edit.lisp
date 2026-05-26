@@ -223,6 +223,31 @@
        (%defstruct-name (second form) package))
       (t nil))))
 
+(defun %editing-contract-plist (form)
+  (when (and (consp form)
+             (symbolp (first form))
+             (string= "DEFINE-EDITING-CONTRACT" (symbol-name (first form)))
+             (symbolp (second form)))
+    (cddr form)))
+
+(defun %editing-contract-kind (contract)
+  (let ((kind (getf contract :kind)))
+    (cond
+      ((keywordp kind)
+       (substitute #\_ #\- (string-downcase (symbol-name kind))))
+      ((stringp kind)
+       (substitute #\_ #\- (string-downcase kind)))
+      (t nil))))
+
+(defun %editing-contract-name-position (contract)
+  (let ((position (getf contract :name-position)))
+    (and (integerp position) position)))
+
+(defun %contracted-definition-name (form contract package)
+  (let ((position (%editing-contract-name-position contract)))
+    (when position
+      (%safe-token (nth (1+ position) form) package))))
+
 (defun %children-count (form)
   (let ((seen (make-hash-table :test 'eq))
         (count 0)
@@ -248,18 +273,34 @@
              (second form))
     (%package-designator-name (second form) package)))
 
-(defun %make-source-form (text ordinal start end package-name package form)
+(defun %make-source-form (text ordinal start end package-name package form
+                          contracts)
   (multiple-value-bind (line column)
       (%line-column text start)
     (let* ((operator (%operator-token form))
-           (name (and operator (%definition-name operator form package))))
+           (operator-symbol (and (consp form)
+                                 (symbolp (first form))
+                                 (first form)))
+           (contract (and operator-symbol
+                          (gethash operator-symbol contracts)))
+           (contract-kind (and contract
+                               (%editing-contract-kind contract)))
+           (kind (or (and (string= (or contract-kind "") "definition")
+                          "definition")
+                     operator))
+           (name (cond
+                   ((and contract
+                         (string= (or contract-kind "") "definition"))
+                    (%contracted-definition-name form contract package))
+                   (operator
+                    (%definition-name operator form package)))))
       (make-source-form :ordinal ordinal
                         :start start
                         :end end
                         :line line
                         :column column
                         :package package-name
-                        :kind operator
+                        :kind kind
                         :name name
                         :operator operator
                         :children-count (%children-count form)
@@ -308,7 +349,8 @@
          (diagnostics '())
          (position 0)
          (ordinal 0)
-         (eof (gensym "EOF-")))
+         (eof (gensym "EOF-"))
+         (contracts (make-hash-table :test 'eq)))
     (loop
       (multiple-value-bind (start trivia-error)
           (%skip-trivia text position package)
@@ -328,8 +370,11 @@
                          (form-end (%trim-form-end text start raw-end))
                          (source-form (%make-source-form text ordinal start form-end
                                                          package-name package
-                                                         form)))
+                                                         form contracts)))
                     (push source-form forms)
+                    (let ((contract (%editing-contract-plist form)))
+                      (when contract
+                        (setf (gethash (second form) contracts) contract)))
                     (incf ordinal)
                     (setf position raw-end)
                     (let ((target (%in-package-target form package)))

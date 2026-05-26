@@ -6037,6 +6037,182 @@ macroexpands|specializes). Returns
      "definition_name_position" (and define-style-p 0)
      "introduced_bindings" (%json-array introduced-bindings))))
 
+(defun %sexpr-contract-kind-string (kind)
+  (cond
+    ((keywordp kind)
+     (substitute #\_ #\- (string-downcase (symbol-name kind))))
+    ((stringp kind)
+     (substitute #\_ #\- (string-downcase kind)))
+    (t nil)))
+
+(defun %sexpr-contract-position-json (value)
+  (cond
+    ((keywordp value)
+     (substitute #\_ #\- (string-downcase (symbol-name value))))
+    ((integerp value) value)
+    ((null value) nil)
+    (t (%safe-prin1 value))))
+
+(defun %sexpr-contract-diagnostic (file source-form message)
+  (%json-object
+   "kind" "malformed_contract"
+   "message" message
+   "path" (%sexpr-path-json file source-form)))
+
+(defun %sexpr-contract-binding-json (binding)
+  (cond
+    ((and (consp binding)
+          (symbolp (first binding))
+          (or (null (second binding))
+              (keywordp (second binding))
+              (stringp (second binding))))
+     (%json-object
+      "name" (symbol-name (first binding))
+      "kind" (or (%sexpr-contract-kind-string (second binding))
+                 "lexical")))
+    (t nil)))
+
+(defun %sexpr-contract-from-source-form (file source-form)
+  (let ((form (clpm.sexpr-edit:source-form-form source-form))
+        (diagnostics '()))
+    (when (and (consp form)
+               (symbolp (first form))
+               (string= "DEFINE-EDITING-CONTRACT" (symbol-name (first form))))
+      (let ((name (second form))
+            (plist (cddr form)))
+        (unless (symbolp name)
+          (push (%sexpr-contract-diagnostic
+                 file source-form
+                 "contract name must be a symbol")
+                diagnostics))
+        (unless (evenp (length plist))
+          (push (%sexpr-contract-diagnostic
+                 file source-form
+                 "contract property list must have an even number of forms")
+                diagnostics))
+        (let* ((kind (%sexpr-contract-kind-string (getf plist :kind)))
+               (introduced-raw (getf plist :introduced-bindings))
+               (introduced
+                 (and (listp introduced-raw)
+                      (mapcar #'%sexpr-contract-binding-json
+                              introduced-raw)))
+               (bad-introduced-p
+                 (and introduced-raw
+                      (or (not (listp introduced-raw))
+                          (some #'null introduced)))))
+          (unless (member kind
+                          '("binding_macro" "definition" "iteration_macro"
+                            "body_macro")
+                          :test #'string=)
+            (push (%sexpr-contract-diagnostic
+                   file source-form
+                   "contract :kind must be binding-macro, definition, iteration-macro, or body-macro")
+                  diagnostics))
+          (when bad-introduced-p
+            (push (%sexpr-contract-diagnostic
+                   file source-form
+                   "contract :introduced-bindings must contain (name kind) entries")
+                  diagnostics))
+          (values
+           (and (symbolp name)
+                kind
+                (not bad-introduced-p)
+                (%json-object
+                 "macro" (symbol-name name)
+                 "kind" kind
+                 "path" (%sexpr-path-json file source-form)
+                 "lambda_list"
+                 (%sexpr-print-form-json (getf plist :lambda-list)
+                                         (or (find-package
+                                              (clpm.sexpr-edit:source-form-package
+                                               source-form))
+                                             (find-package "COMMON-LISP-USER")))
+                 "introduced_bindings" (%json-array (remove nil introduced))
+                 "body_position"
+                 (%sexpr-contract-position-json (getf plist :body-position))
+                 "name_position" (getf plist :name-position)
+                 "lambda_list_position" (getf plist :lambda-list-position)
+                 "safe_to_wrap"
+                 (%sexpr-boolean-json (getf plist :safe-to-wrap))
+                 "notes" (%safe-prin1 (getf plist :notes))))
+           (nreverse diagnostics)))))))
+
+(defun %sexpr-contracts-for-document (server file document)
+  (declare (ignore server))
+  (let ((contracts '())
+        (diagnostics '()))
+    (dolist (source-form (clpm.sexpr-edit:source-document-forms document))
+      (multiple-value-bind (contract contract-diagnostics)
+          (%sexpr-contract-from-source-form file source-form)
+        (when contract
+          (push contract contracts))
+        (setf diagnostics (append contract-diagnostics diagnostics))))
+    (values (nreverse contracts) (nreverse diagnostics))))
+
+(defun %sexpr-contract-for-operator (operator contracts)
+  (find operator contracts
+        :key (lambda (contract)
+               (%json-getf contract "macro"))
+        :test #'string=))
+
+(defun %sexpr-contract-body-start (contract)
+  (let ((position (%json-getf contract "body_position")))
+    (cond
+      ((integerp position) position)
+      ((and (stringp position) (string= position "body")) 2)
+      ((stringp position) 2)
+      (t nil))))
+
+(defun %sexpr-contract-scope-bindings (contract)
+  (let ((bindings (%json-array-items
+                   (%json-getf contract "introduced_bindings"))))
+    (mapcar
+     (lambda (binding)
+       (%json-object
+        "name" (%json-getf binding "name")
+        "kind" (%json-getf binding "kind")
+        "introduced_by"
+        (format nil "editing-contract:~A" (%json-getf contract "macro"))))
+     bindings)))
+
+(defun %sexpr-explicit-macro-shape-json (file source-form contract)
+  (%json-object
+   "status" "ok"
+   "file" file
+   "path" (%sexpr-path-json file source-form)
+   "macro" (%json-getf contract "macro")
+   "inferred" :false
+   "kind" (%json-getf contract "kind")
+   "confidence" 1.0
+   "uncertain" :false
+   "lambda_list" (%json-getf contract "lambda_list")
+   "body_position" (%json-getf contract "body_position")
+   "definition_name_position" (%json-getf contract "name_position")
+   "introduced_bindings" (%json-getf contract "introduced_bindings")
+   "contract" contract))
+
+(defun %dispatch-sexpr-macro-contracts (server params id)
+  (let ((file (%json-getf params "file")))
+    (cond
+      ((not (stringp file))
+       (%error-response id "protocol-error" "missing `file' param"))
+      (t
+       (multiple-value-bind (document error-response)
+           (%sexpr-read-document server file id)
+         (or error-response
+             (let ((actual-file
+                     (namestring
+                      (clpm.sexpr-edit:source-document-pathname document))))
+               (multiple-value-bind (contracts diagnostics)
+                   (%sexpr-contracts-for-document server actual-file document)
+                 (%success-response
+                  id
+                  (%json-object
+                   "file" actual-file
+                   "contracts" (%json-array contracts)
+                   "diagnostics" (%json-array diagnostics)
+                   "valid" (%sexpr-boolean-json (null diagnostics))))))))))))
+
 (defun %dispatch-sexpr-macro-shape (server params id)
   (let ((file (%json-getf params "file"))
         (name (%json-getf params "name")))
@@ -6052,6 +6228,10 @@ macroexpands|specializes). Returns
              (let* ((actual-file
                       (namestring
                        (clpm.sexpr-edit:source-document-pathname document)))
+                    (contracts
+                      (nth-value 0
+                                 (%sexpr-contracts-for-document
+                                  server actual-file document)))
                     (matches
                       (clpm.sexpr-edit:find-source-forms
                        document :kind "defmacro" :name name)))
@@ -6081,10 +6261,20 @@ macroexpands|specializes). Returns
                                (find-package "COMMON-LISP-USER"))))
                     (%success-response
                      id
-                     (%sexpr-macro-shape-json
-                      actual-file source-form
-                      (clpm.sexpr-edit:source-form-form source-form)
-                      package))))))))))))
+                     (let ((contract
+                             (%sexpr-contract-for-operator
+                              (symbol-name
+                               (second
+                                (clpm.sexpr-edit:source-form-form
+                                 source-form)))
+                              contracts)))
+                       (if contract
+                           (%sexpr-explicit-macro-shape-json
+                            actual-file source-form contract)
+                            (%sexpr-macro-shape-json
+                             actual-file source-form
+                             (clpm.sexpr-edit:source-form-form source-form)
+                             package))))))))))))))
 
 (defun %sexpr-child-path (path)
   (let ((raw (%sexpr-path-field path "child_path")))
@@ -8448,7 +8638,7 @@ macroexpands|specializes). Returns
                                 (%error-response id "eval-error"
                                                  (princ-to-string c)))))))))))))))))))
 
-(defun %sexpr-scope-step (form next-index scope)
+(defun %sexpr-scope-step (form next-index scope &optional contracts)
   (cond
     ((not (consp form)) scope)
     ((not (symbolp (first form))) scope)
@@ -8483,9 +8673,20 @@ macroexpands|specializes). Returns
                (>= next-index 2))
           (%scope-add-binding-list scope :symbol-macros (second form)
                                    "symbol-macro" "symbol-macrolet"))
+         ((let ((contract (%sexpr-contract-for-operator operator contracts)))
+            (and contract
+                 (member (%json-getf contract "kind")
+                         '("binding_macro" "iteration_macro")
+                         :test #'string=)
+                 (let ((body-start (%sexpr-contract-body-start contract)))
+                   (and body-start (>= next-index body-start)))))
+          (let ((contract (%sexpr-contract-for-operator operator contracts)))
+            (dolist (entry (%sexpr-contract-scope-bindings contract))
+              (push entry (getf scope :lexical)))
+            scope))
          (t scope))))))
 
-(defun %sexpr-scope-at-child-path (form child-path)
+(defun %sexpr-scope-at-child-path (form child-path &optional contracts)
   (let ((scope (list :lexical nil
                     :functions nil
                     :macros nil
@@ -8493,7 +8694,7 @@ macroexpands|specializes). Returns
                     :warnings nil))
         (current form))
     (dolist (index child-path)
-      (setf scope (%sexpr-scope-step current index scope))
+      (setf scope (%sexpr-scope-step current index scope contracts))
       (setf current (%sexpr-list-child current index))
       (when (null current)
         (push (%json-object "kind" "invalid-child-path"
@@ -8531,6 +8732,10 @@ macroexpands|specializes). Returns
                            (namestring
                             (clpm.sexpr-edit:source-document-pathname
                              document)))
+                         (contracts
+                           (nth-value 0
+                                      (%sexpr-contracts-for-document
+                                       server actual-file document)))
                          (forms (%sexpr-selected-forms document path)))
                     (cond
                       ((null forms)
@@ -8569,7 +8774,8 @@ macroexpands|specializes). Returns
                                                  (%read-form source)))
                                        (child-path (%sexpr-child-path path))
                                        (scope (%sexpr-scope-at-child-path
-                                               parsed child-path)))
+                                               parsed child-path
+                                               contracts)))
                                   (%success-response
                                    id
                                    (%json-object
@@ -8850,6 +9056,21 @@ source path, printed form, certainty, and suggested next inspection or edit."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-lint server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-macro-contracts"
+  :summary "List and validate source-declared macro editing contracts."
+  :doc "Required: `file'. Contracts are ordinary top-level
+`define-editing-contract' data forms. The response returns parsed contracts
+and validation diagnostics for malformed contract data; it never evaluates or
+expands the contract forms."
+  :params (list (list :name "file" :type :string :required t
+                      :description "Relative or absolute Lisp source path."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-macro-contracts server params id))))
 
 (%register-method
  (make-method-spec

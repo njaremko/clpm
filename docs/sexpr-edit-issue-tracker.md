@@ -362,7 +362,7 @@ Acceptance evidence:
 
 ### SE-025: Macro Editing Contracts
 
-Status: open
+Status: done
 
 Let projects define editing contracts for macros: binding macro, definition macro, iteration macro, body position, introduced bindings, name position, lambda-list position, and safety notes. Contracts must be ordinary data, not executable source transformations.
 
