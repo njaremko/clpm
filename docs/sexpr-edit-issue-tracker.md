@@ -474,7 +474,7 @@ Acceptance evidence:
 
 ### SE-034: Agent Workflow Documentation
 
-Status: open
+Status: done
 
 Update CLPM's agent skill text and help output to explain the structural-edit workflow: inspect relevant forms, inspect bindings/macroexpansion before movement, apply structural transaction, validate, then check image/source synchronization.
 

@@ -45,5 +45,4 @@
 
 ## Agent Skill Requirement
 
-- When working on this repo, load and follow: `common-lisp-excellence` skill
-- Prefer the S-expression tools in `common-lisp-excellence/scripts/` for structured edits
+- When working on this repo, load and follow: `lisp` skill

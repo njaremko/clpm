@@ -225,7 +225,8 @@
   (declare (ignore stderr))
   (assert-eql 0 code)
   (assert-contains stdout "Usage: clpm skill")
-  (assert-contains stdout "SKILL.md"))
+  (assert-contains stdout "SKILL.md")
+  (assert-contains stdout "SexprEdit structural source-edit workflow"))
 (format t "  `clpm help skill` PASSED~%")
 
 (format t "Testing `<cmd> --help` output...~%")

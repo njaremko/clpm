@@ -69,6 +69,16 @@
                "skill output still advertises invalid xref direction:~%~A"
                stdout)
   (assert-contains stdout "clpm repl call macroexpand --form '(my-macro x)' --recursive true")
+  (assert-contains stdout "SexprEdit Structural Source Editing")
+  (assert-contains stdout "prefer SexprEdit REPL methods over text patches")
+  (assert-contains stdout "sexpr-list-top-level-forms")
+  (assert-contains stdout "sexpr-bindings-at")
+  (assert-contains stdout "sexpr-macroexpand-at")
+  (assert-contains stdout "sexpr-apply-edit")
+  (assert-contains stdout "sexpr-validate-edit")
+  (assert-contains stdout "sexpr-compare-image-source")
+  (assert-contains stdout "Text patches are still acceptable")
+  (assert-contains stdout "Source edits do not automatically update the persistent image")
   (assert-true (not (search "clpm repl call macroexpand --form '(my-macro x)' --full true" stdout :test #'char-equal))
                "skill output still advertises invalid macroexpand parameter:~%~A"
                stdout)

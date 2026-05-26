@@ -6857,6 +6857,29 @@ Each plist contains :name :version :sha256 :sha1 :url :kind :commit :license."
     "clpm repl call macroexpand --form '(my-macro x)' --recursive true"
     "```"
     ""
+    "### SexprEdit Structural Source Editing"
+    ""
+    "For Common Lisp source changes, prefer SexprEdit REPL methods over text patches. Work in forms: inspect the relevant top-level form, inspect scope and macroexpansion before moving or wrapping code, plan or apply a structural transaction, validate it, then reload or compare the live image as needed."
+    ""
+    "A safe structural-edit loop:"
+    ""
+    "```sh"
+    "clpm repl call sexpr-list-top-level-forms --file src/foo.lisp"
+    "clpm repl call sexpr-show-form --path '{\"file\":\"src/foo.lisp\",\"kind\":\"defun\",\"name\":\"foo\"}'"
+    "clpm repl call sexpr-bindings-at --path '{\"file\":\"src/foo.lisp\",\"kind\":\"defun\",\"name\":\"foo\",\"child_path\":[3]}'"
+    "clpm repl call sexpr-macroexpand-at --path '{\"file\":\"src/foo.lisp\",\"kind\":\"defun\",\"name\":\"foo\",\"child_path\":[3]}'"
+    "clpm repl call sexpr-plan-edit --operation replace --path '{\"file\":\"src/foo.lisp\",\"kind\":\"defun\",\"name\":\"foo\"}' --text '(defun foo () :ok)'"
+    "clpm repl call sexpr-apply-edit --operation replace --path '{\"file\":\"src/foo.lisp\",\"kind\":\"defun\",\"name\":\"foo\"}' --text '(defun foo () :ok)'"
+    "clpm repl call sexpr-validate-edit --file src/foo.lisp --steps '[\"read\",\"compile-file\"]'"
+    "clpm repl call sexpr-compare-image-source --file src/foo.lisp"
+    "```"
+    ""
+    "Use higher-level SexprEdit methods when they match the intent: `sexpr-suggest-edit-candidates`, `sexpr-add-keyword-arg`, `sexpr-change-lambda-list`, `sexpr-convert-to-keyword-argument`, `sexpr-extract-function`, `sexpr-introduce-let`, `sexpr-bind-repeated-expression`, `sexpr-update-defpackage`, `sexpr-add-method`, `sexpr-generate-test`, and the structural movement methods. Ambiguous responses include candidates and refinement keys; refine by `top_level`, `package`, `kind`, `name`, or child path rather than guessing."
+    ""
+    "Text patches are still acceptable for non-Lisp files, comments-only edits, documentation, or Lisp changes outside SexprEdit's supported operation set. Keep those patches small and validate with the same read/compile/test path afterward."
+    ""
+    "Source edits do not automatically update the persistent image. Use `sexpr-validate-edit` with `load-file`, `load-system`, or `test-system` when you want validation to load code, and use `sexpr-compare-image-source`, `list-redefinitions`, or ASDF reloads to make source and image state explicit."
+    ""
     "Watch and cleanup:"
     ""
     "```sh"
@@ -7095,7 +7118,8 @@ sub-subcommand=\"set\")."
       (:skill
        (p "Usage: clpm skill")
        (p "")
-       (p "Print SKILL.md markdown that teaches an agent how to use CLPM.")
+       (p "Print SKILL.md markdown that teaches an agent how to use CLPM,")
+       (p "including the SexprEdit structural source-edit workflow.")
        (p "")
        (p "Example:")
        (p "  clpm skill > SKILL.md")
