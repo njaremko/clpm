@@ -65,6 +65,15 @@
             do (write-char ch out))
       (get-output-stream-string out))))
 
+(defun count-substrings (needle haystack)
+  (let ((count 0)
+        (start 0))
+    (loop for position = (search needle haystack :start2 start)
+          while position
+          do (incf count)
+             (setf start (+ position (length needle))))
+    count))
+
 (defun source-text ()
   ";;; section header
 #| block comment |#
@@ -133,6 +142,19 @@
     (symbol-macrolet ((current (cdr cell)))
       (flet ((resolve () value))
         (list current (resolve) env)))))
+")
+    path))
+
+(defun make-defpackage-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-package-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "packages.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defpackage #:demo.engine
+  (:use #:cl)
+  (:export #:evaluate-workbook))
 ")
     path))
 
@@ -219,6 +241,9 @@
                    "sexpr-plan-edit missing from methods")
       (assert-true (member "sexpr-apply-edit" method-names :test #'string=)
                    "sexpr-apply-edit missing from methods")
+      (assert-true (member "sexpr-update-defpackage" method-names
+                           :test #'string=)
+                   "sexpr-update-defpackage missing from methods")
       (assert-true (member "sexpr-macroexpand-at" method-names :test #'string=)
                    "sexpr-macroexpand-at missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
@@ -408,6 +433,70 @@
                         "inserted form kind should be defun")
           (assert-equal "CREATED" (lookup inserted-form "name")
                         "inserted form name should be recorded"))
+        (let* ((package-path (make-defpackage-source-file))
+               (package-file (namestring package-path))
+               (before (read-file-string package-path))
+               (plan-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-update-defpackage"
+                  :params (json-object
+                           "file" package-file
+                           "package" "demo.engine"
+                           "operation" "export"
+                           "symbol" "evaluate-cell"
+                           "dry_run" t)))
+               (plan-result (lookup plan-resp "result")))
+          (assert-true plan-result "defpackage dry-run failed: ~S"
+                       plan-resp)
+          (assert-true (lookup plan-result "dry_run")
+                       "defpackage plan should be marked dry-run")
+          (assert-true (lookup plan-result "changed")
+                       "new export should be a change")
+          (assert-true (search "#:evaluate-cell"
+                               (lookup plan-result "after_text"))
+                       "planned export was not inserted: ~S"
+                       plan-result)
+          (assert-equal before (read-file-string package-path)
+                        "defpackage dry-run changed the file")
+          (let* ((apply-resp
+                   (clpm.repl:send-request
+                    sock "sexpr-update-defpackage"
+                    :params (json-object
+                             "file" package-file
+                             "package" "demo.engine"
+                             "operation" "export"
+                             "symbol" "evaluate-cell")))
+                 (apply-result (lookup apply-resp "result"))
+                 (after-apply (read-file-string package-path)))
+            (assert-true apply-result "defpackage apply failed: ~S"
+                         apply-resp)
+            (assert-true (lookup apply-result "changed")
+                         "defpackage apply should report changed")
+            (assert-true (search "#:evaluate-workbook
+           #:evaluate-cell)"
+                                 after-apply)
+                         "export insertion should preserve clause layout: ~S"
+                         after-apply)
+            (let* ((duplicate-resp
+                     (clpm.repl:send-request
+                      sock "sexpr-update-defpackage"
+                      :params (json-object
+                               "file" package-file
+                               "package" "demo.engine"
+                               "operation" "export"
+                               "symbol" "evaluate-cell")))
+                   (duplicate-result (lookup duplicate-resp "result")))
+              (assert-true duplicate-result
+                           "duplicate export failed: ~S" duplicate-resp)
+              (assert-true (lookup duplicate-result "duplicate")
+                           "duplicate export should be detected")
+              (assert-true (not (lookup duplicate-result "changed"))
+                           "duplicate export should not change file")
+              (assert-equal 1
+                            (count-substrings "#:evaluate-cell"
+                                              (read-file-string
+                                               package-path))
+                            "duplicate export was inserted twice"))))
         (let* ((bad-path (make-validation-source-file
                           "(defun broken ()"))
                (bad-resp

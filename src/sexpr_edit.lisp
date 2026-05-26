@@ -66,6 +66,18 @@
   added-argument-texts
   removed-argument-texts)
 
+(defstruct defpackage-update-result
+  file
+  operation
+  package
+  symbol
+  from-package
+  changed-p
+  duplicate-p
+  before-text
+  after-text
+  diagnostics)
+
 (defun %read-file-string (pathname)
   (with-open-file (s pathname :direction :input :external-format :utf-8)
     (let ((out (make-string-output-stream)))
@@ -719,3 +731,280 @@ the resulting source reads successfully."
                        :kind kind
                        :name name
                        :text text))
+
+(defstruct source-child-span
+  start
+  end
+  form)
+
+(defun %read-source-form-span (text position package)
+  (multiple-value-bind (start trivia-error)
+      (%skip-trivia text position package)
+    (when trivia-error
+      (error 'source-edit-error :message trivia-error))
+    (when (>= start (length text))
+      (return-from %read-source-form-span (values nil start start)))
+    (when (char= (char text start) #\))
+      (return-from %read-source-form-span (values nil start start)))
+    (let ((eof (gensym "EOF-")))
+      (handler-case
+          (let ((*read-eval* nil)
+                (*package* package))
+            (with-input-from-string (s text :start start)
+              (let ((form (read s nil eof)))
+                (if (eq form eof)
+                    (values nil start start)
+                    (let ((raw-end (+ start (file-position s))))
+                      (values form start (%trim-form-end text start
+                                                         raw-end)))))))
+        (error (c)
+          (error 'source-edit-error
+                 :message (format nil "unable to read defpackage form: ~A"
+                                  c)))))))
+
+(defun %list-child-spans (text package)
+  (unless (and (plusp (length text))
+               (char= (char text 0) #\())
+    (error 'source-edit-error
+           :message "defpackage source is not a list form"))
+  (let ((position 1)
+        (spans '()))
+    (loop
+      (multiple-value-bind (form start end)
+          (%read-source-form-span text position package)
+        (when (or (null form)
+                  (>= start (length text))
+                  (char= (char text start) #\)))
+          (return (nreverse spans)))
+        (push (make-source-child-span :start start
+                                      :end end
+                                      :form form)
+              spans)
+        (setf position end)))))
+
+(defun %normalize-defpackage-operation (operation)
+  (let ((token (etypecase operation
+                 (keyword (string-downcase (symbol-name operation)))
+                 (string (string-downcase operation)))))
+    (cond
+      ((string= token "export") "export")
+      ((or (string= token "import")
+           (string= token "import-from"))
+       "import-from")
+      ((or (string= token "shadowing-import")
+           (string= token "shadowing-import-from"))
+       "shadowing-import-from")
+      (t
+       (error 'source-edit-error
+              :message (format nil "unknown defpackage operation: ~A"
+                               operation))))))
+
+(defun %defpackage-clause-key (operation)
+  (cond
+    ((string= operation "export") "EXPORT")
+    ((string= operation "import-from") "IMPORT-FROM")
+    ((string= operation "shadowing-import-from") "SHADOWING-IMPORT-FROM")
+    (t operation)))
+
+(defun %defpackage-clause-token (operation)
+  (cond
+    ((string= operation "export") ":export")
+    ((string= operation "import-from") ":import-from")
+    ((string= operation "shadowing-import-from") ":shadowing-import-from")
+    (t (format nil ":~A" operation))))
+
+(defun %defpackage-designator-token (name)
+  (format nil "#:~A" (string-downcase name)))
+
+(defun %defpackage-clause-key-p (clause key)
+  (and (consp clause)
+       (symbolp (first clause))
+       (string= key (symbol-name (first clause)))))
+
+(defun %defpackage-import-clause-package-p (clause from-package package)
+  (and (consp clause)
+       (second clause)
+       (string-equal from-package
+                     (%package-designator-name (second clause) package))))
+
+(defun %defpackage-operation-clause-p (clause operation from-package package)
+  (let ((key (%defpackage-clause-key operation)))
+    (and (%defpackage-clause-key-p clause key)
+         (or (string= operation "export")
+             (%defpackage-import-clause-package-p clause from-package
+                                                 package)))))
+
+(defun %defpackage-clause-symbols (clause operation)
+  (if (string= operation "export")
+      (rest clause)
+      (cddr clause)))
+
+(defun %defpackage-clause-has-symbol-p (clause operation symbol-name package)
+  (member symbol-name
+          (mapcar (lambda (designator)
+                    (%package-designator-name designator package))
+                  (%defpackage-clause-symbols clause operation))
+          :test #'string-equal))
+
+(defun %defpackage-symbol-indent (text clause-span operation package)
+  (let* ((clause-text (subseq text
+                              (source-child-span-start clause-span)
+                              (source-child-span-end clause-span)))
+         (children (%list-child-spans clause-text package))
+         (symbol-children (if (string= operation "export")
+                              (rest children)
+                              (cddr children))))
+    (if symbol-children
+        (multiple-value-bind (line column)
+            (%line-column
+             text
+             (+ (source-child-span-start clause-span)
+                (source-child-span-start (first symbol-children))))
+          (declare (ignore line))
+          (make-string (1- column) :initial-element #\Space))
+        (multiple-value-bind (line column)
+            (%line-column text (source-child-span-start clause-span))
+          (declare (ignore line))
+          (make-string (+ column 1) :initial-element #\Space)))))
+
+(defun %insert-defpackage-clause-symbol (text clause-span operation token package)
+  (let ((insert-position (1- (source-child-span-end clause-span))))
+    (%replace-range
+     text insert-position insert-position
+     (format nil "~%~A~A"
+             (%defpackage-symbol-indent text clause-span operation package)
+             token))))
+
+(defun %defpackage-new-clause (operation token from-package)
+  (cond
+    ((string= operation "export")
+     (format nil "  (~A ~A)" (%defpackage-clause-token operation) token))
+    (t
+     (format nil "  (~A ~A ~A)"
+             (%defpackage-clause-token operation)
+             (%defpackage-designator-token from-package)
+             token))))
+
+(defun %insert-defpackage-new-clause (text operation token from-package)
+  (let ((insert-position (1- (length text))))
+    (%replace-range
+     text insert-position insert-position
+     (format nil "~%~A"
+             (%defpackage-new-clause operation token from-package)))))
+
+(defun %select-defpackage-form (document package-name)
+  (let ((forms (find-source-forms document
+                                  :kind "defpackage"
+                                  :name package-name)))
+    (cond
+      ((null forms)
+       (error 'source-edit-error
+              :message (format nil "no defpackage form for ~A"
+                               package-name)))
+      ((rest forms)
+       (error 'source-edit-error
+              :message (format nil
+                               "defpackage selector is ambiguous: ~D forms match"
+                               (length forms))))
+      (t
+       (first forms)))))
+
+(defun %defpackage-update-result (file operation write-p
+                                  &key root initial-package-name package
+                                  symbol from-package)
+  (unless (and (stringp package) (plusp (length package)))
+    (error 'source-edit-error :message "`package' must be a non-empty string"))
+  (unless (and (stringp symbol) (plusp (length symbol)))
+    (error 'source-edit-error :message "`symbol' must be a non-empty string"))
+  (let* ((operation-token (%normalize-defpackage-operation operation))
+         (pathname (%resolve-source-pathname file root))
+         (before (%read-file-string pathname))
+         (document (%read-source-text pathname before initial-package-name)))
+    (when (source-document-diagnostics document)
+      (error 'source-edit-error
+             :message "source file is not readable before defpackage update"
+             :diagnostics (source-document-diagnostics document)))
+    (when (and (not (string= operation-token "export"))
+               (not (and (stringp from-package)
+                         (plusp (length from-package)))))
+      (error 'source-edit-error
+             :message "`from_package' is required for import operations"))
+    (let* ((target (%select-defpackage-form document package))
+           (reader-package (or (and (source-form-package target)
+                                    (find-package
+                                     (source-form-package target)))
+                               (find-package "COMMON-LISP-USER")))
+           (top-text (source-form-text target))
+           (clauses (cddr (%list-child-spans top-text reader-package)))
+           (clause
+             (find-if (lambda (span)
+                        (%defpackage-operation-clause-p
+                         (source-child-span-form span)
+                         operation-token from-package reader-package))
+                      clauses))
+           (duplicate-p
+             (and clause
+                  (%defpackage-clause-has-symbol-p
+                   (source-child-span-form clause)
+                   operation-token symbol reader-package))))
+      (if duplicate-p
+          (make-defpackage-update-result
+           :file (namestring pathname)
+           :operation operation-token
+           :package package
+           :symbol symbol
+           :from-package from-package
+           :changed-p nil
+           :duplicate-p t
+           :before-text top-text
+           :after-text top-text
+           :diagnostics nil)
+          (let* ((token (%defpackage-designator-token symbol))
+                 (new-top-text
+                   (if clause
+                       (%insert-defpackage-clause-symbol
+                        top-text clause operation-token token reader-package)
+                       (%insert-defpackage-new-clause
+                        top-text operation-token token from-package)))
+                 (after (%replace-range before
+                                        (source-form-start target)
+                                        (source-form-end target)
+                                        new-top-text))
+                 (new-document
+                   (%source-document-readable-or-error
+                    pathname after initial-package-name)))
+            (when write-p
+              (%write-file-string pathname after))
+            (make-defpackage-update-result
+             :file (namestring pathname)
+             :operation operation-token
+             :package package
+             :symbol symbol
+             :from-package from-package
+             :changed-p t
+             :duplicate-p nil
+             :before-text top-text
+             :after-text new-top-text
+             :diagnostics (source-document-diagnostics new-document)))))))
+
+(defun plan-defpackage-update (file operation
+                               &key root initial-package-name package
+                               symbol from-package)
+  "Plan a DEFPACKAGE edit without writing FILE."
+  (%defpackage-update-result file operation nil
+                             :root root
+                             :initial-package-name initial-package-name
+                             :package package
+                             :symbol symbol
+                             :from-package from-package))
+
+(defun apply-defpackage-update (file operation
+                                &key root initial-package-name package
+                                symbol from-package)
+  "Apply a source-preserving DEFPACKAGE edit to FILE."
+  (%defpackage-update-result file operation t
+                             :root root
+                             :initial-package-name initial-package-name
+                             :package package
+                             :symbol symbol
+                             :from-package from-package))

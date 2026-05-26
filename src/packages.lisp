@@ -419,6 +419,19 @@
            #:source-edit-error-diagnostics
            #:plan-source-edit
            #:apply-source-edit
+           #:plan-defpackage-update
+           #:apply-defpackage-update
+           #:defpackage-update-result
+           #:defpackage-update-result-file
+           #:defpackage-update-result-operation
+           #:defpackage-update-result-package
+           #:defpackage-update-result-symbol
+           #:defpackage-update-result-from-package
+           #:defpackage-update-result-changed-p
+           #:defpackage-update-result-duplicate-p
+           #:defpackage-update-result-before-text
+           #:defpackage-update-result-after-text
+           #:defpackage-update-result-diagnostics
            #:edit-result
            #:edit-result-file
            #:edit-result-operation

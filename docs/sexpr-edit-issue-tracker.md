@@ -188,7 +188,7 @@ Acceptance evidence:
 
 ### SE-011: Package Diagnostics And Defpackage Updates
 
-Status: open
+Status: in-progress
 
 Add package-aware inspections and edits: exported status, missing imports, accidental internal-symbol references, package conflicts, and `update-defpackage` for export/import/shadowing-import operations. A public API addition should be able to update the owning `defpackage` form without manual text editing.
 

@@ -4812,6 +4812,77 @@ macroexpands|specializes). Returns
   (%dispatch-sexpr-edit-transaction
    server params id #'clpm.sexpr-edit:apply-source-edit nil))
 
+(defun %sexpr-defpackage-update-result-json (result &key dry-run)
+  (%json-object
+   "file" (clpm.sexpr-edit:defpackage-update-result-file result)
+   "operation" (clpm.sexpr-edit:defpackage-update-result-operation result)
+   "package" (clpm.sexpr-edit:defpackage-update-result-package result)
+   "symbol" (clpm.sexpr-edit:defpackage-update-result-symbol result)
+   "from_package" (clpm.sexpr-edit:defpackage-update-result-from-package
+                   result)
+   "changed" (and (clpm.sexpr-edit:defpackage-update-result-changed-p
+                   result)
+                  t)
+   "duplicate" (and (clpm.sexpr-edit:defpackage-update-result-duplicate-p
+                     result)
+                    t)
+   "dry_run" (and dry-run t)
+   "before_text" (clpm.sexpr-edit:defpackage-update-result-before-text
+                  result)
+   "after_text" (clpm.sexpr-edit:defpackage-update-result-after-text
+                 result)
+   "diagnostics" (%json-array
+                  (mapcar #'%sexpr-diagnostic-json
+                          (clpm.sexpr-edit:defpackage-update-result-diagnostics
+                           result)))))
+
+(defun %dispatch-sexpr-update-defpackage (server params id)
+  (let* ((file (%json-getf params "file"))
+         (package (%json-getf params "package"))
+         (operation (%json-getf params "operation"))
+         (symbol (%json-getf params "symbol"))
+         (from-package (%json-getf params "from_package"))
+         (dry-run (%json-true-p (%json-getf params "dry_run"))))
+    (cond
+      ((not (stringp file))
+       (%error-response id "protocol-error" "missing `file' param"))
+      ((not (stringp package))
+       (%error-response id "protocol-error" "missing `package' param"))
+      ((not (stringp operation))
+       (%error-response id "protocol-error" "missing `operation' param"))
+      ((not (stringp symbol))
+       (%error-response id "protocol-error" "missing `symbol' param"))
+      ((and from-package (not (stringp from-package)))
+       (%error-response id "protocol-error" "`from_package' must be a string"))
+      (t
+       (handler-case
+           (%success-response
+            id
+            (%sexpr-defpackage-update-result-json
+             (funcall (if dry-run
+                          #'clpm.sexpr-edit:plan-defpackage-update
+                          #'clpm.sexpr-edit:apply-defpackage-update)
+                      file operation
+                      :root (and server (server-project-root server))
+                      :initial-package-name (%sexpr-current-package-name
+                                             server)
+                      :package package
+                      :symbol symbol
+                      :from-package from-package)
+             :dry-run dry-run))
+         (clpm.sexpr-edit:source-edit-error (c)
+           (%error-response
+            id "eval-error"
+            (clpm.sexpr-edit:source-edit-error-message c)
+            :details
+            (%json-object
+             "diagnostics"
+             (%json-array
+              (mapcar #'%sexpr-diagnostic-json
+                      (clpm.sexpr-edit:source-edit-error-diagnostics c))))))
+         (clpm.sexpr-edit:source-path-error (c)
+           (%error-response id "eval-error" (princ-to-string c))))))))
+
 (defun %dispatch-sexpr-macroexpand-at (server params id)
   (let ((path (%json-getf params "path"))
         (recursive (%json-true-p (%json-getf params "recursive"))))
@@ -5184,6 +5255,32 @@ and unreadable edited files return errors and leave the file unchanged."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-apply-edit server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-update-defpackage"
+  :summary "Add an export/import clause entry to a DEFPACKAGE form."
+  :doc "Required: `file', `package', `operation', and `symbol'. Operations are
+`export', `import-from', and `shadowing-import-from'; import operations also
+require `from_package'. Optional `dry_run' returns the planned edit without
+writing the file. Duplicate entries are reported with `duplicate: true' and
+leave the file unchanged."
+  :params (list (list :name "file" :type :string :required t
+                      :description "Relative or absolute Lisp source path.")
+                (list :name "package" :type :string :required t
+                      :description "Package whose defpackage form is updated.")
+                (list :name "operation" :type :string :required t
+                      :description "export, import-from, or shadowing-import-from.")
+                (list :name "symbol" :type :string :required t
+                      :description "Symbol designator to insert.")
+                (list :name "from_package" :type :string :required nil
+                      :description "Source package for import operations.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Plan the edit without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-update-defpackage server params id))))
 
 (%register-method
  (make-method-spec
