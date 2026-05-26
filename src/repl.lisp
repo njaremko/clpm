@@ -857,11 +857,14 @@ the public protocol."
 
 (defun %reader-package-for-server (server package-name)
   "Resolve PACKAGE-NAME, or use SERVER's current package for reader/eval forms."
-  (or (and (stringp package-name)
-           (%resolve-package-for-server server package-name))
-      (and server
-           (%normalize-project-package server (server-current-package server)))
-      (find-package "COMMON-LISP-USER")))
+  (cond
+    ((stringp package-name)
+     (%resolve-package-for-server server package-name))
+    ((null package-name)
+     (or (and server
+              (%normalize-project-package server (server-current-package server)))
+         (find-package "COMMON-LISP-USER")))
+    (t nil)))
 
 (defun %project-root-fingerprint (project-root)
   "Return an opaque stable fingerprint for PROJECT-ROOT, or NIL.
@@ -4356,11 +4359,16 @@ macroexpands|specializes). Returns
     (declare (ignore ctx))
     (let* ((form-text (%json-getf params "form"))
            (recursive (%json-true-p (%json-getf params "recursive")))
-            (pkg-name (%json-getf params "package"))
-            (pkg (%reader-package-for-server server pkg-name)))
+           (pkg-name (%json-getf params "package"))
+           (pkg (%reader-package-for-server server pkg-name)))
       (cond
         ((not (stringp form-text))
          (%error-response id "protocol-error" "missing `form' param"))
+        ((and pkg-name (not (stringp pkg-name)))
+         (%error-response id "protocol-error" "`package' must be a string"))
+        ((null pkg)
+         (%error-response id "eval-error"
+                          (format nil "no such package: ~A" pkg-name)))
         (t
          (handler-case
              (let* ((parsed (let ((*package* pkg))

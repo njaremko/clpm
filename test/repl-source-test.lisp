@@ -265,6 +265,22 @@
                      "expected IF in expansion, got ~S" expanded)))))
 (format t "  macroexpand OK~%")
 
+(format t "Test: macroexpand rejects unknown package~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((resp (clpm.repl:send-request
+                  sock "macroexpand"
+                  :params (list :object
+                                (list (cons "form" "(when t :ok)")
+                                      (cons "package"
+                                            "NO-SUCH-MACROEXPAND-PACKAGE")))))
+           (err (lookup resp "error")))
+      (assert-true err "expected package error, got ~S" resp)
+      (assert-true (search "no such package" (lookup err "message")
+                           :test #'char-equal)
+                   "wrong package error: ~S" err))))
+(format t "  macroexpand unknown package OK~%")
+
 ;;; ----------------------------------------------------------------------------
 ;;; #130: compile-file on a tiny file with an undefined-function warning.
 
