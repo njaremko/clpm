@@ -298,6 +298,21 @@
 ")
     path))
 
+(defun make-bind-repeated-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-bind-repeated-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "bind-repeated.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defun repeated-demo (cell)
+  (+ (car cell) (car cell)))
+
+(defun repeated-effect (cell)
+  (+ (unknown-effect cell) (unknown-effect cell)))
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -411,6 +426,9 @@
                    "sexpr-classify-rewrite missing from methods")
       (assert-true (member "sexpr-introduce-let" method-names :test #'string=)
                    "sexpr-introduce-let missing from methods")
+      (assert-true (member "sexpr-bind-repeated-expression" method-names
+                           :test #'string=)
+                   "sexpr-bind-repeated-expression missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
@@ -1285,6 +1303,53 @@
                         "selected expression should appear once")
           (assert-equal 2 (count-substrings "cached" updated-source)
                         "introduced binding should appear twice"))
+        (let* ((bind-path (make-bind-repeated-source-file))
+               (bind-file (namestring bind-path))
+               (bind-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-bind-repeated-expression"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" bind-file
+                                   "top_level" 1)
+                           "expression" "(car cell)"
+                           "name" "cached")))
+               (bind-result (lookup bind-resp "result"))
+               (bound-source (read-file-string bind-path))
+               (before-effect-source bound-source)
+               (reject-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-bind-repeated-expression"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" bind-file
+                                   "top_level" 2)
+                           "expression" "(unknown-effect cell)"
+                           "name" "bad")))
+               (reject-result (lookup reject-resp "result"))
+               (after-effect-source (read-file-string bind-path)))
+          (assert-true bind-result
+                       "bind-repeated-expression failed: ~S" bind-resp)
+          (assert-equal "ok" (lookup bind-result "status")
+                        "pure repeated expression should be bound")
+          (assert-equal 2 (lookup bind-result "match_count")
+                        "expected two repeated matches")
+          (assert-true (search "(let ((cached (car cell)))"
+                               bound-source)
+                       "bind-repeated did not introduce a LET: ~A"
+                       bound-source)
+          (assert-equal 1 (count-substrings "(car cell)"
+                                            bound-source)
+                        "bound expression should evaluate once")
+          (assert-equal 3 (count-substrings "cached" bound-source)
+                        "binding should appear once plus two uses")
+          (assert-true reject-result
+                       "effectful repeated expression response missing: ~S"
+                       reject-resp)
+          (assert-equal "rejected" (lookup reject-result "status")
+                        "effectful repeated expression should be rejected")
+          (assert-equal before-effect-source after-effect-source
+                        "rejected repeated binding should not edit the file"))
         (let* ((scope-path (make-scope-source-file))
                (scope-file (namestring scope-path))
                (bindings-resp

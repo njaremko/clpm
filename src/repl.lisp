@@ -6711,6 +6711,88 @@ macroexpands|specializes). Returns
     (format nil "(let ((~A ~A))~%  ~A)"
             name-token selected-text name-token)))
 
+(defun %sexpr-trim-source (text)
+  (string-trim '(#\Space #\Tab #\Newline #\Return) text))
+
+(defun %sexpr-definition-body-start (form)
+  (let ((operator (%sexpr-form-operator-name form)))
+    (cond
+      ((member operator '("DEFUN" "DEFMACRO") :test #'string=) 3)
+      ((string= operator "LAMBDA") 2)
+      (t nil))))
+
+(defun %sexpr-find-repeated-expression-paths (form expression body-start)
+  (let ((matches '()))
+    (labels ((walk (current path in-body-p)
+               (cond
+                 ((and in-body-p (equal current expression))
+                  (push path matches))
+                 ((atom current) nil)
+                 ((let ((operator (%sexpr-form-operator-name current)))
+                    (and operator
+                         (member operator '("QUOTE" "FUNCTION" "DECLARE")
+                                 :test #'string=)))
+                  nil)
+                 (t
+                  (let ((children (%sexpr-proper-list-elements current)))
+                    (loop for child in children
+                          for index from 0
+                          for child-path = (append path (list index))
+                          for child-in-body-p =
+                            (or in-body-p
+                                (and (null path)
+                                     (>= index body-start)))
+                          do (walk child child-path
+                                   child-in-body-p)))))))
+      (walk form nil nil))
+    (nreverse matches)))
+
+(defun %sexpr-source-form-body-range (source-form body-start)
+  (let* ((children (clpm.sexpr-edit:source-form-children-count source-form))
+         (last-index (1- children)))
+    (unless (and (integerp body-start)
+                 (<= body-start last-index))
+      (error "selected form has no body to wrap"))
+    (let ((first-span
+            (clpm.sexpr-edit:source-form-child-span source-form
+                                                    (list body-start)))
+          (last-span
+            (clpm.sexpr-edit:source-form-child-span source-form
+                                                    (list last-index))))
+      (values (clpm.sexpr-edit:source-child-span-start first-span)
+              (clpm.sexpr-edit:source-child-span-end last-span)))))
+
+(defun %sexpr-replace-ranges (text ranges replacement)
+  (let ((result text))
+    (dolist (range (sort (copy-list ranges) #'>
+                         :key #'first)
+                   result)
+      (setf result
+            (%sexpr-replace-source-range result
+                                        (first range)
+                                        (second range)
+                                        replacement)))))
+
+(defun %sexpr-bind-repeated-body-text (source-form body-start body-end
+                                                   matches before name-token
+                                                   expression-text)
+  (let* ((body-text (subseq before body-start body-end))
+         (relative-ranges
+           (mapcar
+            (lambda (path)
+              (let ((span
+                      (clpm.sexpr-edit:source-form-child-span source-form
+                                                              path)))
+                (list (- (clpm.sexpr-edit:source-child-span-start span)
+                         body-start)
+                      (- (clpm.sexpr-edit:source-child-span-end span)
+                         body-start))))
+            matches))
+         (rewritten-body
+           (%sexpr-replace-ranges body-text relative-ranges name-token)))
+    (format nil "(let ((~A ~A))~%  ~A)"
+            name-token expression-text rewritten-body)))
+
 (defun %sexpr-child-edit-provenance-json (operation dry-run path)
   (%json-object
    "created_by" "sexpr-edit"
@@ -6864,6 +6946,203 @@ macroexpands|specializes). Returns
                                              (%sexpr-path-with-child-json
                                               actual-file source-form
                                               child-path))))))))
+                              (error (c)
+                                (%error-response id "eval-error"
+                                                 (princ-to-string c)))))))))))))))))))
+
+(defun %dispatch-sexpr-bind-repeated-expression (server params id)
+  (let ((path (%json-getf params "path"))
+        (expression-text (%json-getf params "expression"))
+        (name (%json-getf params "name"))
+        (accept-effects (%json-true-p (%json-getf params "accept_effects")))
+        (dry-run (%json-true-p (%json-getf params "dry_run"))))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      ((%sexpr-child-path path)
+       (%error-response id "protocol-error"
+                        "`path' must select one top-level definition"))
+      ((not (stringp expression-text))
+       (%error-response id "protocol-error" "missing `expression' param"))
+      ((not (stringp name))
+       (%error-response id "protocol-error" "missing `name' param"))
+      (t
+       (let ((file (%sexpr-path-field path "file")))
+         (cond
+           ((not (stringp file))
+            (%error-response id "protocol-error" "`path.file' must be a string"))
+           (t
+            (multiple-value-bind (document error-response)
+                (%sexpr-read-document server file id)
+              (or error-response
+                  (let* ((actual-file
+                           (namestring
+                            (clpm.sexpr-edit:source-document-pathname
+                             document)))
+                         (pathname
+                           (clpm.sexpr-edit:source-document-pathname
+                            document))
+                         (forms (%sexpr-selected-forms document path)))
+                    (cond
+                      ((null forms)
+                       (%error-response id "eval-error"
+                                        "no form matched source path"))
+                      ((rest forms)
+                       (%success-response
+                        id
+                        (%json-object
+                         "status" "ambiguous"
+                         "file" actual-file
+                         "candidates"
+                         (%json-array
+                          (mapcar
+                           (lambda (form)
+                             (%sexpr-form-summary-json actual-file form))
+                           forms)))))
+                      (t
+                       (let* ((source-form (first forms))
+                              (pkg-name
+                                (clpm.sexpr-edit:source-form-package
+                                 source-form))
+                              (pkg (%reader-package-for-server server
+                                                               pkg-name)))
+                         (cond
+                           ((null pkg)
+                            (%error-response
+                             id "eval-error"
+                             (format nil "no such package: ~A" pkg-name)))
+                           (t
+                            (handler-case
+                                (let* ((expression
+                                         (let ((*package* pkg)
+                                               (*read-eval* nil))
+                                           (%read-form expression-text)))
+                                       (name-symbol
+                                         (%sexpr-read-binding-symbol name pkg))
+                                       (form
+                                         (clpm.sexpr-edit:source-form-form
+                                          source-form))
+                                       (body-start
+                                         (%sexpr-definition-body-start form)))
+                                  (unless body-start
+                                    (error "selected form does not have a supported body"))
+                                  (let* ((matches
+                                           (%sexpr-find-repeated-expression-paths
+                                            form expression body-start))
+                                         (effect
+                                           (%sexpr-effect-summary-for-form
+                                            expression pkg)))
+                                    (cond
+                                      ((< (length matches) 2)
+                                       (%success-response
+                                        id
+                                        (%json-object
+                                         "status" "unchanged"
+                                         "file" actual-file
+                                         "match_count" (length matches)
+                                         "committed" :false
+                                         "reason"
+                                         "expression was not repeated")))
+                                      ((and (not accept-effects)
+                                            (%sexpr-effect-summary-effectful-p
+                                             effect))
+                                       (%success-response
+                                        id
+                                        (%json-object
+                                         "status" "rejected"
+                                         "file" actual-file
+                                         "match_count" (length matches)
+                                         "committed" :false
+                                         "reason"
+                                         "expression may have effects"
+                                         "effect" effect)))
+                                      (t
+                                       (multiple-value-bind (body-start-pos
+                                                            body-end-pos)
+                                           (%sexpr-source-form-body-range
+                                            source-form body-start)
+                                         (let* ((before
+                                                  (clpm.sexpr-edit:source-document-text
+                                                   document))
+                                                (name-token
+                                                  (%sexpr-symbol-token
+                                                   name-symbol pkg))
+                                                (clean-expression
+                                                  (%sexpr-trim-source
+                                                   expression-text))
+                                                (replacement
+                                                  (%sexpr-bind-repeated-body-text
+                                                   source-form body-start-pos
+                                                   body-end-pos matches before
+                                                   name-token
+                                                   clean-expression))
+                                                (after
+                                                  (%sexpr-replace-source-range
+                                                   before body-start-pos
+                                                   body-end-pos
+                                                   replacement))
+                                                (tmp-path
+                                                  (make-pathname
+                                                   :name (format nil
+                                                                 ".sexpr-edit-~A"
+                                                                 (random
+                                                                  (expt 2 32)))
+                                                   :type "lisp"
+                                                   :defaults pathname)))
+                                           (unwind-protect
+                                                (progn
+                                                  (%sexpr-write-source-text
+                                                   tmp-path after)
+                                                  (let ((checked
+                                                          (clpm.sexpr-edit:read-source-document
+                                                           (namestring tmp-path)
+                                                           :initial-package-name
+                                                           (%sexpr-current-package-name
+                                                            server))))
+                                                    (if (clpm.sexpr-edit:source-document-diagnostics
+                                                         checked)
+                                                        (%success-response
+                                                         id
+                                                         (%json-object
+                                                          "status" "invalid"
+                                                          "file" actual-file
+                                                          "committed" :false
+                                                          "diagnostics"
+                                                          (%sexpr-diagnostics-json
+                                                           checked)))
+                                                        (progn
+                                                          (unless dry-run
+                                                            (%sexpr-write-source-text
+                                                             pathname after))
+                                                          (%success-response
+                                                           id
+                                                           (%json-object
+                                                            "status" "ok"
+                                                            "file" actual-file
+                                                            "path"
+                                                            (%sexpr-path-json
+                                                             actual-file
+                                                             source-form)
+                                                            "binding"
+                                                            name-token
+                                                            "match_count"
+                                                            (length matches)
+                                                            "committed"
+                                                            (%sexpr-boolean-json
+                                                             (not dry-run))
+                                                            "replacement"
+                                                            replacement
+                                                            "effect"
+                                                            effect
+                                                            "provenance"
+                                                            (%sexpr-child-edit-provenance-json
+                                                             "bind-repeated-expression"
+                                                             dry-run
+                                                             (%sexpr-path-json
+                                                              actual-file
+                                                              source-form))))))))
+                                             (ignore-errors
+                                               (delete-file tmp-path)))))))))
                               (error (c)
                                 (%error-response id "eval-error"
                                                  (princ-to-string c)))))))))))))))))))
@@ -7425,6 +7704,30 @@ writing. The file is only written after the edited source reads cleanly."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-introduce-let server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-bind-repeated-expression"
+  :summary "Bind repeated source expressions in a definition body."
+  :doc "Required: `path', `expression', and `name'. The path selects one
+top-level definition. When the expression appears at least twice in the body
+and is not effectful, the body is wrapped in one LET and each occurrence is
+replaced by the new binding. Effectful expressions are rejected unless
+`accept_effects' is true. Optional `dry_run' validates without writing."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object selecting one top-level definition.")
+                (list :name "expression" :type :string :required t
+                      :description "Expression to bind, read in the source package.")
+                (list :name "name" :type :string :required t
+                      :description "Binding name to introduce.")
+                (list :name "accept_effects" :type :boolean :required nil
+                      :description "Allow binding an expression with conservative effect hazards.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Validate without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-bind-repeated-expression server params id))))
 
 (%register-method
  (make-method-spec
