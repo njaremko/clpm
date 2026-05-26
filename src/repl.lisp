@@ -1945,6 +1945,7 @@ sessions."
          (start (get-internal-real-time))
           (last-form nil)
           (multi-form? (getf options :multi-form))
+         (evaluated-form? nil)
          (override-pkg (and package-override
                             (%resolve-package-for-server *server*
                                                          package-override)))
@@ -2040,7 +2041,8 @@ sessions."
                 (*standard-input* in-stream)
                 (*package* package))
             (flet ((eval-user-form (form)
-                     (setf last-form form)
+                     (setf last-form form
+                           evaluated-form? t)
                      (let ((record (%record-redefinition form *package*)))
                        (when record
                          (setf redefined record)))
@@ -2130,28 +2132,19 @@ sessions."
                       (unwind-protect
                            (if multi-form?
                                (with-input-from-string (region form-text)
-                                 (let ((saw-form nil))
-                                   (loop
-                                     (let ((next-form
-                                             (handler-case
-                                                 (%read-region-form region)
-                                               (error (c)
-                                                 (setf code "reader-error")
-                                                 (push (%condition-json c)
-                                                       conditions)
-                                                 (return-from %eval-one
-                                                   (finish))))))
-                                       (when (eq next-form 'eof)
-                                         (return))
-                                       (setf saw-form t)
-                                       (eval-user-form next-form)))
-                                   (unless saw-form
-                                     (let ((c (make-condition
-                                               'simple-error
-                                               :format-control "empty form")))
-                                       (setf code "reader-error")
-                                       (push (%condition-json c) conditions)
-                                       (return-from %eval-one (finish))))))
+                                 (loop
+                                   (let ((next-form
+                                           (handler-case
+                                               (%read-region-form region)
+                                             (error (c)
+                                               (setf code "reader-error")
+                                               (push (%condition-json c)
+                                                     conditions)
+                                               (return-from %eval-one
+                                                 (finish))))))
+                                     (when (eq next-form 'eof)
+                                       (return))
+                                     (eval-user-form next-form))))
                                (eval-user-form last-form))
                         #+sbcl
                         (when heartbeat-timer
@@ -2167,7 +2160,7 @@ sessions."
             ;; the override is per-call scoped. Persistent package state
             ;; lives on the worker (the default worker for v1 callers,
             ;; named workers for `eval --worker NAME').
-            (when (null override-pkg)
+            (when (and (null override-pkg) evaluated-form?)
               (when *current-worker*
                 (setf (worker-package *current-worker*) *package*))
               (handler-case (%update-history! history last-form returned-values)
@@ -2817,7 +2810,7 @@ lost."
 FORMS sequentially in one worker turn, returning the last form's values and
 the final package. This is the wire primitive behind `clpm repl eval --stdin'."
   :params (list (list :name "forms" :type :string :required t
-                      :description "Lisp source containing one or more forms.")
+                      :description "Lisp source containing zero or more forms.")
                 (list :name "package" :type :string :required nil
                       :description "Per-call package override.")
                 (list :name "worker" :type :string :required nil

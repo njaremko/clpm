@@ -105,6 +105,29 @@
         (assert-string= "RB-EVAL-REGION" (lookup result "package")))))
 (format t "  OK~%")
 
+(format t "Test: empty eval-region is a no-op~%")
+(with-daemon
+    (lambda (sock)
+      (let ((seed (do-eval sock "(+ 20 22)")))
+        (assert-true (lookup seed "result") "seed eval failed: ~S" seed))
+      (let* ((resp (clpm.repl:send-request
+                    sock "eval-region"
+                    :params (list :object
+                                  (list (cons "forms" "")))))
+             (result (lookup resp "result")))
+        (assert-true result "empty eval-region failed: ~S" resp)
+        (assert-true (null (lookup result "value"))
+                     "empty eval-region should have no primary value: ~S"
+                     result)
+        (assert-true (null (array-items (lookup result "values")))
+                     "empty eval-region should have no values: ~S"
+                     result))
+      (let* ((history (do-eval sock "*"))
+             (result (lookup history "result")))
+        (assert-true result "history check failed: ~S" history)
+        (assert-string= "42" (lookup result "value")))))
+(format t "  OK~%")
+
 (format t "Test: stdout capture~%")
 (with-daemon
     (lambda (sock)
