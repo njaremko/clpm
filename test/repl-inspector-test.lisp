@@ -175,6 +175,41 @@
 ;;; ----------------------------------------------------------------------------
 ;;; #123: inspect-mutate replaces a vector element.
 
+(format t "Test: inspect forms can use REPL history~%")
+(with-daemon
+  (lambda (sock)
+    (let ((seed (do-rpc sock "eval"
+                        (list (cons "form" "(list :from-history 88)")))))
+      (assert-true (lookup seed "result") "history seed failed: ~S" seed))
+    (let* ((inspect (do-rpc sock "inspect" (list (cons "form" "*"))))
+           (result (lookup inspect "result")))
+      (assert-true result "inspect should read * from REPL history: ~S"
+                   inspect)
+      (assert-equal-string "(:FROM-HISTORY 88)"
+                           (lookup result "value_repr")))))
+(format t "  inspect history OK~%")
+
+(format t "Test: inspect can target a named worker's history~%")
+(with-daemon
+  (lambda (sock)
+    (let ((default-seed (do-rpc sock "eval"
+                                (list (cons "form" ":default-history"))))
+          (worker-seed (do-rpc sock "eval"
+                               (list (cons "form" ":worker-history")
+                                     (cons "worker" "inspector-worker")))))
+      (assert-true (lookup default-seed "result")
+                   "default history seed failed: ~S" default-seed)
+      (assert-true (lookup worker-seed "result")
+                   "worker history seed failed: ~S" worker-seed))
+    (let* ((inspect (do-rpc sock "inspect"
+                             (list (cons "form" "*")
+                                   (cons "worker" "inspector-worker"))))
+           (result (lookup inspect "result")))
+      (assert-true result "inspect should target named worker: ~S" inspect)
+      (assert-equal-string ":WORKER-HISTORY"
+                           (lookup result "value_repr")))))
+(format t "  inspect named worker OK~%")
+
 (format t "Test: inspect-mutate on a vector~%")
 (with-daemon
   (lambda (sock)
@@ -194,6 +229,26 @@
                      (lookup (lookup view "result") "parts"))))
         (assert-equal-string "42" (lookup (second parts) "repr"))))))
 (format t "  mutate OK~%")
+
+(format t "Test: inspect-mutate forms can use REPL history~%")
+(with-daemon
+  (lambda (sock)
+    (let ((seed (do-rpc sock "eval" (list (cons "form" "1234")))))
+      (assert-true (lookup seed "result") "history seed failed: ~S" seed))
+    (let* ((init (do-rpc sock "inspect"
+                          (list (cons "form" "(vector :a :b)")
+                                (cons "mutable" t))))
+           (sid (lookup (lookup init "result") "session"))
+           (mutate (do-rpc sock "inspect-mutate"
+                           (list (cons "session" sid)
+                                 (cons "i" 1)
+                                 (cons "form" "*")))))
+      (assert-true (lookup mutate "result")
+                   "inspect-mutate should read * from REPL history: ~S"
+                   mutate)
+      (let ((parts (array-items (lookup (lookup mutate "result") "parts"))))
+        (assert-equal-string "1234" (lookup (second parts) "repr"))))))
+(format t "  mutate history OK~%")
 
 (format t "Test: inspect-mutate follows displayed proper-list indices~%")
 (with-daemon

@@ -244,17 +244,17 @@ the user code writes, not after evaluation unwinds."
     (declare (ignore sink))
     (make-string-output-stream)))
 
-	(defun %capture-text (stream sink)
-	  "Read STREAM's accumulated string, charge it to SINK, and return the
-	possibly-truncated text."
-	  (cond
-	    #+sbcl
-	    ((typep stream 'bounded-output-stream)
-	     (bounded-output-stream-final-text stream))
-	    #+sbcl
-	    ((typep stream 'streaming-output-stream)
-	     (streaming-output-stream-final-text stream))
-	    (t
+(defun %capture-text (stream sink)
+  "Read STREAM's accumulated string, charge it to SINK, and return the
+possibly-truncated text."
+  (cond
+    #+sbcl
+    ((typep stream 'bounded-output-stream)
+     (bounded-output-stream-final-text stream))
+    #+sbcl
+    ((typep stream 'streaming-output-stream)
+     (streaming-output-stream-final-text stream))
+    (t
      ;; Portable fallback: implementations without Gray streams still get
      ;; bounded terminal output, though not bounded during the write itself.
      (let ((text (get-output-stream-string stream)))
@@ -1535,6 +1535,30 @@ list of the last eval; `**' / `++' / `//' are the prior, `***' / `+++' /
         (repl-history-slash-slash history)
         (repl-history-slash-slash-slash history)))
 
+(defun %call-with-worker-repl-context (worker package thunk
+                                       &key (primary-value nil primary-value-p))
+  "Call THUNK with WORKER's REPL package and history bindings active.
+
+When PRIMARY-VALUE is supplied, it overrides the dynamic value of CL:* while
+leaving **, ***, +, ++, +++, /, //, and /// from WORKER's history. Inspector
+eval uses this so `*' means the focused object without losing the rest of the
+REPL context."
+  (let ((history (and worker (worker-history worker)))
+        (*package* (or package *package*)))
+    (cond
+      (history
+       (let ((values (copy-list (%history-values history))))
+         (when primary-value-p
+           (setf (first values) primary-value))
+         (progv (%history-symbols) values
+           (funcall thunk))))
+      (primary-value-p
+       (progv (list (find-symbol "*" "COMMON-LISP"))
+              (list primary-value)
+         (funcall thunk)))
+      (t
+       (funcall thunk)))))
+
 (defmacro %with-repl-history ((history) &body body)
   `(if ,history
        (progv (%history-symbols) (%history-values ,history)
@@ -2491,7 +2515,7 @@ NIL means the handler has already emitted its terminal frame."
                             "name" (getf p :name)
                             "type" (%method-param-type-name (getf p :type))
                             "required" (and (getf p :required) t)
-	                            "description" (getf p :description))))))
+                            "description" (getf p :description))))))
 
 (defparameter +implicit-method-params+ '("token" "explain" "project_root")
   "Transport/dispatch params accepted for every method without appearing in
@@ -2785,40 +2809,40 @@ lost."
                       :description "Lisp source for exactly one form.")
                 (list :name "package" :type :string :required nil
                       :description "Per-call package override.")
-                 (list :name "stream" :type :boolean :required nil
-                       :description "Emit incremental stdout/stderr events.")
-	                (list :name "multi_form" :type :boolean :required nil
-	                      :description "Read and evaluate every form in FORM sequentially.")
-	                (list :name "query_interactive" :type :boolean :required nil
-	                      :description "Bind *standard-input* to a bidirectional query stream.")
-	                (list :name "debug" :type :boolean :required nil
-	                      :description "Enter a server-owned debug session on unhandled conditions.")
-	                (list :name "record_signals" :type :boolean :required nil
-	                      :description "Record non-error conditions signaled during eval.")
-	                (list :name "worker" :type :string :required nil
-	                      :description "Run on a named worker; spawned if absent.")
-	                (list :name "concurrent" :type :boolean :required nil
-	                      :description "Run on a fresh disposable worker that's destroyed after the eval.")
-	                (list :name "handlers" :type :array :required nil
-	                      :description "Declarative condition handlers as {type,restart,args} objects.")
-	                (list :name "break_on" :type :string-or-boolean :required nil
-	                      :description "Type name to bind *break-on-signals* to; \"none\" / false / \"nil\" disables.")
-	                (list :name "max_real_ms" :type :integer :required nil
-	                      :description "Abort with code resource-exhausted if real time exceeds this.")
-	                (list :name "max_cons_bytes" :type :integer :required nil
-	                      :description "Abort with code resource-exhausted if bytes-consed exceeds this.")
-	                (list :name "print_length" :type :integer :required nil
-	                      :description "Bind *print-length* during prin1 of values.")
-	                (list :name "print_level" :type :integer :required nil
-	                      :description "Bind *print-level* during prin1 of values.")
-	                (list :name "print_circle" :type :boolean :required nil
-	                      :description "Bind *print-circle* during prin1 of values.")
-	                (list :name "print_radix" :type :boolean :required nil
-	                      :description "Bind *print-radix* during prin1 of values.")
-	                (list :name "print_base" :type :integer :required nil
-	                      :description "Bind *print-base* during prin1 of values.")
-	                (list :name "print_pretty" :type :boolean :required nil
-	                      :description "Bind *print-pretty* during prin1 of values."))
+                (list :name "stream" :type :boolean :required nil
+                      :description "Emit incremental stdout/stderr events.")
+                (list :name "multi_form" :type :boolean :required nil
+                      :description "Read and evaluate every form in FORM sequentially.")
+                (list :name "query_interactive" :type :boolean :required nil
+                      :description "Bind *standard-input* to a bidirectional query stream.")
+                (list :name "debug" :type :boolean :required nil
+                      :description "Enter a server-owned debug session on unhandled conditions.")
+                (list :name "record_signals" :type :boolean :required nil
+                      :description "Record non-error conditions signaled during eval.")
+                (list :name "worker" :type :string :required nil
+                      :description "Run on a named worker; spawned if absent.")
+                (list :name "concurrent" :type :boolean :required nil
+                      :description "Run on a fresh disposable worker that's destroyed after the eval.")
+                (list :name "handlers" :type :array :required nil
+                      :description "Declarative condition handlers as {type,restart,args} objects.")
+                (list :name "break_on" :type :string-or-boolean :required nil
+                      :description "Type name to bind *break-on-signals* to; \"none\" / false / \"nil\" disables.")
+                (list :name "max_real_ms" :type :integer :required nil
+                      :description "Abort with code resource-exhausted if real time exceeds this.")
+                (list :name "max_cons_bytes" :type :integer :required nil
+                      :description "Abort with code resource-exhausted if bytes-consed exceeds this.")
+                (list :name "print_length" :type :integer :required nil
+                      :description "Bind *print-length* during prin1 of values.")
+                (list :name "print_level" :type :integer :required nil
+                      :description "Bind *print-level* during prin1 of values.")
+                (list :name "print_circle" :type :boolean :required nil
+                      :description "Bind *print-circle* during prin1 of values.")
+                (list :name "print_radix" :type :boolean :required nil
+                      :description "Bind *print-radix* during prin1 of values.")
+                (list :name "print_base" :type :integer :required nil
+                      :description "Bind *print-base* during prin1 of values.")
+                (list :name "print_pretty" :type :boolean :required nil
+                      :description "Bind *print-pretty* during prin1 of values."))
   :handler
   (lambda (server params id ctx)
     (%dispatch-eval server params id ctx))))
@@ -5087,18 +5111,21 @@ recorded by ASDF, plus its declared and resolved dependencies."
   id              ; string "ins-N"
   ;; Stack: list of values, newest first. (car STACK) is the current focus.
   stack
+  ;; Worker whose package/history define the default evaluation context.
+  worker-name
   ;; Whether mutate is permitted (opt-in per session).
   mutable?
   ;; Pagination state: a plist :offset N (default 0).
   view-state)
 
-(defun %allocate-inspector (server value mutable?)
+(defun %allocate-inspector (server value mutable? &key worker-name)
   (clpm.repl.compat:with-mutex
       ((server-inspectors-mutex server))
     (incf (server-inspector-counter server))
     (let* ((id (format nil "ins-~A" (server-inspector-counter server)))
            (sess (make-inspector-session
                   :id id :stack (list value)
+                  :worker-name (or worker-name +default-worker-name+)
                   :mutable? (and mutable? t)
                   :view-state (list :offset 0))))
       (setf (gethash id (server-inspectors server)) sess)
@@ -5116,6 +5143,26 @@ recorded by ASDF, plus its declared and resolved dependencies."
 
 (defun %inspector-current (sess)
   (first (inspector-session-stack sess)))
+
+(defun %inspector-worker (server session &optional worker-name)
+  "Return the worker that supplies SESSION's default REPL context."
+  (%ensure-worker
+   server
+   :name (or worker-name
+             (and session (inspector-session-worker-name session))
+             +default-worker-name+)))
+
+(defun %worker-reader-package (server worker package-name)
+  "Resolve PACKAGE-NAME or use WORKER's current package."
+  (cond
+    ((stringp package-name)
+     (%resolve-package-for-server server package-name))
+    (worker
+     (worker-package worker))
+    (server
+     (server-current-package server))
+    (t
+     (find-package "COMMON-LISP-USER"))))
 
 (defparameter +inspector-page-size+ 100)
 (defparameter +inspector-print-length+ 64)
@@ -5751,31 +5798,48 @@ everything traced by this daemon."
  (make-method-spec
   :name "inspect"
   :summary "Open an inspector session on the value of FORM."
-  :doc "Required: `form'. Optional: `mutable' (boolean), `package'.
+  :doc "Required: `form'. Optional: `mutable' (boolean), `package', `worker'.
 Returns the initial inspection view including a `session' id used by
-subsequent inspect-* RPCs."
+subsequent inspect-* RPCs. FORM is read and evaluated in the selected
+worker's REPL context, including *, **, ***, +, ++, +++, /, //, and ///."
   :params (list (list :name "form" :type :string :required t
                       :description "Form whose value is inspected.")
                 (list :name "mutable" :type :boolean :required nil
                       :description "Allow inspect-mutate.")
                 (list :name "package" :type :string :required nil
-                      :description "Reader package for FORM."))
+                      :description "Reader package for FORM.")
+                (list :name "worker" :type :string :required nil
+                      :description "Worker whose REPL context is used."))
   :handler
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (let* ((form-text (%json-getf params "form"))
            (mutable (%json-true-p (%json-getf params "mutable")))
-             (pkg-name (%json-getf params "package"))
-             (pkg (%reader-package-for-server server pkg-name)))
+           (worker-name (%json-getf params "worker"))
+           (worker (%ensure-worker server
+                                   :name (or worker-name
+                                             +default-worker-name+)))
+           (pkg-name (%json-getf params "package"))
+           (pkg (%worker-reader-package server worker pkg-name)))
       (cond
         ((not (stringp form-text))
          (%error-response id "protocol-error" "missing `form' param"))
+        ((null pkg)
+         (%error-response id "eval-error"
+                          (format nil "no such package: ~A" pkg-name)))
         (t
          (handler-case
              (let* ((parsed (let ((*package* pkg))
                               (%read-form form-text)))
-                    (value (let ((*package* pkg)) (eval parsed)))
-                    (sess (%allocate-inspector server value mutable)))
+                    (value (%call-with-worker-repl-context
+                            worker
+                            pkg
+                            (lambda () (eval parsed))))
+                    (sess (%allocate-inspector
+                           server
+                           value
+                           mutable
+                           :worker-name (worker-name worker))))
                (%success-response id (%inspector-render sess)))
            (error (c)
              (%error-response id "eval-error" (princ-to-string c))))))))))
@@ -5850,29 +5914,35 @@ form again if you want to walk into it."
     (let* ((sid (%json-getf params "session"))
            (sess (and (stringp sid) (%lookup-inspector server sid)))
            (form-text (%json-getf params "form"))
-           (pkg-name (%json-getf params "package"))
-           (pkg (or (and pkg-name (%resolve-package-for-server server pkg-name))
-                    (and server (server-current-package server))
-                    (find-package "COMMON-LISP-USER"))))
+           (pkg-name (%json-getf params "package")))
       (cond
         ((null sess)
          (%error-response id "eval-error" "no such inspector session"))
         ((not (stringp form-text))
          (%error-response id "protocol-error" "missing `form' param"))
         (t
-         (handler-case
-             (let* ((focus (%inspector-current sess))
-                    (parsed (let ((*package* pkg))
-                              (%read-form form-text)))
-                    (value (progv (list (find-symbol "*" "CL"))
-                                  (list focus)
-                             (let ((*package* pkg))
-                               (eval parsed)))))
-               (%success-response
-                id
-                (%json-object "value_repr" (%inspect-part-repr value))))
-           (error (c)
-             (%error-response id "eval-error" (princ-to-string c))))))))))
+         (let* ((worker (%inspector-worker server sess))
+                (pkg (%worker-reader-package server worker pkg-name)))
+           (cond
+             ((null pkg)
+              (%error-response id "eval-error"
+                               (format nil "no such package: ~A" pkg-name)))
+             (t
+              (handler-case
+                  (let* ((focus (%inspector-current sess))
+                         (parsed (let ((*package* pkg))
+                                   (%read-form form-text)))
+                         (value (%call-with-worker-repl-context
+                                 worker
+                                 pkg
+                                 (lambda () (eval parsed))
+                                 :primary-value focus)))
+                    (%success-response
+                     id
+                     (%json-object "value_repr" (%inspect-part-repr value))))
+                (error (c)
+                  (%error-response id "eval-error"
+                                   (princ-to-string c)))))))))))))
 
 (%register-method
  (make-method-spec
@@ -5892,11 +5962,10 @@ been opened with `mutable: true'. Returns the refreshed view."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (let* ((sid (%json-getf params "session"))
-            (sess (and (stringp sid) (%lookup-inspector server sid)))
-            (i (%json-getf params "i"))
-            (form-text (%json-getf params "form"))
-            (pkg-name (%json-getf params "package"))
-            (pkg (%reader-package-for-server server pkg-name)))
+           (sess (and (stringp sid) (%lookup-inspector server sid)))
+           (i (%json-getf params "i"))
+           (form-text (%json-getf params "form"))
+           (pkg-name (%json-getf params "package")))
       (cond
         ((null sess)
          (%error-response id "eval-error" "no such inspector session"))
@@ -5906,20 +5975,30 @@ been opened with `mutable: true'. Returns the refreshed view."
         ((or (not (integerp i)) (not (stringp form-text)))
          (%error-response id "protocol-error" "missing `i' or `form' param"))
         (t
-          (handler-case
-              (let* ((focus (%inspector-current sess))
-                     (parsed (let ((*package* pkg))
-                               (%read-form form-text)))
-                     (new-value (let ((*package* pkg))
-                                  (eval parsed))))
-                (cond
-                  ((%set-inspector-part focus i new-value)
-                   (%success-response id (%inspector-render sess)))
-                  (t
-                   (%error-response id "eval-error"
-                                    (format nil "no part ~A" i)))))
-           (error (c)
-             (%error-response id "eval-error" (princ-to-string c))))))))))
+         (let* ((worker (%inspector-worker server sess))
+                (pkg (%worker-reader-package server worker pkg-name)))
+           (cond
+             ((null pkg)
+              (%error-response id "eval-error"
+                               (format nil "no such package: ~A" pkg-name)))
+             (t
+              (handler-case
+                  (let* ((focus (%inspector-current sess))
+                         (parsed (let ((*package* pkg))
+                                   (%read-form form-text)))
+                         (new-value (%call-with-worker-repl-context
+                                     worker
+                                     pkg
+                                     (lambda () (eval parsed)))))
+                    (cond
+                      ((%set-inspector-part focus i new-value)
+                       (%success-response id (%inspector-render sess)))
+                      (t
+                       (%error-response id "eval-error"
+                                        (format nil "no part ~A" i)))))
+                (error (c)
+                  (%error-response id "eval-error"
+                                   (princ-to-string c)))))))))))))
 
 (%register-method
  (make-method-spec
@@ -6740,27 +6819,27 @@ with v2 toggles requiring continuations)."
                        "id" id "method" method)
            (%write-error-inline cstate id "protocol-error"
                                 "missing or invalid `project_root`"))
-	          ;; Continuation: the user's reply to an `event:query'.
-	          ((string= method "query-response")
-	           (multiple-value-bind (decoded-params decode-error)
-	               (%decode-params-for-method method params id)
-	             (cond
-	               (decode-error
-	                (%write-response-inline cstate decode-error))
-	               (t
-	                (%route-query-response server cstate id decoded-params)))))
-	          ;; Continuations: debug-* actions driving an in-flight debugger.
-	          ((or (string= method "debug-invoke-restart")
-	               (string= method "debug-eval-in-frame")
-	               (string= method "debug-continue")
-	               (string= method "debug-abort"))
-	           (multiple-value-bind (decoded-params decode-error)
-	               (%decode-params-for-method method params id)
-	             (cond
-	               (decode-error
-	                (%write-response-inline cstate decode-error))
-	               (t
-	                (%route-debug-action server cstate id method decoded-params)))))
+          ;; Continuation: the user's reply to an `event:query'.
+          ((string= method "query-response")
+           (multiple-value-bind (decoded-params decode-error)
+               (%decode-params-for-method method params id)
+             (cond
+               (decode-error
+                (%write-response-inline cstate decode-error))
+               (t
+                (%route-query-response server cstate id decoded-params)))))
+          ;; Continuations: debug-* actions driving an in-flight debugger.
+          ((or (string= method "debug-invoke-restart")
+               (string= method "debug-eval-in-frame")
+               (string= method "debug-continue")
+               (string= method "debug-abort"))
+           (multiple-value-bind (decoded-params decode-error)
+               (%decode-params-for-method method params id)
+             (cond
+               (decode-error
+                (%write-response-inline cstate decode-error))
+               (t
+                (%route-debug-action server cstate id method decoded-params)))))
           ;; eval with v2 continuation toggles -> spawn a dispatcher thread.
           ((and (string= method "eval")
                 (%eval-uses-continuation? params))
