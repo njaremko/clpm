@@ -29,23 +29,27 @@
           (write-json v stream))
   (write-char #\] stream))
 
+(defun %json-object-entry-values (entry)
+  (cond
+    ((and (consp entry) (consp (cdr entry)) (null (cddr entry)))
+     (values (first entry) (second entry)))
+    ((consp entry)
+     (values (car entry) (cdr entry)))
+    (t
+     (error "JSON object entry must be a dotted pair or (key value), got: ~S"
+            entry))))
+
 (defun %write-json-object (entries stream)
   (write-char #\{ stream)
   (loop for entry in entries
         for first = t then nil do
           (unless first
             (write-char #\, stream))
-          (etypecase entry
-            (cons
-             (%write-json-string (car entry) stream)
-             (write-char #\: stream)
-             (write-json (cdr entry) stream))
-            (list
-             (unless (= (length entry) 2)
-               (error "JSON object entry must be (key value), got: ~S" entry))
-             (%write-json-string (first entry) stream)
-             (write-char #\: stream)
-             (write-json (second entry) stream))))
+          (multiple-value-bind (key value)
+              (%json-object-entry-values entry)
+            (%write-json-string key stream)
+            (write-char #\: stream)
+            (write-json value stream)))
   (write-char #\} stream))
 
 (defun write-json (value stream)
@@ -328,4 +332,3 @@ input, missing input, or trailing non-whitespace content."
         (when c
           (%json-parse-error s "trailing content after value: ~S" c)))
       value)))
-

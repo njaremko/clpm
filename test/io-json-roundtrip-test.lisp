@@ -85,6 +85,9 @@
 (format t "Testing objects...~%")
 (parses-to "{}" "{}")
 (parses-to "{\"k\":1}" "{\"k\":1}")
+(assert-string= "{\"k\":1}"
+                (clpm.io.json:write-json-to-string
+                 '(:object (("k" 1)))))
 (parses-to "{\"a\":1,\"b\":[1,2],\"c\":{\"d\":\"e\"}}"
            "{\"a\":1,\"b\":[1,2],\"c\":{\"d\":\"e\"}}")
 (format t "  objects OK~%")
