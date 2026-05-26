@@ -172,6 +172,26 @@
                         (string-downcase package-name)))
     path))
 
+(defun make-call-graph-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-call-graph-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "call-graph.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defgeneric graph-evaluate (thing env))
+
+(defun graph-direct (x)
+  (graph-helper x))
+
+(defun graph-possible (thing env)
+  (graph-evaluate thing env))
+
+(defun graph-dynamic (evaluator thing env)
+  (funcall evaluator thing env))
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -267,6 +287,8 @@
                    "sexpr-expansion-of missing from methods")
       (assert-true (member "sexpr-source-origin" method-names :test #'string=)
                    "sexpr-source-origin missing from methods")
+      (assert-true (member "sexpr-call-graph" method-names :test #'string=)
+                   "sexpr-call-graph missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
@@ -738,6 +760,47 @@
                          unknown-resp)
             (assert-equal "unknown" (lookup unknown-origin "kind")
                           "invalid expansion path should be explicit")))
+        (let* ((graph-path (make-call-graph-source-file))
+               (graph-file (namestring graph-path))
+               (graph-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-call-graph"
+                  :params (json-object "file" graph-file)))
+               (graph-result (lookup graph-resp "result"))
+               (certain-calls (array-items
+                               (lookup graph-result "certain_calls")))
+               (possible-calls (array-items
+                                (lookup graph-result "possible_calls")))
+               (dynamic-calls (array-items
+                               (lookup graph-result "dynamic_calls")))
+               (direct-call
+                 (find "GRAPH-HELPER" certain-calls
+                       :key (lambda (call)
+                              (lookup (lookup call "callee") "name"))
+                       :test #'string=))
+               (generic-call
+                 (find "GRAPH-EVALUATE" possible-calls
+                       :key (lambda (call)
+                              (lookup (lookup call "callee") "name"))
+                       :test #'string=))
+               (dynamic-call
+                 (find "funcall" dynamic-calls
+                       :key (lambda (call) (lookup call "operator"))
+                       :test #'string=)))
+          (assert-true graph-result "call graph failed: ~S" graph-resp)
+          (assert-true direct-call
+                       "direct call missing from certain_calls: ~S"
+                       graph-result)
+          (assert-true generic-call
+                       "generic call missing from possible_calls: ~S"
+                       graph-result)
+          (assert-equal "generic_function" (lookup generic-call "reason")
+                        "generic call should be dispatch-sensitive")
+          (assert-true dynamic-call
+                       "funcall missing from dynamic_calls: ~S"
+                       graph-result)
+          (assert-equal "function_value" (lookup dynamic-call "reason")
+                        "funcall should be classified as dynamic"))
         (let* ((scope-path (make-scope-source-file))
                (scope-file (namestring scope-path))
                (bindings-resp

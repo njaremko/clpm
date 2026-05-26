@@ -5355,6 +5355,175 @@ macroexpands|specializes). Returns
                                  "unknown" "expansion_path_not_found"
                                  actual-file nil nil))))))))))))
 
+(defparameter +sexpr-non-call-operators+
+  '("BLOCK" "CATCH" "DECLARE" "EVAL-WHEN" "FLET" "FUNCTION" "GO" "IF"
+    "LABELS" "LET" "LET*" "LOAD-TIME-VALUE" "LOCALLY" "MACROLET"
+    "MULTIPLE-VALUE-CALL" "MULTIPLE-VALUE-PROG1" "PROGN" "PROGV" "QUOTE"
+    "RETURN-FROM" "SETQ" "SYMBOL-MACROLET" "TAGBODY" "THE" "THROW"
+    "UNWIND-PROTECT"
+    "AND" "CASE" "COND" "DECF" "DEFCLASS" "DEFCONSTANT" "DEFMACRO"
+    "DEFMETHOD" "DEFPACKAGE" "DEFPARAMETER" "DEFSTRUCT" "DEFUN"
+    "DEFGENERIC" "DEFVAR" "DO" "DO*" "DOLIST" "DOTIMES" "IN-PACKAGE"
+    "INCF" "LOOP" "OR" "PSETF" "PSETQ" "PUSH" "SETF" "UNLESS" "WHEN"))
+
+(defun %sexpr-call-operator-p (operator)
+  (and (symbolp operator)
+       (not (member (symbol-name operator) +sexpr-non-call-operators+
+                    :test #'string=))))
+
+(defun %sexpr-definition-symbol (source-form)
+  (let ((form (clpm.sexpr-edit:source-form-form source-form)))
+    (when (and (consp form)
+               (member (clpm.sexpr-edit:source-form-kind source-form)
+                       '("defun" "defmacro" "defgeneric" "defmethod")
+                       :test #'string=))
+      (second form))))
+
+(defun %sexpr-source-definition-json (file source-form)
+  (%json-object
+   "name" (clpm.sexpr-edit:source-form-name source-form)
+   "kind" (clpm.sexpr-edit:source-form-kind source-form)
+   "package" (clpm.sexpr-edit:source-form-package source-form)
+   "path" (%sexpr-path-json file source-form)))
+
+(defun %sexpr-generic-symbol-p (symbol generic-symbols)
+  (or (member symbol generic-symbols)
+      (and (symbolp symbol)
+           (fboundp symbol)
+           (typep (fdefinition symbol) 'generic-function))))
+
+(defun %sexpr-call-path-json (file source-form child-path)
+  (%sexpr-path-with-child-json file source-form child-path))
+
+(defun %sexpr-callee-json (symbol server)
+  (%json-object
+   "name" (symbol-name symbol)
+   "package" (%public-package-name (symbol-package symbol) server)))
+
+(defun %sexpr-definition-body-entries (source-form)
+  (let ((elements (%sexpr-proper-list-elements
+                   (clpm.sexpr-edit:source-form-form source-form)))
+        (kind (clpm.sexpr-edit:source-form-kind source-form)))
+    (cond
+      ((member kind '("defun" "defmacro") :test #'string=)
+       (loop for form in (nthcdr 3 elements)
+             for index from 3
+             collect (cons form (list index))))
+      ((string= kind "defmethod")
+       (let ((lambda-list-index
+               (loop for form in (nthcdr 2 elements)
+                     for index from 2
+                     when (listp form)
+                       return index)))
+         (when lambda-list-index
+           (loop for form in (nthcdr (1+ lambda-list-index) elements)
+                 for index from (1+ lambda-list-index)
+                 collect (cons form (list index))))))
+      (t nil))))
+
+(defun %sexpr-source-call-graph (server document)
+  (let* ((file (namestring (clpm.sexpr-edit:source-document-pathname
+                            document)))
+         (definitions (remove-if-not
+                       #'%sexpr-definition-symbol
+                       (clpm.sexpr-edit:source-document-forms document)))
+         (generic-symbols
+           (loop for source-form in definitions
+                 when (string= "defgeneric"
+                               (clpm.sexpr-edit:source-form-kind
+                                source-form))
+                   collect (%sexpr-definition-symbol source-form)))
+         (certain-calls '())
+         (possible-calls '())
+         (dynamic-calls '()))
+    (flet ((record-direct (source-form child-path operator)
+             (let ((entry (%json-object
+                           "caller"
+                           (clpm.sexpr-edit:source-form-name source-form)
+                           "callee" (%sexpr-callee-json operator server)
+                           "path" (%sexpr-call-path-json file source-form
+                                                         child-path))))
+               (if (%sexpr-generic-symbol-p operator generic-symbols)
+                   (push (%json-object
+                          "caller"
+                          (clpm.sexpr-edit:source-form-name source-form)
+                          "callee" (%sexpr-callee-json operator server)
+                          "reason" "generic_function"
+                          "path" (%sexpr-call-path-json file source-form
+                                                        child-path))
+                         possible-calls)
+                   (push entry certain-calls))))
+           (record-dynamic (source-form child-path operator form package)
+             (push (%json-object
+                    "caller" (clpm.sexpr-edit:source-form-name source-form)
+                    "operator" (string-downcase (symbol-name operator))
+                    "form" (%sexpr-print-form-json form package)
+                    "reason" (if (member (symbol-name operator)
+                                         '("FUNCALL" "APPLY")
+                                         :test #'string=)
+                                 "function_value"
+                                 "symbol_function")
+                    "path" (%sexpr-call-path-json file source-form
+                                                  child-path))
+                   dynamic-calls)))
+      (dolist (source-form definitions)
+        (let ((package (or (and (clpm.sexpr-edit:source-form-package
+                                 source-form)
+                                (find-package
+                                 (clpm.sexpr-edit:source-form-package
+                                  source-form)))
+                           (find-package "COMMON-LISP-USER"))))
+          (labels ((walk (form child-path)
+                     (let ((elements (%sexpr-proper-list-elements form)))
+                       (when elements
+                         (let ((operator (first elements)))
+                           (cond
+                             ((and (symbolp operator)
+                                   (member (symbol-name operator)
+                                           '("QUOTE" "FUNCTION")
+                                           :test #'string=))
+                              nil)
+                             ((and (symbolp operator)
+                                   (member (symbol-name operator)
+                                           '("FUNCALL" "APPLY"
+                                             "SYMBOL-FUNCTION")
+                                           :test #'string=))
+                              (record-dynamic source-form child-path operator
+                                              form package))
+                             ((%sexpr-call-operator-p operator)
+                              (record-direct source-form child-path
+                                             operator)))
+                           (loop for child in elements
+                                 for index from 0
+                                 do (walk child
+                                          (append child-path
+                                                  (list index)))))))))
+            (dolist (entry (%sexpr-definition-body-entries source-form))
+              (walk (car entry) (cdr entry)))))))
+    (%json-object
+     "file" file
+     "definitions" (%json-array
+                    (mapcar (lambda (source-form)
+                              (%sexpr-source-definition-json file
+                                                             source-form))
+                            definitions))
+     "certain_calls" (%json-array (nreverse certain-calls))
+     "possible_calls" (%json-array (nreverse possible-calls))
+     "dynamic_calls" (%json-array (nreverse dynamic-calls)))))
+
+(defun %dispatch-sexpr-call-graph (server params id)
+  (let ((file (%json-getf params "file")))
+    (cond
+      ((not (stringp file))
+       (%error-response id "protocol-error" "missing `file' param"))
+      (t
+       (multiple-value-bind (document error-response)
+           (%sexpr-read-document server file id)
+         (or error-response
+             (%success-response
+              id
+              (%sexpr-source-call-graph server document))))))))
+
 (defun %sexpr-child-path (path)
   (let ((raw (%sexpr-path-field path "child_path")))
     (cond
@@ -5747,6 +5916,22 @@ Optional `recursive' chooses the same expansion mode as `sexpr-expansion-of'."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-source-origin server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-call-graph"
+  :summary "Build a conservative source call graph for one Lisp file."
+  :doc "Required: `file'. The response lists source definitions plus
+`certain_calls', `possible_calls', and `dynamic_calls'. Generic function
+calls are classified as possible because dispatch is method-dependent.
+`funcall', `apply', and `symbol-function' are classified as dynamic rather
+than guessed."
+  :params (list (list :name "file" :type :string :required t
+                      :description "Relative or absolute Lisp source path."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-call-graph server params id))))
 
 (%register-method
  (make-method-spec

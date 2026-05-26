@@ -212,7 +212,7 @@ Acceptance evidence:
 
 ### SE-013: Definition And Call Graph
 
-Status: open
+Status: in-progress
 
 Build project-level definition and call graph queries that combine source indexing with available SBCL introspection. The result must be honest about certainty: certain source calls, possible calls through generic functions, and dynamic calls through `funcall`, `apply`, or `symbol-function` must be different result categories.
 
