@@ -238,7 +238,7 @@ Acceptance evidence:
 
 ### SE-015: Introduce Let And Bind Repeated Expression
 
-Status: open
+Status: in-progress
 
 Implement `sexpr-introduce-let` and `sexpr-bind-repeated-expression`. These edits should create lexical names without changing evaluation count or declaration scope. Repeated-expression binding must be disabled when the expression may have side effects unless the caller explicitly accepts the risk.
 

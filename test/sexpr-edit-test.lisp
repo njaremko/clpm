@@ -286,6 +286,18 @@
 ")
     path))
 
+(defun make-introduce-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-introduce-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "introduce.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defun introduce-demo (cell)
+  (+ (cell-value cell) 1))
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -397,6 +409,8 @@
       (assert-true (member "sexpr-classify-rewrite" method-names
                            :test #'string=)
                    "sexpr-classify-rewrite missing from methods")
+      (assert-true (member "sexpr-introduce-let" method-names :test #'string=)
+                   "sexpr-introduce-let missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
@@ -1242,6 +1256,35 @@
                              :test #'string=)
                        "inline classifier missing declaration-scope reason: ~S"
                        special-classification))
+        (let* ((introduce-path (make-introduce-source-file))
+               (introduce-file (namestring introduce-path))
+               (introduce-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-introduce-let"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" introduce-file
+                                   "top_level" 1
+                                   "child_path"
+                                   (list :array (list 3 1)))
+                           "name" "cached")))
+               (introduce-result (lookup introduce-resp "result"))
+               (updated-source (read-file-string introduce-path)))
+          (assert-true introduce-result
+                       "introduce-let failed: ~S" introduce-resp)
+          (assert-equal "ok" (lookup introduce-result "status")
+                        "introduce-let should commit a readable edit")
+          (assert-true (lookup introduce-result "committed")
+                       "introduce-let should commit by default")
+          (assert-true (search "(let ((cached (cell-value cell)))"
+                               updated-source)
+                       "introduce-let did not wrap selected form: ~A"
+                       updated-source)
+          (assert-equal 1 (count-substrings "(cell-value cell)"
+                                            updated-source)
+                        "selected expression should appear once")
+          (assert-equal 2 (count-substrings "cached" updated-source)
+                        "introduced binding should appear twice"))
         (let* ((scope-path (make-scope-source-file))
                (scope-file (namestring scope-path))
                (bindings-resp

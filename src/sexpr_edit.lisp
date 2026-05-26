@@ -782,6 +782,35 @@ the resulting source reads successfully."
               spans)
         (setf position end)))))
 
+(defun source-form-child-span (source-form child-path)
+  "Return the absolute source span for CHILD-PATH inside SOURCE-FORM."
+  (let ((package (or (and (source-form-package source-form)
+                          (find-package (source-form-package source-form)))
+                     (find-package "COMMON-LISP-USER"))))
+    (labels ((walk (text base form path)
+               (if (null path)
+                   (make-source-child-span :start base
+                                           :end (+ base (length text))
+                                           :form form)
+                   (let* ((index (first path))
+                          (spans (%list-child-spans text package)))
+                     (unless (and (integerp index)
+                                  (<= 0 index)
+                                  (< index (length spans)))
+                       (error 'source-edit-error
+                              :message "child path does not resolve to a source form"))
+                     (let* ((span (nth index spans))
+                            (start (source-child-span-start span))
+                            (end (source-child-span-end span)))
+                       (walk (subseq text start end)
+                             (+ base start)
+                             (source-child-span-form span)
+                             (rest path)))))))
+      (walk (source-form-text source-form)
+            (source-form-start source-form)
+            (source-form-form source-form)
+            child-path))))
+
 (defun %normalize-defpackage-operation (operation)
   (let ((token (etypecase operation
                  (keyword (string-downcase (symbol-name operation)))

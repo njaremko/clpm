@@ -404,6 +404,10 @@
            #:source-form-children-count
            #:source-form-text
            #:source-form-form
+           #:source-child-span
+           #:source-child-span-start
+           #:source-child-span-end
+           #:source-child-span-form
            #:source-diagnostic
            #:source-diagnostic-phase
            #:source-diagnostic-message
@@ -417,6 +421,7 @@
            #:source-edit-error
            #:source-edit-error-message
            #:source-edit-error-diagnostics
+           #:source-form-child-span
            #:plan-source-edit
            #:apply-source-edit
            #:plan-defpackage-update
