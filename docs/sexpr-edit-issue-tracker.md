@@ -410,7 +410,7 @@ Acceptance evidence:
 
 ### SE-029: Form Provenance
 
-Status: open
+Status: in-progress
 
 Record per-transaction provenance: created by agent, timestamp, reason, operations, validation steps, and changed form identities. Provenance should live in the edit session metadata, not as noisy source comments by default.
 

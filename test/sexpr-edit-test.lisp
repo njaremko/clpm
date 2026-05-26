@@ -381,12 +381,24 @@
                            "text" "(defun beta () :planned)")))
                (plan-result (lookup plan-resp "result"))
                (plan-diff (array-items (lookup plan-result
-                                                "structural_diff"))))
+                                                "structural_diff")))
+               (plan-provenance (lookup plan-result "provenance")))
           (assert-true plan-result "plan edit failed: ~S" plan-resp)
           (assert-true (lookup plan-result "dry_run")
                        "plan result should be marked dry-run")
           (assert-true plan-diff
                        "plan result should include structural diff")
+          (assert-true plan-provenance
+                       "plan result should include provenance")
+          (assert-equal "sexpr-edit"
+                        (lookup plan-provenance "created_by")
+                        "wrong provenance creator")
+          (assert-equal :false
+                        (lookup plan-provenance "source_comments_inserted")
+                        "provenance should not be written as comments")
+          (assert-true (array-items
+                        (lookup plan-provenance "changed_forms"))
+                       "provenance should carry changed form identities")
           (assert-equal before (read-file-string path)
                         "dry-run plan changed the file"))
         (let* ((before (read-file-string path))
@@ -508,6 +520,8 @@
                        plan-resp)
           (assert-true (lookup plan-result "dry_run")
                        "defpackage plan should be marked dry-run")
+          (assert-true (lookup plan-result "provenance")
+                       "defpackage plan should include provenance")
           (assert-true (lookup plan-result "changed")
                        "new export should be a change")
           (assert-true (search "#:evaluate-cell"
@@ -643,9 +657,16 @@
                                          (list "read" "compile")))))
                (bad-result (lookup bad-resp "result"))
                (bad-steps (array-items (lookup bad-result "steps")))
+               (bad-provenance (lookup bad-result "provenance"))
                (bad-read (first bad-steps)))
           (assert-true bad-result "read validation failed to return: ~S"
                        bad-resp)
+          (assert-true bad-provenance
+                       "validation should include provenance")
+          (assert-equal '("read" "compile-file")
+                        (array-items
+                         (lookup bad-provenance "validation_steps"))
+                        "validation provenance should preserve requested steps")
           (assert-equal :false (lookup bad-result "success")
                         "malformed file should fail validation")
           (assert-equal "read" (lookup bad-read "name")

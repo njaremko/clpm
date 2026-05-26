@@ -4749,6 +4749,26 @@ macroexpands|specializes). Returns
                         (clpm.sexpr-edit:edit-change-removed-argument-texts
                          change))))
 
+(defun %sexpr-boolean-json (value)
+  (if value t :false))
+
+(defun %sexpr-edit-provenance-json (result dry-run)
+  (let ((file (clpm.sexpr-edit:edit-result-file result)))
+    (%json-object
+     "created_by" "sexpr-edit"
+     "timestamp_universal" (get-universal-time)
+     "reason" "structural edit transaction"
+     "operations" (%json-array
+                   (list (clpm.sexpr-edit:edit-result-operation result)))
+     "committed" (%sexpr-boolean-json (not dry-run))
+     "source_comments_inserted" :false
+     "validation_steps" (%json-array (list "read"))
+     "changed_forms"
+     (%json-array
+      (mapcar (lambda (change)
+                (%sexpr-edit-change-json file change))
+              (clpm.sexpr-edit:edit-result-structural-diff result))))))
+
 (defun %sexpr-edit-result-json (result &key dry-run)
   (let ((form (clpm.sexpr-edit:edit-result-form result))
         (file (clpm.sexpr-edit:edit-result-file result)))
@@ -4764,6 +4784,7 @@ macroexpands|specializes). Returns
                                   (%sexpr-edit-change-json file change))
                                 (clpm.sexpr-edit:edit-result-structural-diff
                                  result)))
+     "provenance" (%sexpr-edit-provenance-json result dry-run)
      "diagnostics" (%json-array
                     (mapcar #'%sexpr-diagnostic-json
                             (clpm.sexpr-edit:edit-result-diagnostics
@@ -4839,6 +4860,40 @@ macroexpands|specializes). Returns
                   result)
    "after_text" (clpm.sexpr-edit:defpackage-update-result-after-text
                  result)
+   "provenance" (%json-object
+                 "created_by" "sexpr-edit"
+                 "timestamp_universal" (get-universal-time)
+                 "reason" "defpackage update transaction"
+                 "operations" (%json-array
+                               (list
+                                (clpm.sexpr-edit:defpackage-update-result-operation
+                                 result)))
+                 "committed" (%sexpr-boolean-json
+                              (and (not dry-run)
+                                   (clpm.sexpr-edit:defpackage-update-result-changed-p
+                                    result)))
+                 "source_comments_inserted" :false
+                 "validation_steps" (%json-array
+                                     (if (clpm.sexpr-edit:defpackage-update-result-changed-p
+                                          result)
+                                         (list "read")
+                                         nil))
+                 "changed_forms" (%json-array
+                                  (if (clpm.sexpr-edit:defpackage-update-result-changed-p
+                                       result)
+                                      (list
+                                       (%json-object
+                                        "kind" "defpackage_update"
+                                        "operation"
+                                        (clpm.sexpr-edit:defpackage-update-result-operation
+                                         result)
+                                        "package"
+                                        (clpm.sexpr-edit:defpackage-update-result-package
+                                         result)
+                                        "symbol"
+                                        (clpm.sexpr-edit:defpackage-update-result-symbol
+                                         result)))
+                                      nil)))
    "diagnostics" (%json-array
                   (mapcar #'%sexpr-diagnostic-json
                           (clpm.sexpr-edit:defpackage-update-result-diagnostics
@@ -6328,6 +6383,14 @@ caller diff source-form strings."
           id
           (%json-object
            "success" (%sexpr-validation-success-p success)
+           "provenance" (%json-object
+                         "created_by" "sexpr-edit"
+                         "timestamp_universal" (get-universal-time)
+                         "reason" "validation transaction"
+                         "operations" (%json-array (list "validate"))
+                         "committed" :false
+                         "source_comments_inserted" :false
+                         "validation_steps" (%json-array steps))
            "steps" (%json-array (nreverse results)))))))))
 
 (%register-method
