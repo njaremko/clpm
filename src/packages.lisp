@@ -403,6 +403,7 @@
            #:source-form-operator
            #:source-form-children-count
            #:source-form-text
+           #:source-form-form
            #:source-diagnostic
            #:source-diagnostic-phase
            #:source-diagnostic-message

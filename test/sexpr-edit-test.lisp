@@ -213,6 +213,8 @@
                    "sexpr-list-top-level-forms missing from methods")
       (assert-true (member "sexpr-show-form" method-names :test #'string=)
                    "sexpr-show-form missing from methods")
+      (assert-true (member "sexpr-search-forms" method-names :test #'string=)
+                   "sexpr-search-forms missing from methods")
       (assert-true (member "sexpr-apply-edit" method-names :test #'string=)
                    "sexpr-apply-edit missing from methods")
       (assert-true (member "sexpr-macroexpand-at" method-names :test #'string=)
@@ -239,6 +241,24 @@
         (assert-equal 5 (length forms) "wrong RPC form count")
         (assert-equal "in-package" (lookup (first forms) "kind")
                       "wrong first kind")
+        (let* ((search-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-search-forms"
+                  :params (json-object
+                           "file" file
+                           "pattern" "(alpha ?value)")))
+               (search-result (lookup search-resp "result"))
+               (matches (array-items (lookup search-result "matches")))
+               (match (first matches))
+               (bindings (array-items (lookup match "bindings")))
+               (binding (first bindings)))
+          (assert-true search-result "search failed: ~S" search-resp)
+          (assert-equal 1 (lookup search-result "match_count")
+                        "pattern should match one call")
+          (assert-equal "4" (lookup binding "value")
+                        "single-form variable binding should be printed")
+          (assert-equal "?VALUE" (lookup binding "name")
+                        "binding name should preserve pattern variable"))
         (let* ((show-resp
                  (clpm.repl:send-request
                   sock "sexpr-show-form"

@@ -274,7 +274,7 @@ Acceptance evidence:
 
 ### SE-018: Rewrite Rules And Structural Search
 
-Status: open
+Status: in-progress
 
 Provide structural search patterns and named rewrite rules. Patterns should support single-form variables, many-form variables, symbol constraints, call constraints, binding constraints, and not-within constraints. Rewrite dry runs must show every planned change before applying.
 

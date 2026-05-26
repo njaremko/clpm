@@ -4484,6 +4484,167 @@ macroexpands|specializes). Returns
    (mapcar #'%sexpr-diagnostic-json
            (clpm.sexpr-edit:source-document-diagnostics document))))
 
+(defun %sexpr-proper-list-elements (value)
+  (let ((seen (make-hash-table :test 'eq))
+        (tail value)
+        (elements '()))
+    (loop
+      (cond
+        ((null tail)
+         (return (nreverse elements)))
+        ((consp tail)
+         (when (gethash tail seen)
+           (return nil))
+         (setf (gethash tail seen) t)
+         (push (car tail) elements)
+         (setf tail (cdr tail)))
+        (t
+         (return nil))))))
+
+(defun %sexpr-pattern-variable-p (value)
+  (and (symbolp value)
+       (let ((name (symbol-name value)))
+         (and (> (length name) 1)
+              (char= (char name 0) #\?)
+              (not (char= (char name 1) #\?))))))
+
+(defun %sexpr-pattern-variable-name (symbol)
+  (symbol-name symbol))
+
+(defun %sexpr-bind-pattern-variable (variable value bindings)
+  (let* ((name (%sexpr-pattern-variable-name variable))
+         (entry (assoc name bindings :test #'string=)))
+    (cond
+      (entry
+       (and (equal value (cdr entry)) bindings))
+      (t
+       (acons name value bindings)))))
+
+(defun %sexpr-match-pattern (pattern form &optional bindings)
+  (cond
+    ((%sexpr-pattern-variable-p pattern)
+     (let ((updated (%sexpr-bind-pattern-variable pattern form bindings)))
+       (values updated (and updated t))))
+    ((consp pattern)
+     (let ((pattern-elements (%sexpr-proper-list-elements pattern))
+           (form-elements (%sexpr-proper-list-elements form)))
+       (if (and pattern-elements form-elements
+                (= (length pattern-elements)
+                   (length form-elements)))
+           (loop with current-bindings = bindings
+                 for pattern-element in pattern-elements
+                 for form-element in form-elements
+                 do (multiple-value-bind (next-bindings matched-p)
+                        (%sexpr-match-pattern pattern-element form-element
+                                              current-bindings)
+                      (unless matched-p
+                        (return (values nil nil)))
+                      (setf current-bindings next-bindings))
+                 finally (return (values current-bindings t)))
+           (values nil nil))))
+    (t
+     (if (equal pattern form)
+         (values bindings t)
+         (values nil nil)))))
+
+(defun %sexpr-binding-json (binding package)
+  (%json-object
+   "name" (car binding)
+   "value" (let ((*package* package)
+                 (*print-case* :downcase)
+                 (*print-pretty* nil)
+                 (*print-circle* t))
+             (prin1-to-string (cdr binding)))))
+
+(defun %sexpr-search-match-json (file top-level-form child-path form
+                                 bindings package)
+  (let ((top-level (clpm.sexpr-edit:source-form-ordinal top-level-form)))
+    (%json-object
+     "path" (%json-object
+             "file" file
+             "top_level" top-level
+             "kind" (clpm.sexpr-edit:source-form-kind top-level-form)
+             "name" (clpm.sexpr-edit:source-form-name top-level-form)
+             "child_path" (%json-array child-path))
+     "top_level" top-level
+     "child_path" (%json-array child-path)
+     "form" (if child-path
+                (let ((*package* package)
+                      (*print-case* :downcase)
+                      (*print-pretty* t)
+                      (*print-circle* t))
+                  (prin1-to-string form))
+                (clpm.sexpr-edit:source-form-text top-level-form))
+     "bindings" (%json-array
+                 (mapcar (lambda (binding)
+                           (%sexpr-binding-json binding package))
+                         (reverse bindings))))))
+
+(defun %sexpr-search-one-top-level (file top-level-form pattern package)
+  (let ((matches '()))
+    (labels ((walk (form child-path)
+               (multiple-value-bind (bindings matched-p)
+                   (%sexpr-match-pattern pattern form nil)
+                 (when matched-p
+                   (push (%sexpr-search-match-json
+                          file top-level-form child-path form bindings package)
+                         matches)))
+               (let ((elements (%sexpr-proper-list-elements form)))
+                 (when elements
+                   (loop for child in elements
+                         for index from 0
+                         do (walk child (append child-path
+                                                (list index))))))))
+      (walk (clpm.sexpr-edit:source-form-form top-level-form) nil))
+    (nreverse matches)))
+
+(defun %sexpr-read-search-pattern (server text package-name)
+  (let ((package (%reader-package-for-server server package-name)))
+    (unless package
+      (error "no such package: ~A" package-name))
+    (let ((*read-eval* nil)
+          (*package* package))
+      (values (%read-form text) package))))
+
+(defun %dispatch-sexpr-search-forms (server params id)
+  (let ((file (%json-getf params "file"))
+        (pattern-text (%json-getf params "pattern"))
+        (package-name (%json-getf params "package")))
+    (cond
+      ((not (stringp file))
+       (%error-response id "protocol-error" "missing `file' param"))
+      ((not (stringp pattern-text))
+       (%error-response id "protocol-error" "missing `pattern' param"))
+      ((and package-name (not (stringp package-name)))
+       (%error-response id "protocol-error" "`package' must be a string"))
+      (t
+       (handler-case
+           (multiple-value-bind (pattern package)
+               (%sexpr-read-search-pattern server pattern-text package-name)
+             (multiple-value-bind (document error-response)
+                 (%sexpr-read-document server file id)
+               (or error-response
+                   (let* ((actual-file
+                            (namestring
+                             (clpm.sexpr-edit:source-document-pathname
+                              document)))
+                          (matches
+                            (mapcan (lambda (top-level-form)
+                                      (%sexpr-search-one-top-level
+                                       actual-file top-level-form pattern
+                                       package))
+                                    (clpm.sexpr-edit:source-document-forms
+                                     document))))
+                     (%success-response
+                      id
+                      (%json-object
+                       "file" actual-file
+                       "pattern" pattern-text
+                       "matches" (%json-array matches)
+                       "match_count" (length matches)))))))
+         (error (c)
+           (%error-response id "eval-error" (princ-to-string c))))))))
+
 (defun %dispatch-sexpr-list-top-level-forms (server params id)
   (let ((file (%json-getf params "file")))
     (cond
@@ -4951,6 +5112,26 @@ exact source substring for the selected top-level form."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-show-form server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-search-forms"
+  :summary "Search Lisp source forms with a structural pattern."
+  :doc "Required: `file' and `pattern'. The first pattern language supports
+ordinary literal forms plus single-form variables named like `?x'. Matches
+return the enclosing top-level path, child path, matched form, and variable
+bindings. The reader package defaults to the daemon package and can be
+overridden with `package'."
+  :params (list (list :name "file" :type :string :required t
+                      :description "Relative or absolute Lisp source path.")
+                (list :name "pattern" :type :string :required t
+                      :description "Lisp pattern form with ?variables.")
+                (list :name "package" :type :string :required nil
+                      :description "Reader package for the pattern."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-search-forms server params id))))
 
 (%register-method
  (make-method-spec
