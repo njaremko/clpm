@@ -4422,8 +4422,7 @@ inhabits: :function, :macro, :generic-function, :special-operator,
 (defun %apropos-entries (pattern pkg &optional server)
   "Build [{name, package, kinds, external}, ...] for symbols matching PATTERN.
 PKG is a package object or NIL (search all)."
-  (let ((upat (string-upcase pattern))
-        (entries '()))
+  (let ((entries '()))
     (flet ((add (sym)
              (let* ((name (symbol-name sym))
                     (sym-pkg (symbol-package sym))
@@ -4447,7 +4446,8 @@ PKG is a package object or NIL (search all)."
       (cond
         (pkg
          (do-symbols (s pkg)
-           (when (search upat (symbol-name s)) (add s))))
+           (when (search pattern (symbol-name s) :test #'char-equal)
+             (add s))))
         (t
          ;; Walk every package and visit each symbol *once* by gating on
          ;; its home package. This matches the standard `apropos' --
@@ -4456,7 +4456,8 @@ PKG is a package object or NIL (search all)."
          (dolist (p (list-all-packages))
            (do-symbols (s p)
              (when (and (eq (symbol-package s) p)
-                        (search upat (symbol-name s)))
+                        (search pattern (symbol-name s)
+                                :test #'char-equal))
                (add s))))))
       ;; Dedupe by (name . package).
       (remove-duplicates (nreverse entries)

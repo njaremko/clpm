@@ -77,6 +77,25 @@
                    "FORMAT not in entries"))))
 (format t "  apropos OK~%")
 
+(format t "Test: apropos matches mixed-case symbols case-insensitively~%")
+(with-daemon
+  (lambda (sock)
+    (let ((define (clpm.repl:send-request
+                   sock "eval"
+                   :params (list :object
+                                 (list (cons "form"
+                                             "(intern \"MixedCaseAproposTarget\")"))))))
+      (assert-true (lookup define "result")
+                   "setup intern failed: ~S" define))
+    (let* ((resp (do-rpc sock "apropos"
+                         (list (cons "pattern" "mixedcaseapropos"))))
+           (entries (array-items (lookup (lookup resp "result") "entries"))))
+      (assert-true (find "MixedCaseAproposTarget" entries
+                         :test (lambda (s e)
+                                 (string= s (lookup e "name"))))
+                   "mixed-case target missing: ~S" entries))))
+(format t "  mixed-case apropos OK~%")
+
 ;;; ----------------------------------------------------------------------------
 ;;; #141 documentation: CL:CAR has docstring text.
 
