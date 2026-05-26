@@ -5045,6 +5045,217 @@ caller diff source-form strings."
                  (error () "<unprintable>"))
      "source" (%compile-source-json condition))))
 
+(defun %compile-diagnostic-json (condition)
+  (%json-object
+   "severity" (%compile-condition-severity condition)
+   "type" (string (type-of condition))
+   "message" (handler-case (princ-to-string condition)
+               (error () "<unprintable>"))
+   "source" (%compile-source-json condition)))
+
+(defun %sexpr-validation-success-p (value)
+  (if value t :false))
+
+(defun %sexpr-validation-step-json (name success &rest pairs)
+  (apply #'%json-object
+         "name" name
+         "success" (%sexpr-validation-success-p success)
+         pairs))
+
+(defun %sexpr-normalize-validation-step (step)
+  (when (stringp step)
+    (cond
+      ((string-equal step "read") "read")
+      ((or (string-equal step "compile")
+           (string-equal step "compile-file"))
+       "compile-file")
+      ((or (string-equal step "load")
+           (string-equal step "load-file"))
+       "load-file")
+      ((string-equal step "load-system") "load-system")
+      ((or (string-equal step "test")
+           (string-equal step "test-system"))
+       "test-system")
+      (t nil))))
+
+(defun %sexpr-validation-steps (raw)
+  (cond
+    ((null raw) '("read"))
+    ((%json-array-p raw)
+     (loop for step in (%json-array-items raw)
+           collect (%sexpr-normalize-validation-step step)))
+    (t nil)))
+
+(defun %sexpr-read-validation-step (server file)
+  (handler-case
+      (let* ((document
+               (clpm.sexpr-edit:read-source-document
+                file
+                :initial-package-name (%sexpr-current-package-name server)))
+             (diagnostics
+               (clpm.sexpr-edit:source-document-diagnostics document)))
+        (%sexpr-validation-step-json
+         "read" (null diagnostics)
+         "file" (namestring (clpm.sexpr-edit:source-document-pathname
+                             document))
+         "form_count" (length (clpm.sexpr-edit:source-document-forms
+                               document))
+         "diagnostics" (%json-array
+                        (mapcar #'%sexpr-diagnostic-json diagnostics))))
+    (error (c)
+      (%sexpr-validation-step-json
+       "read" nil
+       "file" file
+       "diagnostics" (%json-array
+                      (list (%json-object
+                             "phase" "read"
+                             "message" (princ-to-string c))))))))
+
+(defun %sexpr-compile-validation-step (server file)
+  (let ((diagnostics '()))
+    (handler-case
+        (let ((handler (lambda (c)
+                         (push (%compile-diagnostic-json c) diagnostics)))
+              (*package* (%reader-package-for-server server nil)))
+          (multiple-value-bind (truename warnings-p failure-p)
+              (handler-bind ((condition handler))
+                (compile-file file :verbose nil :print nil))
+            (%sexpr-validation-step-json
+             "compile-file" (not failure-p)
+             "file" file
+             "output_truename" (and truename (namestring truename))
+             "warnings_p" (%sexpr-validation-success-p warnings-p)
+             "failure_p" (%sexpr-validation-success-p failure-p)
+             "diagnostics" (%json-array (nreverse diagnostics)))))
+      (error (c)
+        (%sexpr-validation-step-json
+         "compile-file" nil
+         "file" file
+         "diagnostics" (%json-array
+                        (append (nreverse diagnostics)
+                                (list (%json-object
+                                       "severity" "error"
+                                       "type" (string (type-of c))
+                                       "message" (princ-to-string c))))))))))
+
+(defun %sexpr-load-file-validation-step (server file)
+  (let ((diagnostics '()))
+    (handler-case
+        (let ((handler (lambda (c)
+                         (push (%compile-diagnostic-json c) diagnostics)))
+              (*package* (%reader-package-for-server server nil)))
+          (handler-bind ((condition handler))
+            (load file :verbose nil :print nil))
+          (%sexpr-validation-step-json
+           "load-file" t
+           "file" file
+           "diagnostics" (%json-array (nreverse diagnostics))))
+      (error (c)
+        (%sexpr-validation-step-json
+         "load-file" nil
+         "file" file
+         "diagnostics" (%json-array
+                        (append (nreverse diagnostics)
+                                (list (%json-object
+                                       "severity" "error"
+                                       "type" (string (type-of c))
+                                       "message" (princ-to-string c))))))))))
+
+(defun %sexpr-asdf-validation-step (name system thunk)
+  (let ((diagnostics '()))
+    (handler-case
+        (progn
+          (handler-bind ((condition
+                           (lambda (c)
+                             (push (%compile-diagnostic-json c)
+                                   diagnostics))))
+            (funcall thunk))
+          (%sexpr-validation-step-json
+           name t
+           "system" system
+           "diagnostics" (%json-array (nreverse diagnostics))))
+      (error (c)
+        (%sexpr-validation-step-json
+         name nil
+         "system" system
+         "diagnostics" (%json-array
+                        (append (nreverse diagnostics)
+                                (list (%json-object
+                                       "severity" "error"
+                                       "type" (string (type-of c))
+                                       "message" (princ-to-string c))))))))))
+
+(defun %sexpr-run-validation-step (server step file system test-system)
+  (cond
+    ((string= step "read")
+     (%sexpr-read-validation-step server file))
+    ((string= step "compile-file")
+     (%sexpr-compile-validation-step server file))
+    ((string= step "load-file")
+     (%sexpr-load-file-validation-step server file))
+    ((string= step "load-system")
+     (%sexpr-asdf-validation-step
+      "load-system" system
+      (lambda () (asdf:load-system system :verbose nil))))
+    ((string= step "test-system")
+     (%sexpr-asdf-validation-step
+      "test-system" (or test-system system)
+      (lambda () (asdf:test-system (or test-system system)
+                                   :verbose nil))))
+    (t
+     (%sexpr-validation-step-json
+      (or step "<unknown>") nil
+      "diagnostics" (%json-array
+                     (list (%json-object
+                            "severity" "error"
+                            "type" "PROTOCOL-ERROR"
+                            "message"
+                            (format nil "unknown validation step: ~A"
+                                    step))))))))
+
+(defun %sexpr-validation-step-needs-file-p (step)
+  (member step '("read" "compile-file" "load-file") :test #'string=))
+
+(defun %dispatch-sexpr-validate-edit (server params id)
+  (let* ((file (%json-getf params "file"))
+         (system (%json-getf params "system"))
+         (test-system (%json-getf params "test_system"))
+         (steps (%sexpr-validation-steps (%json-getf params "steps"))))
+    (cond
+      ((null steps)
+       (%error-response id "protocol-error"
+                        "`steps' must be an array of validation step strings"))
+      ((some #'null steps)
+       (%error-response id "protocol-error"
+                        "unknown validation step"))
+      ((and (some #'%sexpr-validation-step-needs-file-p steps)
+            (not (stringp file)))
+       (%error-response id "protocol-error"
+                        "validation steps require `file'"))
+      ((and (member "load-system" steps :test #'string=)
+            (not (stringp system)))
+       (%error-response id "protocol-error"
+                        "load-system validation requires `system'"))
+      ((and (member "test-system" steps :test #'string=)
+            (not (or (stringp system) (stringp test-system))))
+       (%error-response id "protocol-error"
+                        "test-system validation requires `system' or `test_system'"))
+      (t
+       (let ((results '())
+             (success t))
+         (dolist (step steps)
+           (let ((result (%sexpr-run-validation-step
+                          server step file system test-system)))
+             (push result results)
+             (unless (%json-true-p (%json-getf result "success"))
+               (setf success nil)
+               (return))))
+         (%success-response
+          id
+          (%json-object
+           "success" (%sexpr-validation-success-p success)
+           "steps" (%json-array (nreverse results)))))))))
+
 (%register-method
  (make-method-spec
   :name "compile-file"
@@ -5076,6 +5287,28 @@ result carries `success', `output_truename', `warnings_p', `failure_p'."
                    "failure_p" (and failure-p t)))))
            (error (c)
              (%error-response id "eval-error" (princ-to-string c))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-validate-edit"
+  :summary "Run ordered read/compile/load/test validation steps."
+  :doc "Optional: `steps' array. Steps are `read', `compile-file',
+`load-file', `load-system', and `test-system'; aliases `compile', `load',
+and `test' are accepted. File steps require `file'. ASDF steps require
+`system', except `test-system' may use `test_system'. The result contains a
+step transcript and stops after the first failing step."
+  :params (list (list :name "file" :type :string :required nil
+                      :description "Source file for read/compile/load-file validation.")
+                (list :name "system" :type :string :required nil
+                      :description "ASDF system for load-system/test-system validation.")
+                (list :name "test_system" :type :string :required nil
+                      :description "ASDF test system override.")
+                (list :name "steps" :type :array :required nil
+                      :description "Ordered validation step names."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-validate-edit server params id))))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Introspection

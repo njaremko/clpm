@@ -104,6 +104,14 @@
 ")
     path))
 
+(defun make-validation-source-file (contents)
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-validate-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "validate.lisp" dir)))
+    (write-file path contents)
+    path))
+
 (defun make-macro-source-file ()
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "/tmp/clpm-sexpr-edit-macro-~A/"
@@ -219,6 +227,8 @@
                    "sexpr-system-graph missing from methods")
       (assert-true (member "sexpr-affected-files" method-names :test #'string=)
                    "sexpr-affected-files missing from methods")
+      (assert-true (member "sexpr-validate-edit" method-names :test #'string=)
+                   "sexpr-validate-edit missing from methods")
       (let* ((list-resp
                (clpm.repl:send-request
                 sock "sexpr-list-top-level-forms"
@@ -357,6 +367,58 @@
                         "inserted form kind should be defun")
           (assert-equal "CREATED" (lookup inserted-form "name")
                         "inserted form name should be recorded"))
+        (let* ((bad-path (make-validation-source-file
+                          "(defun broken ()"))
+               (bad-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-validate-edit"
+                  :params (json-object
+                           "file" (namestring bad-path)
+                           "steps" (list :array
+                                         (list "read" "compile")))))
+               (bad-result (lookup bad-resp "result"))
+               (bad-steps (array-items (lookup bad-result "steps")))
+               (bad-read (first bad-steps)))
+          (assert-true bad-result "read validation failed to return: ~S"
+                       bad-resp)
+          (assert-equal :false (lookup bad-result "success")
+                        "malformed file should fail validation")
+          (assert-equal "read" (lookup bad-read "name")
+                        "first step should be read")
+          (assert-equal :false (lookup bad-read "success")
+                        "malformed file should fail read step")
+          (assert-equal 1 (length bad-steps)
+                        "validation should stop after read failure"))
+        (let* ((ok-path (make-validation-source-file
+                         "(in-package #:cl-user)
+
+(defun sexpr-validate-ok () 42)
+"))
+               (ok-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-validate-edit"
+                  :params (json-object
+                           "file" (namestring ok-path)
+                           "steps" (list :array
+                                         (list "read" "compile-file")))))
+               (ok-result (lookup ok-resp "result"))
+               (ok-steps (array-items (lookup ok-result "steps"))))
+          (unwind-protect
+               (progn
+                 (assert-true ok-result
+                              "valid validation failed: ~S" ok-resp)
+                 (assert-true (lookup ok-result "success")
+                              "valid validation should pass: ~S"
+                              ok-result)
+                 (assert-equal '("read" "compile-file")
+                               (mapcar (lambda (step)
+                                         (lookup step "name"))
+                                       ok-steps)
+                               "wrong validation step transcript"))
+            (ignore-errors
+             (let ((fasl (make-pathname :type "fasl"
+                                        :defaults ok-path)))
+               (when (probe-file fasl) (delete-file fasl))))))
         (let* ((macro-path (make-macro-source-file))
                (macro-file (namestring macro-path))
                (macro-resp

@@ -300,7 +300,7 @@ Acceptance evidence:
 
 ### SE-020: Read, Compile, Load, Test Validation Pipeline
 
-Status: open
+Status: in-progress
 
 Implement `sexpr-validate-edit` with ordered steps: read, compile affected file, load affected file or system, run focused tests, run system tests, and macroexpand-check. Each step returns structured diagnostics tied back to source paths when possible.
 
