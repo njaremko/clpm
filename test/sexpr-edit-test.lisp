@@ -546,6 +546,9 @@
       (assert-true (member "sexpr-extract-function" method-names
                             :test #'string=)
                    "sexpr-extract-function missing from methods")
+      (assert-true (member "sexpr-suggest-edit-candidates" method-names
+                            :test #'string=)
+                   "sexpr-suggest-edit-candidates missing from methods")
       (assert-true (member "sexpr-change-lambda-list" method-names
                             :test #'string=)
                    "sexpr-change-lambda-list missing from methods")
@@ -1729,6 +1732,48 @@
                  (json-object "file" lambda-file
                               "kind" "defun"
                               "name" "optional-target"))
+               (candidate-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-suggest-edit-candidates"
+                  :params (json-object
+                           "goal" "add-argument"
+                           "path" optional-path
+                           "name" "context"
+                           "constraints"
+                           (json-object
+                            "preserve_existing_call_sites" t))))
+               (candidate-result (lookup candidate-resp "result"))
+               (candidates
+                 (array-items (lookup candidate-result "candidates")))
+               (optional-candidate
+                 (find "add-optional-parameter" candidates
+                       :key (lambda (candidate)
+                              (lookup candidate "id"))
+                       :test #'string=))
+               (keyword-candidate
+                 (find "add-keyword-parameter" candidates
+                       :key (lambda (candidate)
+                              (lookup candidate "id"))
+                       :test #'string=))
+               (relaxed-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-suggest-edit-candidates"
+                  :params (json-object
+                           "goal" "add-argument"
+                           "path" optional-path
+                           "name" "context")))
+               (relaxed-result (lookup relaxed-resp "result"))
+               (relaxed-candidates
+                 (array-items (lookup relaxed-result "candidates")))
+               (relaxed-first (first relaxed-candidates))
+               (candidate-apply-resp
+                 (and optional-candidate
+                      (clpm.repl:send-request
+                       sock (lookup optional-candidate "apply_method")
+                       :params (lookup optional-candidate
+                                       "apply_params"))))
+               (candidate-apply-result
+                 (lookup candidate-apply-resp "result"))
                (add-resp
                  (clpm.repl:send-request
                   sock "sexpr-add-keyword-arg"
@@ -1739,6 +1784,29 @@
                (after-add (read-file-string lambda-path))
                (add-broken
                  (array-items (lookup add-result "broken_call_sites"))))
+          (assert-true candidate-result
+                       "candidate generation failed: ~S" candidate-resp)
+          (assert-equal 2 (lookup candidate-result "candidate_count")
+                        "add-argument should return two candidates")
+          (assert-true optional-candidate
+                       "missing optional candidate: ~S" candidate-result)
+          (assert-true keyword-candidate
+                       "missing keyword candidate: ~S" candidate-result)
+          (assert-true (> (lookup keyword-candidate "rank")
+                          (lookup optional-candidate "rank"))
+                       "preserve-existing-call-sites should rank keyword first")
+          (assert-equal "add-optional-parameter"
+                        (lookup relaxed-first "id")
+                        "relaxed constraints should rank optional first")
+          (assert-equal "sexpr-change-lambda-list"
+                        (lookup optional-candidate "apply_method")
+                        "optional candidate should use lambda-list transaction")
+          (assert-true candidate-apply-result
+                       "candidate transaction dry run failed: ~S"
+                       candidate-apply-resp)
+          (assert-equal :false
+                        (lookup candidate-apply-result "committed")
+                        "candidate params should not commit by default")
           (assert-true add-result
                        "add-keyword-arg failed: ~S" add-resp)
           (assert-equal "ok" (lookup add-result "status")

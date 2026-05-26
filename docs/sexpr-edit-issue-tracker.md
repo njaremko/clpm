@@ -436,7 +436,7 @@ Acceptance evidence:
 
 ### SE-031: Constraint-Based Edit Candidates
 
-Status: open
+Status: done
 
 Implement a candidate generator for constrained edit goals. The first version should handle narrow, typed goals such as adding an optional argument, making a function public, or wrapping a body with a known macro. It must return alternatives with explicit tradeoffs instead of directly mutating files.
 

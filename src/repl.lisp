@@ -7284,6 +7284,34 @@ macroexpands|specializes). Returns
         (list varspec default)
         varspec)))
 
+(defun %sexpr-optional-parameter-form (parameter default default-present-p)
+  (if default-present-p
+      (list parameter default)
+      parameter))
+
+(defun %sexpr-add-optional-parameter (lambda-list optional-parameter)
+  (let ((has-optional nil)
+        (inserted nil)
+        (result '()))
+    (dolist (item lambda-list)
+      (when (and (not inserted)
+                 (%lambda-list-keyword-p item)
+                 (not (string= "&OPTIONAL" (symbol-name item))))
+        (unless has-optional
+          (push (intern "&OPTIONAL" "COMMON-LISP") result)
+          (setf has-optional t))
+        (push optional-parameter result)
+        (setf inserted t))
+      (push item result)
+      (when (and (symbolp item)
+                 (string= "&OPTIONAL" (symbol-name item)))
+        (setf has-optional t)))
+    (unless inserted
+      (unless has-optional
+        (push (intern "&OPTIONAL" "COMMON-LISP") result))
+      (push optional-parameter result))
+    (nreverse result)))
+
 (defun %sexpr-add-key-parameter (lambda-list key-parameter)
   (let ((has-key nil)
         (inserted nil)
@@ -8131,6 +8159,268 @@ macroexpands|specializes). Returns
                             dynamic-sites)))))))))
          (error (c)
            (%error-response id "eval-error" (princ-to-string c))))))))
+
+(defun %sexpr-param-object (pairs)
+  (list :object pairs))
+
+(defun %sexpr-candidate-json (id title rank method params tradeoffs
+                              &rest pairs)
+  (apply #'%json-object
+         "id" id
+         "title" title
+         "rank" rank
+         "apply_method" method
+         "apply_params" params
+         "tradeoffs" (%json-array tradeoffs)
+         pairs))
+
+(defun %sexpr-tradeoff (kind text)
+  (%json-object "kind" kind "text" text))
+
+(defun %sexpr-add-argument-candidates (server path name default-text
+                                       keyword-text constraints id)
+  (handler-case
+      (multiple-value-bind (document actual-file pathname source-form pkg
+                            error-response)
+          (%sexpr-selected-definition-context server path id)
+        (declare (ignore pathname))
+        (or error-response
+            (let* ((lambda-index (%sexpr-lambda-list-child-index source-form))
+                   (function-symbol
+                     (%sexpr-function-definition-symbol source-form)))
+              (unless lambda-index
+                (error "selected form does not have a supported lambda list"))
+              (unless function-symbol
+                (error "selected form is not a supported function definition"))
+              (let* ((lambda-list
+                       (third (clpm.sexpr-edit:source-form-form source-form)))
+                     (parameter (%sexpr-read-binding-symbol name pkg))
+                     (default (and default-text
+                                   (%sexpr-read-form-in-package
+                                    default-text pkg)))
+                     (default-present-p (and default-text t))
+                     (keyword (%sexpr-keyword-symbol parameter keyword-text
+                                                     pkg))
+                     (preserve-call-sites
+                       (%json-true-p
+                        (%json-getf constraints
+                                    "preserve_existing_call_sites")))
+                     (optional-list
+                       (%sexpr-add-optional-parameter
+                        lambda-list
+                        (%sexpr-optional-parameter-form
+                         parameter default default-present-p)))
+                     (key-list
+                       (%sexpr-add-key-parameter
+                        lambda-list
+                        (%sexpr-key-parameter-form
+                         parameter keyword default default-present-p))))
+                (multiple-value-bind (direct-sites dynamic-sites)
+                    (%sexpr-function-call-sites document function-symbol)
+                  (let* ((optional-broken
+                           (%sexpr-broken-call-sites direct-sites
+                                                     optional-list))
+                         (key-broken
+                           (%sexpr-broken-call-sites direct-sites key-list))
+                         (optional-rank (if preserve-call-sites 90 80))
+                         (key-rank (if preserve-call-sites 100 70))
+                         (optional-params
+                           (%sexpr-param-object
+                            (list (cons "path" path)
+                                  (cons "lambda_list"
+                                        (%sexpr-lambda-list-text
+                                         optional-list pkg))
+                                  (cons "dry_run" t))))
+                         (key-param-pairs
+                           (append
+                            (list (cons "path" path)
+                                  (cons "name" name)
+                                  (cons "keyword"
+                                        (%sexpr-symbol-token keyword pkg))
+                                  (cons "dry_run" t))
+                            (and default-text
+                                 (list (cons "default" default-text)))))
+                         (key-params (%sexpr-param-object key-param-pairs)))
+                    (%success-response
+                     id
+                     (%json-object
+                      "status" "ok"
+                      "goal" "add-argument"
+                      "file" actual-file
+                      "path" (%sexpr-path-json actual-file source-form)
+                      "constraints" (or constraints (%json-object))
+                      "candidate_count" 2
+                      "candidates"
+                      (%json-array
+                       (sort
+                        (list
+                         (%sexpr-candidate-json
+                          "add-optional-parameter"
+                          "Add an &OPTIONAL parameter"
+                          optional-rank
+                          "sexpr-change-lambda-list"
+                          optional-params
+                          (list
+                           (%sexpr-tradeoff
+                            "call_sites"
+                            "Existing direct calls remain valid because the new argument is optional.")
+                           (%sexpr-tradeoff
+                            "api_shape"
+                            "Future callers must remember the positional meaning of the new argument."))
+                          "lambda_list"
+                          (%sexpr-lambda-list-text optional-list pkg)
+                          "preserves_existing_call_sites"
+                          (%sexpr-boolean-json (null optional-broken))
+                          "broken_call_site_count"
+                          (length optional-broken))
+                         (%sexpr-candidate-json
+                          "add-keyword-parameter"
+                          "Add a keyword parameter"
+                          key-rank
+                          "sexpr-add-keyword-arg"
+                          key-params
+                          (list
+                           (%sexpr-tradeoff
+                            "call_sites"
+                            "Existing direct calls remain valid because &KEY accepts omitted keywords.")
+                           (%sexpr-tradeoff
+                            "api_shape"
+                            "Future callers can name the argument explicitly, at the cost of keyword dispatch."))
+                          "lambda_list"
+                          (%sexpr-lambda-list-text key-list pkg)
+                          "keyword" (%sexpr-symbol-token keyword pkg)
+                          "preserves_existing_call_sites"
+                          (%sexpr-boolean-json (null key-broken))
+                          "broken_call_site_count" (length key-broken)))
+                        #'>
+                        :key (lambda (candidate)
+                               (%json-getf candidate "rank"))))
+                      "dynamic_caveats"
+                      (%json-array
+                       (mapcar
+                        (lambda (site)
+                          (%sexpr-call-site-json actual-file site server))
+                        dynamic-sites))))))))))
+    (error (c)
+      (%error-response id "eval-error" (princ-to-string c)))))
+
+(defun %sexpr-public-candidates (params id)
+  (let ((file (%json-getf params "file"))
+        (package (%json-getf params "package"))
+        (symbol (%json-getf params "symbol")))
+    (cond
+      ((not (stringp file))
+       (%error-response id "protocol-error"
+                        "make-public goal requires `file'"))
+      ((not (stringp package))
+       (%error-response id "protocol-error"
+                        "make-public goal requires `package'"))
+      ((not (stringp symbol))
+       (%error-response id "protocol-error"
+                        "make-public goal requires `symbol'"))
+      (t
+       (%success-response
+        id
+        (%json-object
+         "status" "ok"
+         "goal" "make-public"
+         "candidate_count" 1
+         "candidates"
+         (%json-array
+          (list
+           (%sexpr-candidate-json
+            "export-symbol"
+            "Export the symbol from its package"
+            100
+            "sexpr-update-defpackage"
+            (%sexpr-param-object
+             (list (cons "file" file)
+                   (cons "package" package)
+                   (cons "operation" "export")
+                   (cons "symbol" symbol)
+                   (cons "dry_run" t)))
+            (list
+             (%sexpr-tradeoff
+              "package_api"
+              "Updates the DEFPACKAGE form instead of editing call sites.")
+             (%sexpr-tradeoff
+              "validation"
+              "The returned transaction params use the normal defpackage update path.")))))))))))
+
+(defun %sexpr-wrap-body-candidates (params id)
+  (let ((path (%json-getf params "path"))
+        (template (%json-getf params "template")))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error"
+                        "wrap-body goal requires `path'"))
+      ((not (stringp template))
+       (%error-response id "protocol-error"
+                        "wrap-body goal requires `template'"))
+      (t
+       (%success-response
+        id
+        (%json-object
+         "status" "ok"
+         "goal" "wrap-body"
+         "candidate_count" 1
+         "candidates"
+         (%json-array
+          (list
+           (%sexpr-candidate-json
+            "wrap-selected-form"
+            "Wrap the selected form with the supplied template"
+            100
+            "sexpr-plan-edit"
+            (%sexpr-param-object
+             (list (cons "operation" "wrap")
+                   (cons "path" path)
+                   (cons "text" template)))
+            (list
+             (%sexpr-tradeoff
+              "scope"
+              "The existing wrap transaction preserves the selected source extent and validates the edited file.")
+             (%sexpr-tradeoff
+              "macro_awareness"
+              "Inspect bindings and macroexpansion before applying this candidate around macro bodies.")))))))))))
+
+(defun %dispatch-sexpr-suggest-edit-candidates (server params id)
+  (let ((goal (%json-getf params "goal")))
+    (cond
+      ((not (stringp goal))
+       (%error-response id "protocol-error" "missing `goal' param"))
+      ((string-equal goal "add-argument")
+       (let ((path (%json-getf params "path"))
+             (name (%json-getf params "name"))
+             (default (%json-getf params "default"))
+             (keyword (%json-getf params "keyword"))
+             (constraints (%json-getf params "constraints")))
+         (cond
+           ((not (%json-object-p path))
+            (%error-response id "protocol-error"
+                             "add-argument goal requires `path'"))
+           ((not (stringp name))
+            (%error-response id "protocol-error"
+                             "add-argument goal requires `name'"))
+           ((and default (not (stringp default)))
+            (%error-response id "protocol-error"
+                             "`default' must be a string"))
+           ((and keyword (not (stringp keyword)))
+            (%error-response id "protocol-error"
+                             "`keyword' must be a string"))
+           ((and constraints (not (%json-object-p constraints)))
+            (%error-response id "protocol-error"
+                             "`constraints' must be an object"))
+           (t
+            (%sexpr-add-argument-candidates
+             server path name default keyword constraints id)))))
+      ((string-equal goal "make-public")
+       (%sexpr-public-candidates params id))
+      ((string-equal goal "wrap-body")
+       (%sexpr-wrap-body-candidates params id))
+      (t
+       (%error-response id "protocol-error"
+                        "unsupported candidate goal")))))
 
 (defun %dispatch-sexpr-add-keyword-arg (server params id)
   (let ((path (%json-getf params "path"))
@@ -9296,6 +9586,43 @@ writing. Optional `dry_run' reports the edit without writing."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-extract-function server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-suggest-edit-candidates"
+  :summary "Return constrained edit candidates without mutating source."
+  :doc "Required: `goal'. Supported goals are `add-argument',
+`make-public', and `wrap-body'. `add-argument' requires a function `path' and
+parameter `name', then returns optional-argument and keyword-argument
+alternatives with tradeoffs, call-site preservation facts, ranking, and
+transaction params that run through the existing refactor methods in dry-run
+mode. `make-public' returns a defpackage export transaction candidate.
+`wrap-body' returns a structural wrap plan candidate. The method never writes
+files."
+  :params (list (list :name "goal" :type :string :required t
+                      :description "add-argument, make-public, or wrap-body.")
+                (list :name "path" :type :object :required nil
+                      :description "Source path for goals that act on a form.")
+                (list :name "name" :type :string :required nil
+                      :description "New parameter name for add-argument.")
+                (list :name "default" :type :string :required nil
+                      :description "Optional default init form.")
+                (list :name "keyword" :type :string :required nil
+                      :description "Keyword symbol for keyword candidates.")
+                (list :name "constraints" :type :object :required nil
+                      :description "Constraint object such as preserve_existing_call_sites.")
+                (list :name "file" :type :string :required nil
+                      :description "Defpackage source for make-public.")
+                (list :name "package" :type :string :required nil
+                      :description "Package for make-public.")
+                (list :name "symbol" :type :string :required nil
+                      :description "Symbol for make-public.")
+                (list :name "template" :type :string :required nil
+                      :description "Wrap template for wrap-body."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-suggest-edit-candidates server params id))))
 
 (%register-method
  (make-method-spec
