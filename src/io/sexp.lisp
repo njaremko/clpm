@@ -54,14 +54,19 @@ Only keywords, strings, numbers, and lists thereof are allowed."
   (let ((*read-eval* nil)
         ;; Read keywords normally (they are prefixed with : in the file) while
         ;; allowing literal NIL and T to be read as CL:NIL and CL:T.
-        (*package* (find-package "COMMON-LISP")))
+        (*package* (find-package "COMMON-LISP"))
+        (eof (gensym "EOF-")))
     (handler-case
-        (let ((form (read stream nil :eof)))
-          (when (eq form :eof)
+        (let ((form (read stream nil eof)))
+          (when (eq form eof)
             (error 'sexp-read-error :message "Unexpected end of file"))
-          (if validate
-              (validate-sexp form)
-              form))
+          (let ((result (if validate
+                            (validate-sexp form)
+                            form)))
+            (unless (eq (read stream nil eof) eof)
+              (error 'sexp-read-error
+                     :message "Trailing content after S-expression"))
+            result))
       (reader-error (c)
         (error 'sexp-read-error
                :message (format nil "Reader error: ~A" c)

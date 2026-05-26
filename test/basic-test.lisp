@@ -142,6 +142,16 @@
       (setf failed t)))
   (assert failed))
 
+(assert (eq :eof (clpm.io.sexp:read-safe-sexp-from-string ":eof")))
+
+(let ((failed nil))
+  (handler-case
+      (clpm.io.sexp:read-safe-sexp-from-string
+       "(:project :name \"test\") (:extra t)")
+    (clpm.io.sexp::sexp-read-error ()
+      (setf failed t)))
+  (assert failed))
+
 (format t "  S-expression reader PASSED~%")
 
 ;;; Test canonical writer
