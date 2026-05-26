@@ -551,17 +551,18 @@ socket (and, for :tcp, the bound port) back into the struct. For :tcp, also
 writes the port file."
   (ecase (transport-kind transport)
     (:unix
-     (let ((sock (make-instance 'sb-bsd-sockets:local-socket :type :stream))
-           (token (or (transport-token transport)
-                      (setf (transport-token transport) (%random-token)))))
-       (ignore-errors (delete-file (transport-path transport)))
-       (%write-token-file (%unix-token-path (transport-path transport)) token)
-       (sb-bsd-sockets:socket-bind sock (transport-path transport))
-       #+sbcl
-       (handler-case (sb-posix:chmod (transport-path transport) #o600)
-         (error () nil))
-       (sb-bsd-sockets:socket-listen sock 8)
-       (setf (transport-listener transport) sock)))
+      (let ((sock (make-instance 'sb-bsd-sockets:local-socket :type :stream))
+            (token (or (transport-token transport)
+                       (setf (transport-token transport) (%random-token)))))
+        (ignore-errors (delete-file (%unix-token-path (transport-path transport))))
+        (ignore-errors (delete-file (transport-path transport)))
+        (sb-bsd-sockets:socket-bind sock (transport-path transport))
+        #+sbcl
+        (handler-case (sb-posix:chmod (transport-path transport) #o600)
+          (error () nil))
+        (sb-bsd-sockets:socket-listen sock 8)
+        (%write-token-file (%unix-token-path (transport-path transport)) token)
+        (setf (transport-listener transport) sock)))
     (:tcp
      (let ((sock (make-instance 'sb-bsd-sockets:inet-socket
                                 :type :stream :protocol :tcp)))
@@ -601,10 +602,14 @@ Polls for up to TIMEOUT-SECONDS so an autostart parent can race the daemon."
           (return
             (ecase kind
               (:unix
-               (let ((token (%read-token-file (%unix-token-path path)))
-                     (s (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
-                 (sb-bsd-sockets:socket-connect s path)
-                 (values s token)))
+                (let ((s (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+                  (handler-case
+                      (progn
+                        (sb-bsd-sockets:socket-connect s path)
+                        (values s (%read-token-file (%unix-token-path path))))
+                    (error (c)
+                      (ignore-errors (sb-bsd-sockets:socket-close s))
+                      (error c)))))
               (:tcp
                (multiple-value-bind (port token) (%read-port-file path)
                  (let ((s (make-instance 'sb-bsd-sockets:inet-socket
@@ -836,6 +841,28 @@ the public protocol."
      (%find-package-loose name))
     (t nil)))
 
+(defun %project-real-cl-user-package-p (server package)
+  "True when PACKAGE is the host CL-USER that a project daemon must not expose."
+  (and server
+       (server-project-root server)
+       package
+       (not (eq package (server-initial-package server)))
+       (eq package (find-package "COMMON-LISP-USER"))))
+
+(defun %normalize-project-package (server package)
+  "Map public CL-USER back to SERVER's private project package when needed."
+  (if (%project-real-cl-user-package-p server package)
+      (server-initial-package server)
+      package))
+
+(defun %reader-package-for-server (server package-name)
+  "Resolve PACKAGE-NAME, or use SERVER's current package for reader/eval forms."
+  (or (and (stringp package-name)
+           (%resolve-package-for-server server package-name))
+      (and server
+           (%normalize-project-package server (server-current-package server)))
+      (find-package "COMMON-LISP-USER")))
+
 (defun %project-root-fingerprint (project-root)
   "Return an opaque stable fingerprint for PROJECT-ROOT, or NIL.
 
@@ -1052,6 +1079,9 @@ recent call (closest to the error)."
   ;; Pre-rendered JSON describing the condition (same shape %condition-json
   ;; produces). Cached so each debug-eval-in-frame event doesn't recompute.
   json-condition
+  ;; Package active when the debugger was entered. Debug action forms are read
+  ;; here, not in whichever package the default worker currently uses.
+  package
   ;; The eval-job this session belongs to; the action mailbox lives there.
   job)
 
@@ -1258,13 +1288,50 @@ order, and stop at the first non-required element."
               collect (handler-case
                           (%safe-prin1
                            (sb-di:debug-var-value item frame))
-                        (error () "<unavailable>"))))
+      (error () "<unavailable>"))))
     (error () nil)))
 
 #+sbcl
+(defun %top-level-form-line (pathname form-index)
+  "Return the 1-based line of top-level form FORM-INDEX in PATHNAME."
+  (when (and pathname (integerp form-index) (>= form-index 0))
+    (handler-case
+        (with-open-file (s pathname :direction :input :external-format :utf-8)
+          (let ((*read-eval* nil))
+            (loop for i from 0
+                  for position = (file-position s)
+                  for form = (read s nil 'eof)
+                  until (eq form 'eof)
+                  when (= i form-index)
+                    return (%source-line-number-from-offset pathname position))))
+      (error () nil))))
+
+#+sbcl
+(defun %source-line-number (pathname char-offset form-path)
+  "Return the 1-based definition line in PATHNAME, best effort."
+  (or (and (consp form-path)
+           (integerp (first form-path))
+           (%top-level-form-line pathname (first form-path)))
+      (%source-line-number-from-offset pathname char-offset)))
+
+#+sbcl
+(defun %source-line-number-from-offset (pathname char-offset)
+  "Return the 1-based source line for CHAR-OFFSET in PATHNAME, best effort."
+  (when (and pathname (integerp char-offset) (>= char-offset 0))
+    (handler-case
+        (with-open-file (s pathname :direction :input :external-format :utf-8)
+          (loop with line = 1
+                for i from 0 below char-offset
+                for ch = (read-char s nil nil)
+                while ch
+                do (when (char= ch #\Newline)
+                     (incf line))
+                finally (return line)))
+      (error () nil))))
+
+#+sbcl
 (defun %frame-source (frame)
-  "Source location \"file:line\" for the frame, or NIL if SBCL didn't
-record one."
+  "Structured source location for the frame, or NIL if SBCL didn't record one."
   (handler-case
       (let* ((debug-fun (sb-di:frame-debug-fun frame))
              (source (and debug-fun
@@ -1272,15 +1339,8 @@ record one."
                           (handler-case
                               (sb-introspect:find-definition-source
                                (fdefinition (sb-di:debug-fun-name debug-fun)))
-                            (error () nil))))
-             (pathname (and source
-                            (sb-introspect:definition-source-pathname source)))
-             (form-path (and source
-                             (sb-introspect:definition-source-form-path source))))
-        (when pathname
-          (format nil "~A~@[:~A~]"
-                  (namestring pathname)
-                  (and (consp form-path) (first form-path)))))
+                            (error () nil)))))
+        (and source (%definition-source-json source)))
     (error () nil)))
 
 #+sbcl
@@ -1379,6 +1439,10 @@ must not block the eval response."
           (error "trailing form after first expression")))
       value)))
 
+(defun %read-region-form (stream)
+  "Read the next form from STREAM, returning EOF when the region is exhausted."
+  (read stream nil 'eof))
+
 (defparameter +definer-symbols+
   '(defun defmethod defmacro defgeneric defclass defstruct
     defvar defparameter defconstant define-condition defpackage)
@@ -1476,7 +1540,7 @@ list of the last eval; `**' / `++' / `//' are the prior, `***' / `+++' /
   (let ((*package* (or package *package*)))
     (loop for name in +history-symbols+
           for value in (%history-values history)
-          collect (cons name (%safe-prin1 value)))))
+          collect (cons name (%public-package-text (%safe-prin1 value))))))
 
 (defun %update-history! (history last-form last-values)
   "Shift the worker-local REPL history bindings."
@@ -1658,8 +1722,9 @@ implementation-supported debug environment instead of a guessed LET wrapper."
                    (format nil "no frame ~A (have ~A)"
                            frame-index (length frames)))))
       (t
-       (let* ((pkg (or (and *server* (server-current-package *server*))
-                       (find-package "COMMON-LISP-USER"))))
+        (let* ((pkg (or (debug-session-package session)
+                        (and *server* (server-current-package *server*))
+                        (find-package "COMMON-LISP-USER"))))
          (handler-case
              (let* ((parsed-form (%read-debug-form form-text pkg))
                     (out (make-string-output-stream))
@@ -1726,13 +1791,14 @@ restart (unwinds) or returns NIL (we let the error propagate)."
                                              :include-backtrace t
                                              :frames frames)
                            (error () (%capture-error-snapshot condition))))
-         (session (make-debug-session
-                   :worker-name worker-name
-                   :condition condition
-                   :restarts restarts
-                   :frames frames
-                   :json-condition json-condition
-                   :job job)))
+          (session (make-debug-session
+                    :worker-name worker-name
+                    :condition condition
+                    :restarts restarts
+                    :frames frames
+                    :json-condition json-condition
+                    :package *package*
+                    :job job)))
     (when *server*
       (%register-debug-session *server* session))
     (setf (eval-job-debug-session job) session)
@@ -1763,9 +1829,9 @@ restart (unwinds) or returns NIL (we let the error propagate)."
                                           "message" message))))
                         (t
                          (multiple-value-bind (args arg-error)
-                             (%eval-debug-restart-args
-                              args-forms
-                              (and *server* (server-current-package *server*)))
+                              (%eval-debug-restart-args
+                               args-forms
+                               (debug-session-package session))
                            (cond
                              (arg-error
                               (%send-debug-action-error reply-box
@@ -1871,7 +1937,8 @@ sessions."
               #-sbcl (make-string-input-stream ""))
              (t (make-string-input-stream ""))))
          (start (get-internal-real-time))
-         (form nil)
+          (last-form nil)
+          (multi-form? (getf options :multi-form))
          (override-pkg (and package-override
                             (%resolve-package-for-server *server*
                                                          package-override)))
@@ -1930,13 +1997,14 @@ sessions."
                      (history-snap
                        (and (null code)
                             history
-                            (handler-case (%read-history-snapshot history package)
-                              (error () nil)))))
-                 (make-eval-result
-                  :code code
-                  :values value-strings
-                  :output (%capture-text out-stream sink)
-                  :error-output (%capture-text err-stream sink)
+                             (handler-case (%read-history-snapshot history package)
+                               (error () nil)))))
+                  (make-eval-result
+                   :code code
+                   :values (mapcar #'%public-package-text value-strings)
+                   :output (%public-package-text (%capture-text out-stream sink))
+                   :error-output (%public-package-text
+                                  (%capture-text err-stream sink))
                   :package (%public-package-name package)
                   :elapsed-ms (round (* 1000.0
                                         (/ (- (get-internal-real-time) start)
@@ -1945,16 +2013,17 @@ sessions."
                   :signaled-conditions (nreverse signaled)
                   :truncated? (bounded-sink-truncated? sink)
                   :redefined redefined
-                  :history history-snap
-                  :handler-attempts (nreverse (car handler-attempts-cell))))))
-      (handler-case
-          (let ((*package* package))
-            (setf form (%read-form form-text)))
-        (error (c)
-          (setf code "reader-error")
-          (push (%condition-json c) conditions)
-          (return-from %eval-one
-            (finish))))
+                   :history history-snap
+                   :handler-attempts (nreverse (car handler-attempts-cell))))))
+      (unless multi-form?
+        (handler-case
+            (let ((*package* package))
+              (setf last-form (%read-form form-text)))
+          (error (c)
+            (setf code "reader-error")
+            (push (%condition-json c) conditions)
+            (return-from %eval-one
+              (finish)))))
       (handler-case
           (let ((*standard-output* out-stream)
                 (*error-output* err-stream)
@@ -1964,8 +2033,14 @@ sessions."
                 (*terminal-io* (make-two-way-stream in-stream out-stream))
                 (*standard-input* in-stream)
                 (*package* package))
-            (setf redefined (%record-redefinition form package))
-            (%with-repl-history (history)
+            (flet ((eval-user-form (form)
+                     (setf last-form form)
+                     (let ((record (%record-redefinition form *package*)))
+                       (when record
+                         (setf redefined record)))
+                     (setf returned-values
+                           (multiple-value-list (eval form)))))
+              (%with-repl-history (history)
               (let* ((record-signals? (getf options :record-signals))
                      (debug? (and job (getf options :debug)))
                      (handler-specs (%parse-handler-specs
@@ -2046,8 +2121,31 @@ sessions."
                                 #+sbcl heartbeat-timer
                                 #+sbcl cap-timer))
                       (unwind-protect
-                           (setf returned-values
-                                 (multiple-value-list (eval form)))
+                           (if multi-form?
+                               (with-input-from-string (region form-text)
+                                 (let ((saw-form nil))
+                                   (loop
+                                     (let ((next-form
+                                             (handler-case
+                                                 (%read-region-form region)
+                                               (error (c)
+                                                 (setf code "reader-error")
+                                                 (push (%condition-json c)
+                                                       conditions)
+                                                 (return-from %eval-one
+                                                   (finish))))))
+                                       (when (eq next-form 'eof)
+                                         (return))
+                                       (setf saw-form t)
+                                       (eval-user-form next-form)))
+                                   (unless saw-form
+                                     (let ((c (make-condition
+                                               'simple-error
+                                               :format-control "empty form")))
+                                       (setf code "reader-error")
+                                       (push (%condition-json c) conditions)
+                                       (return-from %eval-one (finish))))))
+                               (eval-user-form last-form))
                         #+sbcl
                         (when heartbeat-timer
                           (ignore-errors
@@ -2055,8 +2153,9 @@ sessions."
                         #+sbcl
                         (when cap-timer
                           (ignore-errors
-                           (sb-ext:unschedule-timer cap-timer)))))))))
-            (setf package *package*)
+                           (sb-ext:unschedule-timer cap-timer))))))))))
+            (setf *package* (%normalize-project-package *server* *package*)
+                  package *package*)
             ;; History is updated *only* when no override was specified --
             ;; the override is per-call scoped. Persistent package state
             ;; lives on the worker (the default worker for v1 callers,
@@ -2064,7 +2163,7 @@ sessions."
             (when (null override-pkg)
               (when *current-worker*
                 (setf (worker-package *current-worker*) *package*))
-              (handler-case (%update-history! history form returned-values)
+              (handler-case (%update-history! history last-form returned-values)
                 (error () nil))))
         (user-interrupt ()
           (setf code "interrupted")
@@ -2351,7 +2450,7 @@ NIL means the handler has already emitted its terminal frame."
 (defun %lookup-method (name)
   (cdr (assoc name +method-registry+ :test #'string=)))
 
-(defparameter +undiscoverable-methods+ '("eval" "shutdown" "query-response")
+(defparameter +undiscoverable-methods+ '("eval" "eval-region" "shutdown" "query-response")
   "Registered wire messages that are not part of public `repl call' discovery.")
 
 (defun %discoverable-method-spec-p (spec)
@@ -2626,9 +2725,11 @@ worker is changed."
   `stream'             -- emit incremental `event:stdout' / `event:stderr'
                           frames; long evals also get `event:heartbeat'
                           every 30 s with bytes-consed + gc time.
-  `query_interactive'  -- bind *standard-input* to a stream that emits
-                          `event:query'; client replies via `query-response'.
-  `debug'              -- pause on errors in the interactive debugger.
+   `query_interactive'  -- bind *standard-input* to a stream that emits
+                           `event:query'; client replies via `query-response'.
+   `multi_form'         -- read and evaluate every form in `form' sequentially,
+                           returning the last form's values.
+   `debug'              -- pause on errors in the interactive debugger.
   `record_signals'     -- collect non-error signaled conditions.
   `worker' / `concurrent' -- route to a named or one-shot worker.
   `handlers'           -- declarative restart auto-invocation.
@@ -2663,8 +2764,10 @@ lost."
                       :description "Lisp source for exactly one form.")
                 (list :name "package" :type :string :required nil
                       :description "Per-call package override.")
-                (list :name "stream" :type :boolean :required nil
-                      :description "Emit incremental stdout/stderr events.")
+                 (list :name "stream" :type :boolean :required nil
+                       :description "Emit incremental stdout/stderr events.")
+	                (list :name "multi_form" :type :boolean :required nil
+	                      :description "Read and evaluate every form in FORM sequentially.")
 	                (list :name "query_interactive" :type :boolean :required nil
 	                      :description "Bind *standard-input* to a bidirectional query stream.")
 	                (list :name "debug" :type :boolean :required nil
@@ -2698,6 +2801,40 @@ lost."
   :handler
   (lambda (server params id ctx)
     (%dispatch-eval server params id ctx))))
+
+(%register-method
+ (make-method-spec
+  :name "eval-region"
+  :summary "Evaluate a region containing zero or more Lisp forms."
+  :doc "Required: `forms'. Optional: `package', `worker'. Reads and evaluates
+FORMS sequentially in one worker turn, returning the last form's values and
+the final package. This is the wire primitive behind `clpm repl eval --stdin'."
+  :params (list (list :name "forms" :type :string :required t
+                      :description "Lisp source containing one or more forms.")
+                (list :name "package" :type :string :required nil
+                      :description "Per-call package override.")
+                (list :name "worker" :type :string :required nil
+                      :description "Run on a named worker; spawned if absent."))
+  :handler
+  (lambda (server params id ctx)
+    (let ((forms (%json-getf params "forms")))
+      (cond
+        ((not (stringp forms))
+         (%error-response id "protocol-error" "missing `forms' param"))
+        (t
+         (%dispatch-eval
+          server
+          (list :object
+                (append (list (cons "form" forms)
+                              (cons "multi_form" t))
+                        (when (%json-getf params "package")
+                          (list (cons "package"
+                                      (%json-getf params "package"))))
+                        (when (%json-getf params "worker")
+                          (list (cons "worker"
+                                      (%json-getf params "worker"))))))
+          id
+          ctx)))))))
 
 (%register-method
  (make-method-spec
@@ -3941,10 +4078,26 @@ server-owned debug session from a fresh connection."
   "Resolve SYM-NAME in PKG-NAME, defaulting to the server's persistent
 package. Returns the symbol or NIL."
   (let* ((pkg (cond
-                ((null pkg-name)
-                 (and server (server-current-package server)))
-                (t (%find-package-loose pkg-name)))))
-    (and pkg (find-symbol (string-upcase sym-name) pkg))))
+                 ((null pkg-name)
+                  (and server (server-current-package server)))
+                 (t (%resolve-package-for-server server pkg-name)))))
+    (and pkg
+         (or (multiple-value-bind (sym status)
+                 (find-symbol sym-name pkg)
+               (and status sym))
+             (and (position #\: sym-name)
+                  (handler-case
+                      (let ((*package* pkg)
+                            (*read-eval* nil))
+                        (multiple-value-bind (value end)
+                            (read-from-string sym-name nil nil)
+                          (and (= end (length sym-name))
+                               (symbolp value)
+                               value)))
+                    (error () nil)))
+             (multiple-value-bind (sym status)
+                 (find-symbol (string-upcase sym-name) pkg)
+               (and status sym))))))
 
 #+sbcl
 (defun %definition-source-json (def-source)
@@ -3955,7 +4108,7 @@ package. Returns the symbol or NIL."
          (plist (sb-introspect:definition-source-plist def-source)))
     (%json-object
      "file" (and pathname (namestring pathname))
-     "line" (and (consp form-path) (integerp (first form-path)) (first form-path))
+      "line" (%source-line-number pathname char-offset form-path)
      "form_path" (and form-path (%json-array
                                   (mapcar (lambda (e)
                                             (if (integerp e) e (princ-to-string e)))
@@ -4122,10 +4275,8 @@ macroexpands|specializes). Returns
     (declare (ignore ctx))
     (let* ((form-text (%json-getf params "form"))
            (recursive (%json-true-p (%json-getf params "recursive")))
-           (pkg-name (%json-getf params "package"))
-           (pkg (or (and pkg-name (%find-package-loose pkg-name))
-                    (and server (server-current-package server))
-                    (find-package "COMMON-LISP-USER"))))
+            (pkg-name (%json-getf params "package"))
+            (pkg (%reader-package-for-server server pkg-name)))
       (cond
         ((not (stringp form-text))
          (%error-response id "protocol-error" "missing `form' param"))
@@ -4199,11 +4350,12 @@ result carries `success', `output_truename', `warnings_p', `failure_p'."
         ((not (stringp path))
          (%error-response id "protocol-error" "missing `path' param"))
         (t
-         (handler-case
-             (let ((handler (lambda (c) (%emit-compile-diagnostic ctx c))))
-               (multiple-value-bind (truename warnings-p failure-p)
-                   (handler-bind ((condition handler))
-                     (compile-file path :verbose nil :print nil))
+          (handler-case
+              (let ((handler (lambda (c) (%emit-compile-diagnostic ctx c)))
+                    (*package* (%reader-package-for-server server nil)))
+                (multiple-value-bind (truename warnings-p failure-p)
+                    (handler-bind ((condition handler))
+                      (compile-file path :verbose nil :print nil))
                  (%success-response
                   id
                   (%json-object
@@ -4410,10 +4562,10 @@ element of the lambda list (including lambda-list keywords like
                       :description "Maximum candidates (default 50)."))
   :handler
   (lambda (server params id ctx)
-    (declare (ignore server ctx))
+    (declare (ignore ctx))
     (let* ((prefix (%json-getf params "prefix"))
            (pkg-name (%json-getf params "package"))
-           (pkg (and pkg-name (%find-package-loose pkg-name)))
+           (pkg (and pkg-name (%resolve-package-for-server server pkg-name)))
            (limit (or (%json-getf params "limit") 50))
            (upat (and (stringp prefix) (string-upcase prefix)))
            (names '()))
@@ -4804,25 +4956,40 @@ recorded by ASDF, plus its declared and resolved dependencies."
         (*print-pretty* nil))
     (%safe-prin1 value)))
 
-(defun %proper-list-p (x)
-  "T if X is a proper list (NIL or a cons whose final cdr is NIL)."
-  (or (null x)
-      (and (consp x)
-           (handler-case (and (listp (cdr (last x))) t)
-             (error () nil)))))
+(defun %proper-list-length (x)
+  "Return X's length when X is a proper list, otherwise NIL.
+
+Circular and dotted lists are not proper lists. This avoids `last' and
+`length', both of which can hang on circular structure."
+  (let ((seen (make-hash-table :test #'eq))
+        (tail x)
+        (len 0))
+    (loop
+      (cond
+        ((null tail)
+         (return len))
+        ((not (consp tail))
+         (return nil))
+        ((gethash tail seen)
+         (return nil))
+        (t
+         (setf (gethash tail seen) t)
+         (incf len)
+         (setf tail (cdr tail)))))))
 
 (defun %inspector-parts (value offset)
   "Render parts for VALUE starting from OFFSET. Returns
 (values parts kind total-count). Pagination is the caller's job: this
 slices [offset, offset+page-size)."
-  (let ((page +inspector-page-size+))
+  (let ((page +inspector-page-size+)
+        (proper-list-length (%proper-list-length value)))
     (cond
       ;; Proper lists: render as indexed elements.
-      ((%proper-list-p value)
-       (let* ((len (length value))
-              (start (max 0 (min offset len)))
-              (end (min (+ start page) len))
-              (parts (loop for i from start below end
+      (proper-list-length
+       (let* ((len proper-list-length)
+               (start (max 0 (min offset len)))
+               (end (min (+ start page) len))
+               (parts (loop for i from start below end
                            collect (%json-object
                                     "i" i
                                     "label" (princ-to-string i)
@@ -4863,18 +5030,7 @@ slices [offset, offset+page-size)."
                                     "repr" (%inspect-part-repr (aref value i))
                                     "kind" "elem"))))
          (values parts "vector" len)))
-      (list
-       (let* ((len (length value))
-              (start (max 0 (min offset len)))
-              (end (min (+ start page) len))
-              (parts (loop for i from start below end
-                           collect (%json-object
-                                    "i" i
-                                    "label" (princ-to-string i)
-                                    "repr" (%inspect-part-repr (nth i value))
-                                    "kind" "elem"))))
-         (values parts "list" len)))
-      (hash-table
+       (hash-table
        (let ((entries '())
              (i 0))
          (maphash
@@ -5337,10 +5493,8 @@ subsequent inspect-* RPCs."
     (declare (ignore ctx))
     (let* ((form-text (%json-getf params "form"))
            (mutable (%json-true-p (%json-getf params "mutable")))
-           (pkg-name (%json-getf params "package"))
-           (pkg (or (and pkg-name (%find-package-loose pkg-name))
-                    (and server (server-current-package server))
-                    (find-package "COMMON-LISP-USER"))))
+             (pkg-name (%json-getf params "package"))
+             (pkg (%reader-package-for-server server pkg-name)))
       (cond
         ((not (stringp form-text))
          (%error-response id "protocol-error" "missing `form' param"))
@@ -5425,7 +5579,7 @@ form again if you want to walk into it."
            (sess (and (stringp sid) (%lookup-inspector server sid)))
            (form-text (%json-getf params "form"))
            (pkg-name (%json-getf params "package"))
-           (pkg (or (and pkg-name (%find-package-loose pkg-name))
+           (pkg (or (and pkg-name (%resolve-package-for-server server pkg-name))
                     (and server (server-current-package server))
                     (find-package "COMMON-LISP-USER"))))
       (cond
@@ -5456,17 +5610,21 @@ form again if you want to walk into it."
 been opened with `mutable: true'. Returns the refreshed view."
   :params (list (list :name "session" :type :string :required t
                       :description "Inspector session id.")
-                (list :name "i" :type :integer :required t
-                      :description "Part index to overwrite.")
-                (list :name "form" :type :string :required t
-                      :description "Form whose value replaces the part."))
+                 (list :name "i" :type :integer :required t
+                       :description "Part index to overwrite.")
+                 (list :name "form" :type :string :required t
+                       :description "Form whose value replaces the part.")
+                 (list :name "package" :type :string :required nil
+                       :description "Reader package for FORM."))
   :handler
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (let* ((sid (%json-getf params "session"))
-           (sess (and (stringp sid) (%lookup-inspector server sid)))
-           (i (%json-getf params "i"))
-           (form-text (%json-getf params "form")))
+            (sess (and (stringp sid) (%lookup-inspector server sid)))
+            (i (%json-getf params "i"))
+            (form-text (%json-getf params "form"))
+            (pkg-name (%json-getf params "package"))
+            (pkg (%reader-package-for-server server pkg-name)))
       (cond
         ((null sess)
          (%error-response id "eval-error" "no such inspector session"))
@@ -5476,10 +5634,12 @@ been opened with `mutable: true'. Returns the refreshed view."
         ((or (not (integerp i)) (not (stringp form-text)))
          (%error-response id "protocol-error" "missing `i' or `form' param"))
         (t
-         (handler-case
-             (let* ((focus (%inspector-current sess))
-                    (parsed (%read-form form-text))
-                    (new-value (eval parsed)))
+          (handler-case
+              (let* ((focus (%inspector-current sess))
+                     (parsed (let ((*package* pkg))
+                               (%read-form form-text)))
+                     (new-value (let ((*package* pkg))
+                                  (eval parsed))))
                (typecase focus
                  (cons (case i
                          (0 (setf (car focus) new-value))
@@ -5568,17 +5728,21 @@ active when load returned."
         ((not (stringp path))
          (%error-response id "protocol-error" "missing `path' param"))
         (t
-         (handler-case
-             (let ((handler (lambda (c) (%emit-compile-diagnostic ctx c))))
-               (handler-bind ((condition handler))
-                 (load path :verbose nil :print nil))
-               (when server
-                 (setf (server-current-package server) *package*))
-               (%success-response
-                id
-                (%json-object
-                 "success" t
-                 "package" (%public-package-name *package* server))))
+          (handler-case
+              (let ((handler (lambda (c) (%emit-compile-diagnostic ctx c)))
+                    (*package* (%reader-package-for-server server nil)))
+                (handler-bind ((condition handler))
+                  (load path :verbose nil :print nil))
+                (when server
+                  (setf (server-current-package server)
+                        (%normalize-project-package server *package*)))
+                (%success-response
+                 id
+                 (%json-object
+                  "success" t
+                  "package" (%public-package-name
+                             (%normalize-project-package server *package*)
+                             server))))
            (error (c)
              (%error-response id "eval-error" (princ-to-string c))))))))))
 
@@ -5602,6 +5766,7 @@ keeps the worker fast-path identical to v1."
                (when (and (stringp v) (plusp (length v)))
                  (setf options (list* plist-key v options))))))
       (maybe-bool "stream" :stream)
+      (maybe-bool "multi_form" :multi-form)
       (maybe-bool "debug" :debug)
       (maybe-bool "query_interactive" :query-interactive)
       (maybe-bool "record_signals" :record-signals)

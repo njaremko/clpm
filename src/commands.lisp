@@ -2157,7 +2157,7 @@ malformed."
   (let ((pid (%bridge-read-pidfile pid-path)))
     (when (or (null pid)
               (not (%bridge-pid-alive-p pid))
-              (not (probe-file sock-path)))
+              (not (uiop:file-exists-p sock-path)))
       (%bridge-clean-lifecycle-files sock-path pid-path)
       t)))
 
@@ -2193,18 +2193,21 @@ workflows, not the runtime image."
           (load config)
         (error (c)
           (log-error "Failed to load project config: ~A" c)
-          (return-from %bridge-load-project))))
+          (error c))))
     (when (uiop:file-exists-p manifest)
-      (handler-case
-          (let* ((proj (clpm.project:read-project-file manifest))
-                 (systems (%bridge-project-preload-systems proj)))
-            (dolist (sys systems)
-              (handler-case
-                  (asdf:load-system sys :verbose nil)
-                (error (c)
-                  (log-error "Failed to preload system ~A: ~A" sys c)))))
-        (error (c)
-          (log-error "Failed to parse project manifest: ~A" c))))))
+      (let* ((proj (handler-case
+                       (clpm.project:read-project-file manifest)
+                     (error (c)
+                       (log-error "Failed to parse project manifest: ~A" c)
+                       (error c))))
+             (systems (%bridge-project-preload-systems proj)))
+        (dolist (sys systems)
+          (handler-case
+              (asdf:load-system sys :verbose nil)
+            (error (c)
+              (log-error "Failed to preload system ~A: ~A" sys c)
+              (error c))))))
+    t))
 
 ;; Foreground `daemon' never touches stdio. Detachment is done by the parent
 ;; via `uiop:launch-program` which inherits the right file descriptors --
@@ -2432,16 +2435,22 @@ because the daemon couldn't come up."
                (error (c)
                  (log-error "Failed to launch daemon: ~A" c)
                  (return-from %bridge-daemon-start 1)))
-             (loop for i from 0 below 50
-                   while (not (probe-file sock))
-                   do (sleep 0.1))
-             (cond
-               ((probe-file sock)
-                (log-info "Daemon started: ~A" sock)
-                0)
-               (t
-                (log-error "Daemon failed to bind socket within 5s (see ~A)" log)
-                1)))))
+              (let ((ready nil))
+                (loop for i from 0 below 50
+                      do (multiple-value-bind (state _ping _obj)
+                             (%bridge-ping-daemon sock project-root)
+                           (declare (ignore _ping _obj))
+                           (when (eq state :running)
+                             (setf ready t)
+                             (return)))
+                         (sleep 0.1))
+                (cond
+                  (ready
+                   (log-info "Daemon started: ~A" sock)
+                   0)
+                  (t
+                   (log-error "Daemon failed to become ready within 5s (see ~A)" log)
+                   1))))))
         (t
          (handler-case
              (clpm.repl:call-with-project-server-reservation
@@ -2452,32 +2461,33 @@ because the daemon couldn't come up."
                        (progn
                          (sb-posix:chdir (namestring project-root))
                          (uiop:with-current-directory (project-root)
-                           (ensure-directories-exist sock)
-                           (%bridge-write-pidfile pid)
-                           (unless no-load
-                             (%bridge-load-project project-root))
-                           (unwind-protect
-                                (handler-case
-                                    (let ((tcp-p (%bridge-windows-p)))
-                                      (if tcp-p
-                                          (clpm.repl:start-server
-                                           :transport-kind :tcp
-                                           :port-path sock
-                                           :log-path log
-                                           :project-root
-                                           (%bridge-project-root-id project-root))
-                                          (clpm.repl:start-server
-                                           :transport-kind :unix
-                                           :socket-path sock
-                                           :log-path log
-                                           :project-root
-                                           (%bridge-project-root-id project-root)))
-                                      0)
-                                  (error (c)
-                                    (format *error-output*
-                                            "daemon crashed: ~A~%" c)
-                                    1))
-                             (ignore-errors (delete-file pid)))))
+                            (ensure-directories-exist sock)
+                            (%bridge-write-pidfile pid)
+                            (unwind-protect
+                                 (progn
+                                   (unless no-load
+                                     (%bridge-load-project project-root))
+                                   (handler-case
+                                       (let ((tcp-p (%bridge-windows-p)))
+                                         (if tcp-p
+                                             (clpm.repl:start-server
+                                              :transport-kind :tcp
+                                              :port-path sock
+                                              :log-path log
+                                              :project-root
+                                              (%bridge-project-root-id project-root))
+                                             (clpm.repl:start-server
+                                              :transport-kind :unix
+                                              :socket-path sock
+                                              :log-path log
+                                              :project-root
+                                              (%bridge-project-root-id project-root)))
+                                         0)
+                                     (error (c)
+                                       (format *error-output*
+                                               "daemon crashed: ~A~%" c)
+                                       1)))
+                              (ignore-errors (delete-file pid)))))
                     (when previous-cwd
                       (ignore-errors (sb-posix:chdir previous-cwd)))))))
            (error (c)
@@ -2751,12 +2761,22 @@ JSON object `{type, restart, args}'. Returns NIL on a malformed spec."
                   (cons "restart" restart-text)
                   (cons "args" (list :array (or args '()))))))))
 
+(defun %bridge-read-all (stream)
+  "Read STREAM to a string. Used for `clpm repl eval --stdin'."
+  (with-output-to-string (out)
+    (loop for ch = (read-char stream nil nil)
+          while ch
+          do (write-char ch out))))
+
 (defun %bridge-eval (args)
   "Handle `clpm repl eval FORM [--package PKG] [--worker W]
-                                 [--handler TYPE=RESTART[:ARG,...]]...
-                                 [--no-autostart] [--json]' or
-          `clpm repl eval FORM [--package PKG] [--worker W]
-                                 [--handler TYPE=RESTART[:ARG,...]]...
+                                  [--handler TYPE=RESTART[:ARG,...]]...
+                                  [--no-autostart] [--json]' or
+          `clpm repl eval --stdin [--package PKG] [--worker W]
+                                  [--handler TYPE=RESTART[:ARG,...]]...
+                                  [--no-autostart] [--json]' or
+           `clpm repl eval FORM [--package PKG] [--worker W]
+                                  [--handler TYPE=RESTART[:ARG,...]]...
                                  --debug [--restart NAME] [--frame N]
                                  [--frame-eval FORM] [--keep]
                                  [--break-on TYPE] [--timeout-ms N]
@@ -2772,6 +2792,7 @@ are read+evaluated daemon-side at recovery time.
 prints the first debugger stop and aborts it; with `--keep' it leaves a
 server-owned session for later `call debug-* ...' requests."
   (let ((form nil)
+        (stdin nil)
         (package nil)
         (worker nil)
         (autostart t)
@@ -2786,6 +2807,7 @@ server-owned session for later `call debug-* ...' requests."
         (timeout-ms nil)
         (handlers '())
         (package-seen nil)
+        (stdin-seen nil)
         (worker-seen nil)
         (restart-seen nil)
         (frame-seen nil)
@@ -2821,6 +2843,12 @@ server-owned session for later `call debug-* ...' requests."
              (let ((parsed (%bridge-parse-handler-spec spec)))
                (unless parsed (return-from %bridge-eval 1))
                (push parsed handlers))))
+          ((string= arg "--stdin")
+           (when stdin-seen
+             (log-error "Duplicate option: --stdin")
+             (return-from %bridge-eval 1))
+           (setf stdin-seen t
+                 stdin t))
           ((string= arg "--no-autostart") (setf autostart nil))
           ((string= arg "--json") (setf json t))
           ((string= arg "--debug") (setf debug t))
@@ -2892,8 +2920,14 @@ server-owned session for later `call debug-* ...' requests."
           (t
            (log-error "Unknown eval option: ~A" arg)
            (return-from %bridge-eval 1)))))
+    (when (and stdin form)
+      (log-error "Use either FORM or --stdin, not both")
+      (return-from %bridge-eval 1))
+    (when stdin
+      (setf form (%bridge-read-all *standard-input*)))
     (unless form
       (log-error "Usage: clpm repl eval FORM [--package PKG] [--worker W] [--handler T=R[:A,...]]... [--no-autostart] [--json]")
+      (log-error "       clpm repl eval --stdin [--package PKG] [--worker W] [--handler T=R[:A,...]]... [--no-autostart] [--json]")
       (log-error "       clpm repl eval FORM [--package PKG] [--worker W] [--handler T=R[:A,...]]... --debug [debug-options] [--no-autostart]")
       (return-from %bridge-eval 1))
     (when (and debug json)
@@ -2961,8 +2995,9 @@ server-owned session for later `call debug-* ...' requests."
                                     :arg (nreverse restart-args)
                                     :frame frame
                                     :frame-eval frame-eval
-                                    :keep keep
-                                    :break-on break-on
+                                     :keep keep
+                                     :multi-form stdin
+                                     :break-on break-on
                                     :timeout-ms timeout-ms
                                     :handlers (and handlers
                                                    (list :array
@@ -2972,8 +3007,9 @@ server-owned session for later `call debug-* ...' requests."
                       (clpm.repl:close-connection conn)))))))))
         (t
          (let* ((params (%bridge-make-params
-                         (list (cons "form" form)
-                               (cons "package" package)
+                          (list (cons "form" form)
+                                (cons "multi_form" (and stdin t))
+                                (cons "package" package)
                                (cons "worker" worker)
                                (cons "handlers"
                                      (when handlers
@@ -3056,8 +3092,8 @@ server-owned session for later `call debug-* ...' requests."
                (emit-json "not-running")
                (format t "not running~%"))
            0)
-          ((or (not (%bridge-pid-alive-p existing))
-               (not (probe-file sock)))
+           ((or (not (%bridge-pid-alive-p existing))
+                (not (uiop:file-exists-p sock)))
            (%bridge-clean-lifecycle-files sock pid)
            (if *bridge-cli-json*
                (emit-json "stale")
@@ -3123,8 +3159,8 @@ are dropped, matching `%bridge-make-params'."
         ((null existing)
          (format t "not running~%")
          0)
-        ((or (not (%bridge-pid-alive-p existing))
-             (not (probe-file sock)))
+         ((or (not (%bridge-pid-alive-p existing))
+              (not (uiop:file-exists-p sock)))
          (%bridge-clean-lifecycle-files sock pid)
          (format t "cleaned stale pidfile~%")
          0)
@@ -3364,9 +3400,11 @@ quotes around every non-JSON atom."
 (defun %bridge-rejected-call-method-message (method)
   (cond
     ((string= method "eval")
-     "Use `clpm repl eval FORM` instead of `clpm repl call eval`")
+      "Use `clpm repl eval FORM` instead of `clpm repl call eval`")
+    ((string= method "eval-region")
+      "Use `clpm repl eval --stdin` instead of `clpm repl call eval-region`")
     ((string= method "shutdown")
-     "Use `clpm repl daemon --stop` instead of `clpm repl call shutdown`")
+      "Use `clpm repl daemon --stop` instead of `clpm repl call shutdown`")
     ((string= method "query-response")
      "query-response is a continuation message, not a repl call method")
     (t nil)))
@@ -3454,10 +3492,11 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
          (kept nil)
          (params (%bridge-params-with-project-root
                   (%bridge-make-params
-                   (list (cons "form" form)
-                         (cons "package" (getf opts :package))
-                         (cons "worker" (getf opts :worker))
-                         (cons "debug" t)
+                    (list (cons "form" form)
+                          (cons "package" (getf opts :package))
+                          (cons "worker" (getf opts :worker))
+                          (cons "multi_form" (getf opts :multi-form))
+                          (cons "debug" t)
                          (cons "break_on" (getf opts :break-on))
                          (cons "max_real_ms" (getf opts :timeout-ms))
                          (cons "handlers" (getf opts :handlers))))
@@ -3548,10 +3587,10 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
         (cond
           ((eq resp :no-daemon) 2)
           ((eq resp :io-error)
-           (cond
-             (kept 3)
-             (t
-              (log-error "I/O error during debug session") 2)))
+            (cond
+              (kept 0)
+              (t
+               (log-error "I/O error during debug session") 2)))
           (*bridge-cli-json*
            (%bridge-emit-json resp)
            (if (%bridge-err resp)

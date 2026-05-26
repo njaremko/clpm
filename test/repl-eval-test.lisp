@@ -88,6 +88,23 @@
                      "expected elapsed_ms"))))
 (format t "  OK~%")
 
+(format t "Test: eval-region reads and evaluates forms sequentially~%")
+(with-daemon
+    (lambda (sock)
+      (let* ((resp (clpm.repl:send-request
+                    sock "eval-region"
+                    :params (list :object
+                                  (list (cons "forms"
+                                              "(defpackage :rb-eval-region (:use :cl))
+(in-package :rb-eval-region)
+(defun region-value () 88)
+(region-value)")))))
+             (result (lookup resp "result")))
+        (assert-true result "eval-region failed: ~S" resp)
+        (assert-string= "88" (lookup result "value"))
+        (assert-string= "RB-EVAL-REGION" (lookup result "package")))))
+(format t "  OK~%")
+
 (format t "Test: stdout capture~%")
 (with-daemon
     (lambda (sock)

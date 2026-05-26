@@ -21,8 +21,14 @@
   (apply #'format *error-output* (concatenate 'string "FAIL: " fmt "~%") args)
   (sb-ext:exit :code 1))
 
+(defvar *last-cli-args* nil)
+(defvar *last-cli-stdout* nil)
+(defvar *last-cli-stderr* nil)
+
 (defun assert-eql (expected actual)
-  (unless (eql expected actual) (fail "expected ~S, got ~S" expected actual)))
+  (unless (eql expected actual)
+    (fail "expected ~S, got ~S~@[~%args: ~S~]~@[~%stdout:~%~A~]~@[~%stderr:~%~A~]"
+          expected actual *last-cli-args* *last-cli-stdout* *last-cli-stderr*)))
 
 (defun assert-true (x fmt &rest args)
   (unless x (apply #'fail fmt args)))
@@ -40,9 +46,12 @@
         (err (make-string-output-stream)))
     (let ((*standard-output* out) (*error-output* err))
       (let ((rc (clpm:run-cli args)))
+        (setf *last-cli-args* args
+              *last-cli-stdout* (get-output-stream-string out)
+              *last-cli-stderr* (get-output-stream-string err))
         (values rc
-                (get-output-stream-string out)
-                (get-output-stream-string err))))))
+                *last-cli-stdout*
+                *last-cli-stderr*)))))
 
 (defun make-short-temp-dir ()
   "Create a short temp directory so Unix-domain socket paths stay portable."
@@ -171,11 +180,21 @@
                    (run-cli-captured '("repl" "call" "current-package"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "COMMON-LISP"))
-               (run-cli-captured '("repl" "call" "set-package"
-                                   "--name" "COMMON-LISP-USER"))
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl" "call" "list-workers"))
-                 (assert-eql 0 rc)
+                (run-cli-captured '("repl" "call" "set-package"
+                                    "--name" "COMMON-LISP-USER"))
+                (multiple-value-bind (rc stdout)
+                    (run-cli-captured '("repl" "eval" "(in-package :cl-user)"))
+                  (assert-eql 0 rc)
+                  (assert-contains stdout "COMMON-LISP-USER"))
+                (multiple-value-bind (rc stdout)
+                    (run-cli-captured
+                     '("repl" "eval"
+                       "(eq *package* (find-package \"COMMON-LISP-USER\"))"))
+                  (assert-eql 0 rc)
+                  (assert-contains stdout "=> NIL"))
+                (multiple-value-bind (rc stdout)
+                    (run-cli-captured '("repl" "call" "list-workers"))
+                  (assert-eql 0 rc)
                  (assert-contains stdout "default")
                  (assert-not-contains stdout "CLPM.REPL.USER.")
                  (assert-not-contains stdout (namestring (truename proj))))
@@ -255,9 +274,9 @@
                  (declare (ignore stdout))
                  (assert-eql 3 rc)
                  (assert-contains stderr "debugger entered"))
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl" "eval"
-                                       "(restart-case (/ 1 0) (use-value (v) v))"
+                (multiple-value-bind (rc stdout)
+                    (run-cli-captured '("repl" "eval"
+                                        "(restart-case (/ 1 0) (use-value (v) v))"
                                        "--debug" "--restart" "USE-VALUE"
                                        "--arg" "42"))
                  (assert-eql 0 rc)
@@ -291,10 +310,24 @@
                      (declare (ignore _stdout))
                      (assert-eql 1 rc)
                      (assert-contains stderr expected))))
-               (format t "  eval --debug OK~%")
+                (format t "  eval --debug OK~%")
 
-               (format t "Test: kept debug sessions are managed through call~%")
-               (multiple-value-bind (rc stdout stderr)
+                (format t "Test: eval --stdin reads and evaluates a region~%")
+                (let ((*standard-input*
+                        (make-string-input-stream
+                         "(defpackage :rb-stdin-region (:use :cl))
+(in-package :rb-stdin-region)
+(defun value () 55)
+(value)")))
+                  (multiple-value-bind (rc stdout)
+                      (run-cli-captured '("repl" "eval" "--stdin"))
+                    (assert-eql 0 rc)
+                    (assert-contains stdout "=> 55")
+                    (assert-contains stdout "package: RB-STDIN-REGION")))
+                (format t "  eval --stdin OK~%")
+
+                (format t "Test: kept debug sessions are managed through call~%")
+                (multiple-value-bind (rc stdout stderr)
                    (run-cli-captured
                     '("repl" "eval"
                       "(progn
@@ -302,11 +335,11 @@
                          (defun rb-cli-debug-keep-target (x)
                            (error \"x=~A\" x))
                          (rb-cli-debug-keep-target 7))"
-                      "--debug" "--keep"))
-                 (declare (ignore stdout))
-                 (assert-eql 3 rc)
-                 (assert-contains stderr "session:")
-                 (assert-contains stderr "RB-CLI-DEBUG-KEEP-TARGET"))
+                       "--debug" "--keep"))
+                  (declare (ignore stdout))
+                  (assert-eql 0 rc)
+                  (assert-contains stderr "session:")
+                  (assert-contains stderr "RB-CLI-DEBUG-KEEP-TARGET"))
                (multiple-value-bind (rc stdout)
                    (run-cli-captured '("repl" "call"
                                        "list-debug-sessions"))
@@ -325,10 +358,15 @@
                  (assert-contains stdout "aborted"))
                (format t "  kept debug session OK~%")
 
-               (format t "Test: source RPCs and redefinition drift use call~%")
-               (multiple-value-bind (rc stdout)
-                   (run-cli-captured '("repl" "call" "macroexpand"
-                                       "--form" "(when t :ok)"))
+                (format t "Test: source RPCs and redefinition drift use call~%")
+                (multiple-value-bind (rc stdout)
+                    (run-cli-captured '("repl" "call" "set-package"
+                                        "--name" "COMMON-LISP-USER"))
+                  (assert-eql 0 rc)
+                  (assert-contains stdout "COMMON-LISP-USER"))
+                (multiple-value-bind (rc stdout)
+                    (run-cli-captured '("repl" "call" "macroexpand"
+                                        "--form" "(when t :ok)"))
                  (assert-eql 0 rc)
                  (assert-contains stdout "IF"))
                (let ((src (merge-pathnames "hello.lisp" proj)))

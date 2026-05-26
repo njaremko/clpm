@@ -84,6 +84,37 @@
       (assert-equal-string "50" (lookup (fifth parts) "repr")))))
 (format t "  inspect list OK~%")
 
+(format t "Test: inspect circular list does not hang~%")
+(with-daemon
+  (lambda (sock)
+    (let ((resp nil)
+          (done nil)
+          (worker nil))
+      (unwind-protect
+           (progn
+             (setf worker
+                   (sb-thread:make-thread
+                    (lambda ()
+                      (setf resp
+                            (do-rpc sock "inspect"
+                                    (list (cons "form"
+                                                "(let ((x (list :a :b)))
+                                                   (setf (cdr (last x)) x)
+                                                   x)")))
+                            done t))
+                    :name "test-inspect-circular"))
+             (loop for i from 0 below 20
+                   while (not done)
+                   do (sleep 0.1))
+             (unless done
+               (fail "circular list inspection hung"))
+             (let ((result (lookup resp "result")))
+               (assert-true result "expected inspect result, got ~S" resp)
+               (assert-equal-string "cons" (lookup result "kind"))))
+        (when (and worker (sb-thread:thread-alive-p worker))
+          (ignore-errors (sb-thread:terminate-thread worker)))))))
+(format t "  circular list OK~%")
+
 ;;; ----------------------------------------------------------------------------
 ;;; #121: inspect-into descends; inspect-pop restores.
 
@@ -147,6 +178,32 @@
                      (lookup (lookup view "result") "parts"))))
         (assert-equal-string "42" (lookup (second parts) "repr"))))))
 (format t "  mutate OK~%")
+
+(format t "Test: inspect-mutate reads forms in the current package~%")
+(with-daemon
+  (lambda (sock)
+    (dolist (form '("(defpackage :rb-inspector-package (:use :cl))"
+                   "(in-package :rb-inspector-package)"
+                   "(defparameter replacement 77)"))
+      (let ((resp (do-rpc sock "eval" (list (cons "form" form)))))
+        (assert-true (lookup resp "result")
+                     "setup failed for ~S: ~S" form resp)))
+    (let* ((init (do-rpc sock "inspect"
+                          (list (cons "form" "(vector 1 2 3)")
+                                (cons "mutable" t))))
+           (sid (lookup (lookup init "result") "session")))
+      (let ((mutate (do-rpc sock "inspect-mutate"
+                            (list (cons "session" sid)
+                                  (cons "i" 1)
+                                  (cons "form" "replacement")))))
+        (assert-true (lookup mutate "result")
+                     "inspect-mutate should resolve REPLACEMENT: ~S"
+                     mutate))
+      (let* ((view (do-rpc sock "inspect-pop"
+                            (list (cons "session" sid))))
+             (parts (array-items (lookup (lookup view "result") "parts"))))
+        (assert-equal-string "77" (lookup (second parts) "repr"))))))
+(format t "  mutate package OK~%")
 
 (format t "Test: inspect mutable=false rejects mutation~%")
 (with-daemon

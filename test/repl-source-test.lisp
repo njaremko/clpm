@@ -113,6 +113,42 @@
                    "no function definition for FORMAT: ~S" entries))))
 (format t "  find-definition OK~%")
 
+(format t "Test: find-definition reports real source line numbers~%")
+(with-daemon
+  (lambda (sock)
+    (multiple-value-bind (name package dir)
+        (make-temp-system)
+      (let ((src (write-test-system dir name package ":line-test")))
+        (clpm.repl:send-request
+         sock "eval"
+         :params (list :object
+                       (list (cons "form" (register-system-dir-form dir)))))
+        (let ((load-resp
+                (clpm.repl:send-request
+                 sock "load-system"
+                 :params (list :object (list (cons "name" name))))))
+          (assert-true (lookup load-resp "result")
+                       "load-system failed: ~S" load-resp))
+        (let* ((resp (clpm.repl:send-request
+                      sock "find-definition"
+                      :params (list :object
+                                    (list (cons "symbol" "value")
+                                          (cons "package" package)
+                                          (cons "kind" "function")))))
+               (entries (array-items (lookup (lookup resp "result")
+                                            "entries")))
+                (entry (find (namestring (truename src)) entries
+                             :test (lambda (path e)
+                                     (let* ((loc (lookup e "location"))
+                                            (file (lookup loc "file")))
+                                      (and file (string= path file))))))
+               (line (and entry (lookup (lookup entry "location") "line"))))
+          (assert-true entry "no entry for temp source: ~S" resp)
+          (assert-true (= 3 line)
+                       "expected defun on line 3, got ~S in ~S"
+                       line resp))))))
+(format t "  source line OK~%")
+
 ;;; ----------------------------------------------------------------------------
 ;;; #133: xref `who-calls' includes at least one caller of FORMAT.
 
@@ -153,6 +189,26 @@
         (assert-true found
                      "expected XREF-CALLER among entries: ~S" entries)))))
 (format t "  xref OK~%")
+
+(format t "Test: introspection resolves exact mixed-case symbols~%")
+(with-daemon
+  (lambda (sock)
+    (let ((def (clpm.repl:send-request
+                sock "eval"
+                :params (list :object
+                              (list (cons "form"
+                                          "(defun |MixedCaseFn| (x) x)"))))))
+      (assert-true (lookup def "result") "defun failed: ~S" def))
+    (let* ((resp (clpm.repl:send-request
+                  sock "arglist"
+                  :params (list :object
+                                (list (cons "symbol" "MixedCaseFn")
+                                      (cons "package" "CL-USER")))))
+           (result (lookup resp "result")))
+      (assert-true result "mixed-case symbol was not resolved: ~S" resp)
+      (assert-true (search "X" (lookup result "arglist"))
+                   "arglist did not mention X: ~S" resp))))
+(format t "  mixed-case symbol OK~%")
 
 ;;; ----------------------------------------------------------------------------
 ;;; #136: macroexpand-1 of WHEN.

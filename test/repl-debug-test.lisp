@@ -237,6 +237,96 @@ can keep reading event frames)."
         (clpm.repl:close-connection conn)))))
 (format t "  debug-eval-in-frame OK~%")
 
+(format t "Test: debug actions read forms in the stopped worker package~%")
+(with-daemon
+  (lambda (sock)
+    (let ((setup-forms '("(defpackage :rb-debug-package (:use :cl))"
+                         "(in-package :rb-debug-package)"
+                         "(defparameter *restart-value* 123)"
+                         "(declaim (optimize (debug 3) (safety 3) (speed 0)))"
+                         "(defun package-frame-target (x) (error \"x=~A\" x))")))
+      (dolist (form setup-forms)
+        (let ((resp (clpm.repl:send-request
+                     sock "eval"
+                     :params (clpm.repl::%json-object
+                              "form" form
+                              "worker" "package-debugger"))))
+          (assert-true (lookup resp "result")
+                       "setup failed for ~S: ~S" form resp))))
+    (let* ((conn (clpm.repl:open-connection sock))
+           (eval-id 120)
+           (frame-result nil))
+      (unwind-protect
+           (let ((resp
+                   (clpm.repl:send-on-connection
+                    conn "eval"
+                    :id eval-id
+                    :params (clpm.repl::%json-object
+                             "form" "(package-frame-target 7)"
+                             "worker" "package-debugger"
+                             "debug" t)
+                    :on-event
+                    (lambda (frame)
+                      (cond
+                        ((string= "debugger-entered" (lookup frame "event"))
+                         (let ((frame-index
+                                 (frame-index-named frame
+                                                    "PACKAGE-FRAME-TARGET")))
+                           (assert-true frame-index
+                                        "could not find package frame in ~S"
+                                        frame)
+                           (send-on-thread
+                            conn
+                            (clpm.repl::%json-object
+                             "id" eval-id
+                             "method" "debug-eval-in-frame"
+                             "params" (clpm.repl::%json-object
+                                       "frame" frame-index
+                                       "form" "(+ x *restart-value*)")))))
+                        ((string= "frame-eval-result" (lookup frame "event"))
+                         (setf frame-result frame)
+                         (send-on-thread
+                          conn
+                          (clpm.repl::%json-object
+                           "id" eval-id
+                           "method" "debug-abort"))))
+                      nil))))
+             (declare (ignore resp))
+             (assert-true frame-result
+                          "never got package-aware frame-eval-result")
+             (assert-equal-string "130" (lookup frame-result "value")))
+        (clpm.repl:close-connection conn)))
+    (let* ((conn (clpm.repl:open-connection sock))
+           (eval-id 121))
+      (unwind-protect
+           (let ((resp
+                   (clpm.repl:send-on-connection
+                    conn "eval"
+                    :id eval-id
+                    :params (clpm.repl::%json-object
+                             "form" "(restart-case (error \"need value\") (use-value (v) v))"
+                             "worker" "package-debugger"
+                             "debug" t)
+                    :on-event
+                    (lambda (frame)
+                      (when (string= "debugger-entered" (lookup frame "event"))
+                        (send-on-thread
+                         conn
+                         (clpm.repl::%json-object
+                          "id" eval-id
+                          "method" "debug-invoke-restart"
+                          "params" (clpm.repl::%json-object
+                                    "name" "use-value"
+                                    "args" (list :array
+                                                  (list "*restart-value*"))))))
+                      nil))))
+             (let ((result (lookup resp "result")))
+               (assert-true result
+                            "expected restart to resume, got ~S" resp)
+               (assert-equal-string "123" (lookup result "value"))))
+        (clpm.repl:close-connection conn)))))
+(format t "  debug action package OK~%")
+
 ;;; ----------------------------------------------------------------------------
 ;;; Debug sessions are server-owned, not connection-owned.
 

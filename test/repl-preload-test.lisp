@@ -83,5 +83,48 @@
                    "MARKER not bound to :preloaded; got ~S" val))
     (format t "  preload OK~%")))
 
+(format t "Test: daemon startup fails when project preload fails~%")
+(clpm.store:with-temp-dir (tmp)
+  (let* ((proj (merge-pathnames "broken/" tmp))
+         (clpm-dir (merge-pathnames ".clpm/" proj))
+         (manifest (merge-pathnames "clpm.project" proj))
+         (asdf-config (merge-pathnames "asdf-config.lisp" clpm-dir))
+         (sock (namestring (merge-pathnames "repl.sock" clpm-dir)))
+         (rc nil)
+         (thread nil))
+    (ensure-directories-exist clpm-dir)
+    (with-open-file (s manifest :direction :output :if-exists :supersede
+                                :external-format :utf-8)
+      (write-string
+       "(:project :name \"broken\" :version \"0.1.0\"
+  :systems (\"rb-missing-system\") :registries ())" s))
+    (with-open-file (s asdf-config :direction :output :if-exists :supersede
+                                   :external-format :utf-8)
+      (write-string ";; empty source registry for missing system test~%" s))
+    (unwind-protect
+         (progn
+           (setf thread
+                 (sb-thread:make-thread
+                  (lambda ()
+                    (uiop:with-current-directory (proj)
+                      (setf rc (funcall (find-symbol "%BRIDGE-DAEMON-START"
+                                                     (find-package "CLPM.COMMANDS"))
+                                        '()))))
+                  :name "test-repl-broken-preload"))
+           (loop for i from 0 below 50
+                 while (and (null rc)
+                            (not (uiop:file-exists-p sock)))
+                 do (sleep 0.1))
+           (when (uiop:file-exists-p sock)
+             (handler-case (clpm.repl:send-request sock "shutdown")
+               (error () nil))
+             (fail "daemon started despite a missing preload system"))
+           (assert-true (eql 1 rc)
+                        "expected daemon start rc 1, got ~S" rc))
+      (when (and thread (sb-thread:thread-alive-p thread))
+        (ignore-errors (sb-thread:terminate-thread thread)))
+      (ignore-errors (delete-file sock))))
+  (format t "  broken preload rejected OK~%"))
+
 (format t "~%REPL preload tests PASSED!~%")
 (sb-ext:exit :code 0)
