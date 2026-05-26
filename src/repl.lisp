@@ -4580,6 +4580,14 @@ macroexpands|specializes). Returns
                            (%sexpr-binding-json binding package))
                          (reverse bindings))))))
 
+(defun %sexpr-path-with-child-json (file top-level-form child-path)
+  (%json-object
+   "file" file
+   "top_level" (clpm.sexpr-edit:source-form-ordinal top-level-form)
+   "kind" (clpm.sexpr-edit:source-form-kind top-level-form)
+   "name" (clpm.sexpr-edit:source-form-name top-level-form)
+   "child_path" (%json-array child-path)))
+
 (defun %sexpr-search-one-top-level (file top-level-form pattern package)
   (let ((matches '()))
     (labels ((walk (form child-path)
@@ -5110,6 +5118,243 @@ macroexpands|specializes). Returns
                                 (%error-response id "eval-error"
                                                  (princ-to-string c)))))))))))))))))))
 
+(defun %sexpr-body-start-index (form)
+  (when (and (consp form) (symbolp (first form)))
+    (let ((operator (symbol-name (first form))))
+      (cond
+        ((member operator '("PROGN" "LOCALLY" "WHEN" "UNLESS")
+                 :test #'string=)
+         (if (string= operator "PROGN") 1 2))
+        ((member operator '("LET" "LET*" "FLET" "LABELS" "MACROLET"
+                            "SYMBOL-MACROLET" "DOLIST" "DOTIMES")
+                 :test #'string=)
+         2)
+        ((string= operator "DESTRUCTURING-BIND") 3)
+        ((string= operator "MULTIPLE-VALUE-BIND") 3)
+        ((string= operator "WITH-OPEN-FILE") 2)
+        (t nil)))))
+
+(defun %sexpr-source-body-origins (source-form)
+  (let ((elements (%sexpr-proper-list-elements source-form))
+        (body-start (%sexpr-body-start-index source-form)))
+    (when (and elements body-start (<= body-start (length elements)))
+      (loop for body-form in (nthcdr body-start elements)
+            for index from body-start
+            collect (cons body-form (list index))))))
+
+(defun %sexpr-find-source-body-origin (expansion-form source-body-origins)
+  (cdr (find expansion-form source-body-origins
+             :key #'car
+             :test #'equal)))
+
+(defun %sexpr-origin-json (kind reason file top-level-form child-path)
+  (%json-object
+   "kind" kind
+   "reason" reason
+   "path" (and top-level-form
+               (%sexpr-path-with-child-json file top-level-form child-path))))
+
+(defun %sexpr-print-form-json (form package)
+  (let ((*package* package)
+        (*print-case* :downcase)
+        (*print-pretty* nil)
+        (*print-circle* t))
+    (prin1-to-string form)))
+
+(defun %sexpr-expansion-node-origin (expansion-form expanded-p file
+                                     top-level-form source-body-origins)
+  (let ((source-body-path
+          (%sexpr-find-source-body-origin expansion-form
+                                          source-body-origins)))
+    (cond
+      (source-body-path
+       (%sexpr-origin-json "source" "body_form" file top-level-form
+                           source-body-path))
+      (expanded-p
+       (%sexpr-origin-json "generated" "macroexpansion" file
+                           top-level-form nil))
+      (t
+       (%sexpr-origin-json "source" "unchanged" file top-level-form nil)))))
+
+(defun %sexpr-expansion-tree-json (expansion-form expansion-path expanded-p
+                                   file top-level-form source-body-origins
+                                   package nodes)
+  (let ((origin (%sexpr-expansion-node-origin
+                 expansion-form expanded-p file top-level-form
+                 source-body-origins))
+        (children '()))
+    (let ((node (%json-object
+                 "expansion_path" (%json-array expansion-path)
+                 "form" (%sexpr-print-form-json expansion-form package)
+                 "origin" origin)))
+      (push node (car nodes))
+      (let ((elements (%sexpr-proper-list-elements expansion-form)))
+        (when elements
+          (setf children
+                (loop for child in elements
+                      for index from 0
+                      collect (%sexpr-expansion-tree-json
+                               child (append expansion-path (list index))
+                               expanded-p file top-level-form
+                               source-body-origins package nodes)))))
+      (%json-object
+       "expansion_path" (%json-array expansion-path)
+       "form" (%sexpr-print-form-json expansion-form package)
+       "origin" origin
+       "children" (%json-array children)))))
+
+(defun %sexpr-expansion-path (path)
+  (let ((raw (%sexpr-path-field path "expansion_path")))
+    (cond
+      ((null raw) nil)
+      ((and (%json-array-p raw)
+            (every #'integerp (%json-array-items raw)))
+       (%json-array-items raw))
+      (t :invalid))))
+
+(defun %sexpr-form-at-path (form path)
+  (let ((current form))
+    (dolist (index path (values current t))
+      (let ((elements (%sexpr-proper-list-elements current)))
+        (unless (and elements (<= 0 index) (< index (length elements)))
+          (return-from %sexpr-form-at-path (values nil nil)))
+        (setf current (nth index elements))))))
+
+(defun %sexpr-selected-expansion (server path recursive id)
+  (let ((file (%sexpr-path-field path "file")))
+    (cond
+      ((not (stringp file))
+       (values nil nil nil nil nil
+               (%error-response id "protocol-error"
+                                "`path.file' must be a string")))
+      (t
+       (multiple-value-bind (document error-response)
+           (%sexpr-read-document server file id)
+         (if error-response
+             (values nil nil nil nil nil error-response)
+             (let* ((actual-file
+                      (namestring
+                       (clpm.sexpr-edit:source-document-pathname document)))
+                    (forms (%sexpr-selected-forms document path)))
+               (cond
+                 ((null forms)
+                  (values nil nil nil nil nil
+                          (%error-response id "eval-error"
+                                           "no form matched source path")))
+                 ((rest forms)
+                  (values nil nil nil nil nil
+                          (%success-response
+                           id
+                           (%json-object
+                            "status" "ambiguous"
+                            "file" actual-file
+                            "candidates" (%json-array
+                                          (mapcar
+                                           (lambda (form)
+                                             (%sexpr-form-summary-json
+                                              actual-file form))
+                                           forms))
+                            "diagnostics"
+                            (%sexpr-diagnostics-json document)))))
+                 (t
+                  (let* ((top-level-form (first forms))
+                         (pkg-name
+                           (clpm.sexpr-edit:source-form-package
+                            top-level-form))
+                         (pkg (%reader-package-for-server server pkg-name)))
+                    (cond
+                      ((null pkg)
+                       (values nil nil nil nil nil
+                               (%error-response
+                                id "eval-error"
+                                (format nil "no such package: ~A"
+                                        pkg-name))))
+                      (t
+                       (handler-case
+                           (let* ((source
+                                    (clpm.sexpr-edit:source-form-text
+                                     top-level-form))
+                                  (parsed (let ((*package* pkg))
+                                            (%read-form source))))
+                             (multiple-value-bind (expansion expanded-p)
+                                 (if recursive
+                                     (macroexpand parsed)
+                                     (macroexpand-1 parsed))
+                               (values actual-file top-level-form parsed
+                                       expansion expanded-p nil)))
+                         (error (c)
+                           (values nil nil nil nil nil
+                                   (%error-response id "eval-error"
+                                                    (princ-to-string c)))))))))))))))))
+
+(defun %dispatch-sexpr-expansion-of (server params id)
+  (let ((path (%json-getf params "path"))
+        (recursive (%json-true-p (%json-getf params "recursive"))))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      (t
+       (multiple-value-bind (actual-file top-level-form parsed expansion
+                             expanded-p error-response)
+           (%sexpr-selected-expansion server path recursive id)
+         (or error-response
+             (let* ((pkg (%reader-package-for-server
+                          server
+                          (clpm.sexpr-edit:source-form-package
+                           top-level-form)))
+                    (source-body-origins
+                      (%sexpr-source-body-origins parsed))
+                    (nodes (list nil))
+                    (tree (%sexpr-expansion-tree-json
+                           expansion nil expanded-p actual-file top-level-form
+                           source-body-origins pkg nodes)))
+               (%success-response
+                id
+                (%json-object
+                 "status" "ok"
+                 "file" actual-file
+                 "path" (%sexpr-path-json actual-file top-level-form)
+                 "recursive" (if recursive t :false)
+                 "expanded_p" (and expanded-p t)
+                 "source" (clpm.sexpr-edit:source-form-text top-level-form)
+                 "expansion" (%sexpr-print-form-json expansion pkg)
+                 "tree" tree
+                 "nodes" (%json-array (nreverse (car nodes))))))))))))
+
+(defun %dispatch-sexpr-source-origin (server params id)
+  (let ((path (%json-getf params "path"))
+        (recursive (%json-true-p (%json-getf params "recursive"))))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      ((eq (%sexpr-expansion-path path) :invalid)
+       (%error-response id "protocol-error"
+                        "`path.expansion_path' must be an array of integers"))
+      (t
+       (multiple-value-bind (actual-file top-level-form parsed expansion
+                             expanded-p error-response)
+           (%sexpr-selected-expansion server path recursive id)
+         (or error-response
+             (let* ((expansion-path (%sexpr-expansion-path path))
+                    (source-body-origins (%sexpr-source-body-origins
+                                          parsed)))
+               (multiple-value-bind (node-form found-p)
+                   (%sexpr-form-at-path expansion expansion-path)
+                 (%success-response
+                  id
+                  (%json-object
+                   "status" "ok"
+                   "file" actual-file
+                   "path" (%sexpr-path-json actual-file top-level-form)
+                   "expansion_path" (%json-array expansion-path)
+                   "origin" (if found-p
+                                (%sexpr-expansion-node-origin
+                                 node-form expanded-p actual-file
+                                 top-level-form source-body-origins)
+                                (%sexpr-origin-json
+                                 "unknown" "expansion_path_not_found"
+                                 actual-file nil nil))))))))))))
+
 (defun %sexpr-child-path (path)
   (let ((raw (%sexpr-path-field path "child_path")))
     (cond
@@ -5468,6 +5713,40 @@ returns candidates without expanding anything."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-macroexpand-at server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-expansion-of"
+  :summary "Return a macroexpansion tree with source-origin metadata."
+  :doc "Required: `path'. Optional: `recursive'. The response contains the
+printed expansion, a recursive tree, and a flat node list. Origins are
+conservative: nodes copied from recognized body positions point to their
+source child path, generated nodes point to the macro call, and unresolved
+origin queries are explicit."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with file plus selector.")
+                (list :name "recursive" :type :boolean :required nil
+                      :description "Fully macroexpand instead of one step."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-expansion-of server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-source-origin"
+  :summary "Map an expansion node path back to its closest source origin."
+  :doc "Required: `path'. The path selects a source form and may include
+`expansion_path', an array of zero-based positions into the expanded form.
+Optional `recursive' chooses the same expansion mode as `sexpr-expansion-of'."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with expansion_path.")
+                (list :name "recursive" :type :boolean :required nil
+                      :description "Fully macroexpand instead of one step."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-source-origin server params id))))
 
 (%register-method
  (make-method-spec

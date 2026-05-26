@@ -127,7 +127,7 @@
                        (random (expt 2 32)))))
          (path (merge-pathnames "macro.lisp" dir)))
     (write-file path "(in-package #:cl-user)
-(when t :ok)
+(when t (list :ok))
 ")
     path))
 
@@ -263,6 +263,10 @@
                    "sexpr-package-diagnostics missing from methods")
       (assert-true (member "sexpr-macroexpand-at" method-names :test #'string=)
                    "sexpr-macroexpand-at missing from methods")
+      (assert-true (member "sexpr-expansion-of" method-names :test #'string=)
+                   "sexpr-expansion-of missing from methods")
+      (assert-true (member "sexpr-source-origin" method-names :test #'string=)
+                   "sexpr-source-origin missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
@@ -660,6 +664,80 @@
           (assert-true (search "IF" (lookup macro-result "expansion"))
                        "WHEN expansion should contain IF: ~S"
                        macro-result))
+        (let* ((macro-path (make-macro-source-file))
+               (macro-file (namestring macro-path))
+               (expansion-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-expansion-of"
+                  :params (json-object
+                           "path" (json-object "file" macro-file
+                                               "top_level" 1))))
+               (expansion-result (lookup expansion-resp "result"))
+               (nodes (array-items (lookup expansion-result "nodes")))
+               (root-origin (lookup (lookup (first nodes) "origin")
+                                    "kind"))
+               (source-node
+                 (find-if
+                  (lambda (node)
+                    (let ((origin (lookup node "origin")))
+                      (and (string= "source" (lookup origin "kind"))
+                           (search "list" (lookup node "form")))))
+                  nodes))
+               (source-origin (and source-node
+                                   (lookup source-node "origin")))
+               (source-path (and source-origin
+                                 (lookup source-origin "path")))
+               (source-child-path
+                 (and source-path
+                      (array-items (lookup source-path "child_path")))))
+          (assert-true expansion-result
+                       "expansion-of failed: ~S" expansion-resp)
+          (assert-equal "ok" (lookup expansion-result "status")
+                        "expansion-of should resolve uniquely")
+          (assert-equal "generated" root-origin
+                        "expansion root should be generated")
+          (assert-true source-node
+                       "body form should retain source origin: ~S"
+                       expansion-result)
+          (assert-equal '(2) source-child-path
+                        "body origin should point at WHEN body")
+          (let* ((origin-resp
+                   (clpm.repl:send-request
+                    sock "sexpr-source-origin"
+                    :params (json-object
+                             "path" (json-object
+                                     "file" macro-file
+                                     "top_level" 1
+                                     "expansion_path"
+                                     (lookup source-node
+                                             "expansion_path")))))
+                 (origin-result (lookup origin-resp "result"))
+                 (origin (lookup origin-result "origin"))
+                 (origin-path (lookup origin "path")))
+            (assert-true origin-result
+                         "source-origin failed: ~S" origin-resp)
+            (assert-equal "source" (lookup origin "kind")
+                          "source-origin should return body source")
+            (assert-equal '(2)
+                          (array-items (lookup origin-path
+                                               "child_path"))
+                          "source-origin returned wrong child path"))
+          (let* ((unknown-resp
+                   (clpm.repl:send-request
+                    sock "sexpr-source-origin"
+                    :params (json-object
+                             "path" (json-object
+                                     "file" macro-file
+                                     "top_level" 1
+                                     "expansion_path"
+                                     (list :array (list 99))))))
+                 (unknown-result (lookup unknown-resp "result"))
+                 (unknown-origin (lookup unknown-result "origin")))
+            (assert-true unknown-result
+                         "unknown source-origin failed: ~S"
+                         unknown-resp)
+            (assert-equal "unknown" (lookup unknown-origin "kind")
+                          "invalid expansion path should be explicit")))
         (let* ((scope-path (make-scope-source-file))
                (scope-file (namestring scope-path))
                (bindings-resp

@@ -174,7 +174,7 @@ Acceptance evidence:
 
 ### SE-010: Source And Expansion Dual View
 
-Status: open
+Status: in-progress
 
 Relate source paths to macroexpanded forms. `sexpr-expansion-of` should return an expansion tree with best-effort origin metadata. `sexpr-source-origin` should map an expansion node back to the closest source path when that mapping is known.
 
