@@ -4148,6 +4148,23 @@ KIND-KW filters by kind (:function, :method, :macro, :class, :variable,
   (declare (ignore symbol kind-kw))
   nil)
 
+#+sbcl
+(defun %function-object-name (function)
+  "Return SBCL's best name for FUNCTION, or NIL when it is anonymous."
+  (handler-case
+      (let ((name (sb-kernel:%fun-name function)))
+        (and name
+             (not (eq name :anonymous))
+             name))
+    (error () nil)))
+
+#+sbcl
+(defun %definition-source-for-function-name (name)
+  "Return one function definition source for NAME, if SBCL can locate it."
+  (handler-case
+      (first (sb-introspect:find-definition-sources-by-name name :function))
+    (error () nil)))
+
 (%register-method
  (make-method-spec
   :name "find-definition"
@@ -4202,9 +4219,15 @@ DIRECTION is one of :callers, :callees, :references, :sets, :binds,
                 (:macroexpands (sb-introspect:who-macroexpands symbol))
                 (:specializes (sb-introspect:who-specializes-directly symbol))
                 (:callees
-                 ;; sb-introspect doesn't expose who-callees directly; fall
-                 ;; back to function-precedence + lambda-list inspection.
-                 nil)
+                 (when (fboundp symbol)
+                   (loop for callee in
+                         (sb-introspect:find-function-callees
+                          (fdefinition symbol))
+                         for name = (%function-object-name callee)
+                         for src = (and name
+                                        (%definition-source-for-function-name
+                                         name))
+                         collect (cons (or name callee) src))))
                 (t nil))))
         (loop for entry in raw
               collect

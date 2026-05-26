@@ -190,6 +190,43 @@
                      "expected XREF-CALLER among entries: ~S" entries)))))
 (format t "  xref OK~%")
 
+(format t "Test: xref callees tracks live in-image relationships~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((define-resp
+             (clpm.repl:send-request
+              sock "eval"
+              :params (list :object
+                            (list (cons "form"
+                                        "(progn (defun xref-callees-inner () 'inner)
+                                                (defun xref-callees-outer () (xref-callees-inner))
+                                                :ok)"))))))
+      (assert-true (lookup define-resp "result")
+                   "couldn't define callee/caller: ~S" define-resp))
+    (let* ((resp (clpm.repl:send-request
+                  sock "xref"
+                  :params (list :object
+                                (list (cons "symbol" "xref-callees-outer")
+                                      (cons "direction" "callees")
+                                      (cons "package" "CL-USER")))))
+           (result (lookup resp "result"))
+           (entries (array-items (lookup result "entries"))))
+      (assert-true result "xref returned no result: ~S" resp)
+      (assert-true (consp entries)
+                   "expected xref-callees-outer to have callees, got: ~S"
+                   entries)
+      (let ((found nil))
+        (dolist (e entries)
+          (when (and (consp e) (eq (car e) :object))
+            (let ((nm (cdr (assoc "name" (cadr e) :test #'string=))))
+              (when (and (stringp nm)
+                         (search "XREF-CALLEES-INNER" (string-upcase nm)))
+                (setf found t)))))
+        (assert-true found
+                     "expected XREF-CALLEES-INNER among entries: ~S"
+                     entries)))))
+(format t "  xref callees OK~%")
+
 (format t "Test: introspection resolves exact mixed-case symbols~%")
 (with-daemon
   (lambda (sock)
