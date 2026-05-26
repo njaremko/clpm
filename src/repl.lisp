@@ -5959,9 +5959,132 @@ macroexpands|specializes). Returns
                (%success-response
                 id
                  (%json-object
-                  "file" actual-file
-                  "lints" (%json-array lints)
+                 "file" actual-file
+                 "lints" (%json-array lints)
                  "lint_count" (length lints))))))))))
+
+(defun %string-prefix-p (prefix string)
+  (and (<= (length prefix) (length string))
+       (string= prefix string :end2 (length prefix))))
+
+(defun %sexpr-lambda-list-body-variable (lambda-list)
+  (loop for tail on lambda-list
+        for item = (first tail)
+        when (and (symbolp item)
+                  (member (symbol-name item) '("&BODY" "&REST")
+                          :test #'string=))
+          return (second tail)))
+
+(defun %sexpr-lambda-list-nested-binding (item)
+  (cond
+    ((and (consp item) (symbolp (first item)))
+     (first item))
+    ((and (consp item)
+          (consp (first item))
+          (symbolp (first (first item))))
+     (first (first item)))
+    (t nil)))
+
+(defun %sexpr-macro-introduced-bindings (lambda-list)
+  (let ((bindings '()))
+    (dolist (item lambda-list (nreverse bindings))
+      (when (%lambda-list-keyword-p item)
+        (return (nreverse bindings)))
+      (let ((binding (%sexpr-lambda-list-nested-binding item)))
+        (when binding
+          (push (%json-object
+                 "name" (symbol-name binding)
+                 "kind" "likely_lexical"
+                 "source" "lambda_list_shape"
+                 "confidence" 0.65)
+                bindings))))))
+
+(defun %sexpr-macro-shape-json (file source-form macro-form package)
+  (let* ((name-symbol (second macro-form))
+         (name (symbol-name name-symbol))
+         (lambda-list (third macro-form))
+         (body-variable (%sexpr-lambda-list-body-variable lambda-list))
+         (introduced-bindings
+           (%sexpr-macro-introduced-bindings lambda-list))
+         (with-style-p (%string-prefix-p "WITH-" name))
+         (define-style-p (%string-prefix-p "DEFINE-" name))
+         (kind (cond
+                 ((and with-style-p body-variable introduced-bindings)
+                  "binding_macro")
+                 (define-style-p
+                  "definition")
+                 (body-variable
+                  "body_macro")
+                 (t "unknown")))
+         (confidence (cond
+                       ((string= kind "binding_macro") 0.78)
+                       ((string= kind "definition") 0.70)
+                       ((string= kind "body_macro") 0.55)
+                       (t 0.25))))
+    (%json-object
+     "status" "ok"
+     "file" file
+     "path" (%sexpr-path-json file source-form)
+     "macro" name
+     "package" (%public-package-name package)
+     "inferred" t
+     "kind" kind
+     "confidence" confidence
+     "uncertain" (%sexpr-boolean-json (< confidence 0.8))
+     "lambda_list" (%sexpr-print-form-json lambda-list package)
+     "body_variable" (and (symbolp body-variable)
+                          (symbol-name body-variable))
+     "definition_name_position" (and define-style-p 0)
+     "introduced_bindings" (%json-array introduced-bindings))))
+
+(defun %dispatch-sexpr-macro-shape (server params id)
+  (let ((file (%json-getf params "file"))
+        (name (%json-getf params "name")))
+    (cond
+      ((not (stringp file))
+       (%error-response id "protocol-error" "missing `file' param"))
+      ((not (stringp name))
+       (%error-response id "protocol-error" "missing `name' param"))
+      (t
+       (multiple-value-bind (document error-response)
+           (%sexpr-read-document server file id)
+         (or error-response
+             (let* ((actual-file
+                      (namestring
+                       (clpm.sexpr-edit:source-document-pathname document)))
+                    (matches
+                      (clpm.sexpr-edit:find-source-forms
+                       document :kind "defmacro" :name name)))
+               (cond
+                 ((null matches)
+                  (%error-response id "eval-error"
+                                   "no defmacro matched requested name"))
+                 ((rest matches)
+                  (%success-response
+                   id
+                   (%json-object
+                    "status" "ambiguous"
+                    "file" actual-file
+                    "candidates"
+                    (%json-array
+                     (mapcar (lambda (form)
+                               (%sexpr-form-summary-json actual-file form))
+                             matches)))))
+                 (t
+                  (let* ((source-form (first matches))
+                         (package
+                           (or (and (clpm.sexpr-edit:source-form-package
+                                     source-form)
+                                    (find-package
+                                     (clpm.sexpr-edit:source-form-package
+                                      source-form)))
+                               (find-package "COMMON-LISP-USER"))))
+                    (%success-response
+                     id
+                     (%sexpr-macro-shape-json
+                      actual-file source-form
+                      (clpm.sexpr-edit:source-form-form source-form)
+                      package))))))))))))
 
 (defun %sexpr-child-path (path)
   (let ((raw (%sexpr-path-field path "child_path")))
@@ -6429,6 +6552,23 @@ source path, printed form, certainty, and suggested next inspection or edit."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-lint server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-macro-shape"
+  :summary "Infer likely editing metadata for a source defmacro."
+  :doc "Required: `file' and `name'. This source-only inference reports the
+likely macro kind, confidence, uncertainty, body variable, likely introduced
+bindings, and definition-name position for common `with-*' and `define-*'
+macro shapes. Results are explicitly inferred and never reported as certain."
+  :params (list (list :name "file" :type :string :required t
+                      :description "Relative or absolute Lisp source path.")
+                (list :name "name" :type :string :required t
+                      :description "Defmacro name to inspect."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-macro-shape server params id))))
 
 (%register-method
  (make-method-spec

@@ -374,7 +374,7 @@ Acceptance evidence:
 
 ### SE-026: Macro Shape Inference
 
-Status: open
+Status: in-progress
 
 Infer likely macro contracts from `defmacro` lambda lists and names when no explicit contract exists. The result must include confidence and uncertainty, never a false claim of certainty.
 

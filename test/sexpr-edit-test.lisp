@@ -232,6 +232,24 @@
 ")
     path))
 
+(defun make-macro-shape-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-macro-shape-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "macro-shape.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defmacro with-foo ((foo arg) &body body)
+  `(let ((,foo ,arg)) ,@body))
+
+(defmacro define-thing (name args &body body)
+  `(defun ,name ,args ,@body))
+
+(defmacro odd-macro (x)
+  x)
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -336,6 +354,8 @@
                    "sexpr-compare-image-source missing from methods")
       (assert-true (member "sexpr-lint" method-names :test #'string=)
                    "sexpr-lint missing from methods")
+      (assert-true (member "sexpr-macro-shape" method-names :test #'string=)
+                   "sexpr-macro-shape missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
@@ -954,6 +974,55 @@
                          "lint missing suggestion: ~S" lint)
             (assert-true (lookup lint "certainty")
                          "lint missing certainty: ~S" lint)))
+        (let* ((shape-path (make-macro-shape-source-file))
+               (shape-file (namestring shape-path))
+               (with-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-macro-shape"
+                  :params (json-object "file" shape-file
+                                       "name" "with-foo")))
+               (with-result (lookup with-resp "result"))
+               (bindings (array-items
+                          (lookup with-result "introduced_bindings")))
+               (define-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-macro-shape"
+                  :params (json-object "file" shape-file
+                                       "name" "define-thing")))
+               (define-result (lookup define-resp "result"))
+               (odd-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-macro-shape"
+                  :params (json-object "file" shape-file
+                                       "name" "odd-macro")))
+               (odd-result (lookup odd-resp "result")))
+          (assert-true with-result "with macro shape failed: ~S"
+                       with-resp)
+          (assert-equal "binding_macro" (lookup with-result "kind")
+                        "with macro should infer binding shape")
+          (assert-equal "BODY" (lookup with-result "body_variable")
+                        "with macro should expose body variable")
+          (assert-true (find "FOO" bindings
+                             :key (lambda (binding)
+                                    (lookup binding "name"))
+                             :test #'string=)
+                       "with macro should infer introduced binding: ~S"
+                       with-result)
+          (assert-true (lookup with-result "uncertain")
+                       "inferred macro shape should expose uncertainty")
+          (assert-true define-result
+                       "define macro shape failed: ~S" define-resp)
+          (assert-equal "definition" (lookup define-result "kind")
+                        "define macro should infer definition shape")
+          (assert-equal 0 (lookup define-result
+                                  "definition_name_position")
+                        "define macro should infer name position")
+          (assert-true odd-result "odd macro shape failed: ~S"
+                       odd-resp)
+          (assert-equal "unknown" (lookup odd-result "kind")
+                        "unfamiliar macro shape should stay unknown")
+          (assert-true (lookup odd-result "uncertain")
+                       "unknown macro shape should be uncertain"))
         (let* ((scope-path (make-scope-source-file))
                (scope-file (namestring scope-path))
                (bindings-resp
