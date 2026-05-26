@@ -386,6 +386,63 @@
 (format t "  reload-failed OK~%")
 
 ;;; ----------------------------------------------------------------------------
+;;; File-level watches should load package-less source into the same package
+;;; that ordinary REPL evals use.
+
+(format t "Test: watched files load in the current REPL package~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((dir (make-watch-dir))
+           (file (format nil "~Apackage-target.lisp" dir))
+           (package (format nil "CLPM-REPL-WATCH-PACKAGE-~A"
+                            (random (expt 2 32))))
+           (id-box (sb-concurrency:make-mailbox))
+           (reload-box (sb-concurrency:make-mailbox))
+           (defpackage-resp (do-rpc sock "eval"
+                                    (list (cons "form"
+                                                (format nil
+                                                        "(defpackage #:~A (:use #:cl))"
+                                                        package))))))
+      (assert-true (lookup defpackage-resp "result")
+                   "failed to define watch package: ~S" defpackage-resp)
+      (let ((set-package-resp (do-rpc sock "set-package"
+                                      (list (cons "name" package)))))
+        (assert-true (lookup set-package-resp "result")
+                     "failed to set watch package: ~S" set-package-resp))
+      (let ((watcher
+              (sb-thread:make-thread
+               (lambda ()
+                 (do-rpc sock "watch"
+                         (list (cons "dir" dir))
+                         :on-event
+                         (lambda (frame)
+                           (let ((ev (lookup frame "event")))
+                             (cond
+                               ((string= ev "watch-acknowledged")
+                                (sb-concurrency:send-message
+                                 id-box (lookup frame "id")))
+                               ((string= ev "file-reloaded")
+                                (sb-concurrency:send-message
+                                 reload-box frame))))
+                           nil)))
+               :name "test-watch-current-package")))
+        (let ((wid (receive-message-or-fail id-box "watch package acknowledgement")))
+          (sleep 1.2)
+          (write-file file "(defun watched-package-target () :loaded)")
+          (receive-message-or-fail reload-box "watch package reload")
+          (do-rpc sock "unwatch" (list (cons "id" wid)))
+          (sb-thread:join-thread watcher)
+          (let* ((resp (do-rpc sock "eval"
+                               (list (cons "form"
+                                           "(watched-package-target)"))))
+                 (result (lookup resp "result"))
+                 (value (and result (lookup result "value"))))
+            (assert-true (and value (search "LOADED" value))
+                         "watch reload should define in current package: ~S"
+                         resp)))))))
+(format t "  current-package watch reload OK~%")
+
+;;; ----------------------------------------------------------------------------
 ;;; watch-system watches ASDF component files and reloads through ASDF, not by
 ;;; direct-loading the changed file. Changing a macro file must recompile the
 ;;; dependent user file, otherwise MACRO-VALUE would keep returning :OLD.

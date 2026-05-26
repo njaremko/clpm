@@ -3103,6 +3103,7 @@ unwinds. Any in-flight evals are interrupted via the unwind-protect."
 
 (defstruct watch
   (id 0 :type integer)
+  server
   (kind :file :type keyword)
   (dir "" :type string)
   (glob "*.lisp" :type string)
@@ -3287,11 +3288,13 @@ unwinds. Any in-flight evals are interrupted via the unwind-protect."
             do (setf (gethash path (watch-mtimes watch)) mtime))
       t)))
 
-(defun %watch-load-file (path)
+(defun %watch-load-file (server path)
   "Load PATH and return `(list :ok? :diagnostics)' for the watcher to
 broadcast. Errors are captured rather than re-signaled."
   (let ((diags '())
-        (ok? t))
+        (ok? t)
+        (package (or (and server (server-current-package server))
+                     (find-package "COMMON-LISP-USER"))))
     (handler-case
         (handler-bind ((warning
                          (lambda (c)
@@ -3300,7 +3303,8 @@ broadcast. Errors are captured rather than re-signaled."
                                   "message" (princ-to-string c))
                                  diags)
                            (muffle-warning c))))
-          (load path :verbose nil :print nil))
+          (let ((*package* package))
+            (load path :verbose nil :print nil)))
       (error (c)
         (setf ok? nil)
         (push (%json-object
@@ -3343,7 +3347,7 @@ still attached. Failures (closed socket) are swallowed."
     (values (nreverse changed) (nreverse removed))))
 
 (defun %watch-load-changed-file (watch path)
-  (let ((reload (%watch-load-file path)))
+  (let ((reload (%watch-load-file (watch-server watch) path)))
     (cond
       ((cdr (assoc :ok? reload))
        (%watch-emit watch "file-reloaded"
@@ -3751,6 +3755,7 @@ out so the watcher's `watch' request finally completes."
   (clpm.repl.compat:with-mutex ((server-watches-mutex server))
     (let* ((id (incf (server-watch-counter server)))
             (w (make-watch :id id
+                           :server server
                            :kind kind
                            :dir dir
                            :glob glob
