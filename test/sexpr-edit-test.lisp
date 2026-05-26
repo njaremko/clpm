@@ -589,6 +589,9 @@
                    "sexpr-affected-files missing from methods")
       (assert-true (member "sexpr-validate-edit" method-names :test #'string=)
                    "sexpr-validate-edit missing from methods")
+      (assert-true (member "sexpr-generate-test" method-names
+                            :test #'string=)
+                   "sexpr-generate-test missing from methods")
       (assert-true (member "sexpr-repair-suggestions" method-names
                             :test #'string=)
                    "sexpr-repair-suggestions missing from methods")
@@ -981,6 +984,66 @@
              (let ((fasl (make-pathname :type "fasl"
                                         :defaults ok-path)))
                (when (probe-file fasl) (delete-file fasl))))))
+        (let* ((dir (uiop:ensure-directory-pathname
+                     (format nil "/tmp/clpm-sexpr-edit-generated-test-~A/"
+                             (random (expt 2 32)))))
+               (example-output (merge-pathnames "example-test.lisp" dir))
+               (example-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-generate-test"
+                  :params (json-object
+                           "form" "(+ 1 2)"
+                           "output_file" (namestring example-output)
+                           "test_name" "captured arithmetic")))
+               (example-result (lookup example-resp "result"))
+               (example-validation
+                 (lookup example-result "validation"))
+               (definition-source
+                 (make-validation-source-file
+                  "(in-package #:cl-user)
+
+(defun generated-target () 42)
+"))
+               (definition-output
+                 (merge-pathnames "definition-test.lisp" dir))
+               (definition-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-generate-test"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" (namestring definition-source)
+                                   "kind" "defun"
+                                   "name" "generated-target")
+                           "output_file" (namestring definition-output)
+                           "test_name" "generated definition")))
+               (definition-result (lookup definition-resp "result"))
+               (definition-validation
+                 (lookup definition-result "validation")))
+          (assert-true example-result
+                       "REPL example test generation failed: ~S"
+                       example-resp)
+          (assert-equal "lightweight_sbcl_script"
+                        (lookup example-result "style")
+                        "generated test should use SBCL script style")
+          (assert-true (probe-file example-output)
+                       "REPL example test file was not written")
+          (assert-true (lookup example-validation "success")
+                       "generated REPL example test should validate: ~S"
+                       example-validation)
+          (assert-true (search "(multiple-value-list (+ 1 2))"
+                               (read-file-string example-output))
+                       "generated example should capture action form")
+          (assert-true definition-result
+                       "definition test generation failed: ~S"
+                       definition-resp)
+          (assert-true (probe-file definition-output)
+                       "definition test file was not written")
+          (assert-true (lookup definition-validation "success")
+                       "generated definition test should validate: ~S"
+                       definition-validation)
+          (assert-true (search "(fboundp symbol)"
+                               (read-file-string definition-output))
+                       "definition smoke test should assert fboundp"))
         (let* ((repair-path (make-repair-source-file))
                (repair-file (namestring repair-path))
                (repair-resp

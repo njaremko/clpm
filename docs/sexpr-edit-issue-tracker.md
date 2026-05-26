@@ -398,7 +398,7 @@ Acceptance evidence:
 
 ### SE-028: Test Generation From Forms And REPL Examples
 
-Status: open
+Status: done
 
 Generate test scaffolding from selected definitions and captured REPL examples. The tool should inspect existing test style where possible and create a focused test with clear setup, action, and assertion sections.
 
