@@ -72,7 +72,16 @@
                (assert-true (= (getf build :jobs) 4)
                             "Expected project build settings to override globals")
                (assert-true (equal (getf build :compile) '(:speed 2))
-                            "Expected global build settings to be preserved"))))
+                            "Expected global build settings to be preserved"))
+           
+           ;; Test plist-merge functionality directly
+           (let* ((base '(:jobs 2 :compile (:speed 2) :safety 1))
+                  (override '(:jobs 4 :safety 3))
+                  (merged (clpm.config::plist-merge base override)))
+             (assert-true (= (getf merged :jobs) 4) "plist-merge failed for jobs")
+             (assert-true (equal (getf merged :compile) '(:speed 2)) "plist-merge failed for compile")
+             (assert-true (= (getf merged :safety) 3) "plist-merge failed for safety")
+             (assert-true (= (length merged) 6) "plist-merge should not duplicate keys"))))
       (if old-home
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME")))))

@@ -22,48 +22,62 @@
 (defun source-path (tree-sha256)
   "Return path for source tree with given hash."
   (let ((tree-sha256 (%sha256-hex-digest tree-sha256 "source tree identity")))
-    (merge-pathnames (format nil "sources/sha256/~A/" tree-sha256)
-                     (clpm.platform:store-dir))))
+    (uiop:merge-pathnames*
+     (make-pathname :directory `(:relative "sources" "sha256" ,tree-sha256))
+     (clpm.platform:store-dir))))
 
 (defun artifact-path (artifact-sha256)
   "Return path for artifact with given hash."
   (let ((artifact-sha256 (%sha256-hex-digest artifact-sha256 "artifact identity")))
-    (merge-pathnames (format nil "artifacts/sha256/~A" artifact-sha256)
-                     (clpm.platform:store-dir))))
+    (uiop:merge-pathnames*
+     (make-pathname :directory '(:relative "artifacts" "sha256")
+                    :name artifact-sha256)
+     (clpm.platform:store-dir))))
 
 (defun %artifact-lock-path (artifact-sha256)
   (let ((artifact-sha256 (%sha256-hex-digest artifact-sha256 "artifact identity")))
-    (merge-pathnames (format nil "artifacts/sha256/.~A.lock" artifact-sha256)
-                     (clpm.platform:store-dir))))
+    (uiop:merge-pathnames*
+     (make-pathname :directory '(:relative "artifacts" "sha256")
+                    :name (format nil ".~A" artifact-sha256)
+                    :type "lock")
+     (clpm.platform:store-dir))))
 
 (defun %artifact-temp-path (artifact-sha256)
   (let ((artifact-sha256 (%sha256-hex-digest artifact-sha256 "artifact identity")))
-    (merge-pathnames (format nil "artifacts/sha256/.~A.~D.tmp"
-                             artifact-sha256
-                             (random (expt 2 32)))
-                     (clpm.platform:store-dir))))
+    (uiop:merge-pathnames*
+     (make-pathname :directory '(:relative "artifacts" "sha256")
+                    :name (format nil ".~A.~D" artifact-sha256 (random (expt 2 32)))
+                    :type "tmp")
+     (clpm.platform:store-dir))))
 
 (defun build-path (build-id)
   "Return path for build with given ID."
   (let ((build-id (%sha256-hex-digest build-id "build identity")))
-    (merge-pathnames (format nil "builds/~A/" build-id)
-                     (clpm.platform:store-dir))))
+    (uiop:merge-pathnames*
+     (make-pathname :directory `(:relative "builds" ,build-id))
+     (clpm.platform:store-dir))))
 
 (defun %source-lock-path (tree-sha256)
   (let ((tree-sha256 (%sha256-hex-digest tree-sha256 "source tree identity")))
-    (merge-pathnames (format nil "sources/sha256/.~A.lock" tree-sha256)
-                     (clpm.platform:store-dir))))
+    (uiop:merge-pathnames*
+     (make-pathname :directory '(:relative "sources" "sha256")
+                    :name (format nil ".~A" tree-sha256)
+                    :type "lock")
+     (clpm.platform:store-dir))))
 
 (defun %source-src-path (source-root)
-  (merge-pathnames "src/" source-root))
+  (uiop:merge-pathnames*
+   (make-pathname :directory '(:relative "src"))
+   source-root))
 
 (defun %source-meta-path (source-root)
-  (merge-pathnames "meta.sxp" source-root))
+  (make-pathname :name "meta" :type "sxp" :defaults source-root))
 
 (defun tmp-path ()
   "Return temp directory path."
-  (merge-pathnames (format nil "tmp/~A/" (random (expt 2 32)))
-                   (clpm.platform:store-dir)))
+  (uiop:merge-pathnames*
+   (make-pathname :directory `(:relative "tmp" ,(format nil "~A" (random (expt 2 32)))))
+   (clpm.platform:store-dir)))
 
 ;;; Existence checks
 

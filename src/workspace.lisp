@@ -105,6 +105,13 @@ Expected schema:
                  (clpm.errors:signal-error 'clpm.errors:clpm-parse-error
                                            "Workspace member path must be relative, got ~S" m
                                            :file file))
+               (let ((dir (pathname-directory pn)))
+                 (when (or (member :back dir)
+                           (member :up dir)
+                           (search ".." norm))
+                   (clpm.errors:signal-error 'clpm.errors:clpm-parse-error
+                                             "Workspace member path must not escape the workspace root, got ~S" m
+                                             :file file)))
                (push norm members)))
            (setf (workspace-members ws)
                  (sort (remove-duplicates (nreverse members) :test #'string=)

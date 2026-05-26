@@ -109,7 +109,16 @@
                       (canonical-dir-namestring root))
       (assert-eql :project kind)
       (assert-string= (canonical-file-namestring (merge-pathnames "clpm.project" member-a))
-                      (canonical-file-namestring manifest)))))
+                      (canonical-file-namestring manifest)))
+
+    ;; Test that invalid member paths escaping the root trigger errors
+    (let ((failed nil))
+      (handler-case
+          (clpm.workspace::parse-workspace
+           '(:workspace :format 1 :members ("../escaped")))
+        (clpm.errors:clpm-parse-error ()
+          (setf failed t)))
+      (assert-true failed "Expected invalid workspace member path traversal to fail"))))
 
 (format t "~%Workspace discovery tests PASSED!~%")
 (sb-ext:exit :code 0)

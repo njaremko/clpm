@@ -15,6 +15,21 @@
 
 ;;; Parsing
 
+(defun %all-digits-p (string)
+  (and (plusp (length string))
+       (every #'digit-char-p string)))
+
+(defun %parse-numeric-part (string start len)
+  "Parse a numeric component starting at START.
+Returns (values value next-pos)."
+  (if (>= start len)
+      (values nil start)
+      (multiple-value-bind (val next-pos)
+          (parse-integer string :start start :junk-allowed t)
+        (if val
+            (values val next-pos)
+            (values nil start)))))
+
 (defun parse-version (string)
   "Parse a version string into a version struct.
 Supports:
@@ -23,47 +38,36 @@ Supports:
   - Git-style: 0.0.0+git.SHORTSHA"
   (when (null string)
     (return-from parse-version nil))
-  (let ((v (make-version :raw string))
-        (pos 0)
-        (len (length string)))
-    ;; Skip leading 'v' if present
-    (when (and (> len 0) (char-equal (char string 0) #\v))
-      (incf pos))
-    ;; Parse major
-    (multiple-value-bind (major next-pos)
-        (parse-integer string :start pos :junk-allowed t)
+  (let* ((len (length string))
+         (start-pos (if (and (> len 0) (char-equal (char string 0) #\v)) 1 0)))
+    (multiple-value-bind (major pos1)
+        (%parse-numeric-part string start-pos len)
       (unless major
         (return-from parse-version (make-version :raw string)))
-      (setf (version-major v) major
-            pos (or next-pos pos)))
-    ;; Parse .minor if present
-    (when (and (< pos len) (char= (char string pos) #\.))
-      (incf pos)
-      (multiple-value-bind (minor next-pos)
-          (parse-integer string :start pos :junk-allowed t)
-        (when minor
-          (setf (version-minor v) minor
-                pos (or next-pos pos)))))
-    ;; Parse .patch if present
-    (when (and (< pos len) (char= (char string pos) #\.))
-      (incf pos)
-      (multiple-value-bind (patch next-pos)
-          (parse-integer string :start pos :junk-allowed t)
-        (when patch
-          (setf (version-patch v) patch
-                pos (or next-pos pos)))))
-    ;; Parse -prerelease if present
-    (when (and (< pos len) (char= (char string pos) #\-))
-      (incf pos)
-      (let ((end (or (position-if (lambda (c) (char= c #\+)) string :start pos)
-                     len)))
-        (setf (version-prerelease v) (subseq string pos end)
-              pos end)))
-    ;; Parse +build if present
-    (when (and (< pos len) (char= (char string pos) #\+))
-      (incf pos)
-      (setf (version-build v) (subseq string pos)))
-    v))
+      (multiple-value-bind (minor pos2)
+          (if (and (< pos1 len) (char= (char string pos1) #\.))
+              (%parse-numeric-part string (1+ pos1) len)
+              (values 0 pos1))
+        (multiple-value-bind (patch pos3)
+            (if (and (< pos2 len) (char= (char string pos2) #\.))
+                (%parse-numeric-part string (1+ pos2) len)
+                (values 0 pos2))
+          (let* ((has-prerelease (and (< pos3 len) (char= (char string pos3) #\-)))
+                 (prerelease-end (when has-prerelease
+                                   (or (position #\+ string :start (1+ pos3))
+                                       len)))
+                 (prerelease (when has-prerelease
+                               (subseq string (1+ pos3) prerelease-end)))
+                 (pos4 (if has-prerelease prerelease-end pos3))
+                 (has-build (and (< pos4 len) (char= (char string pos4) #\+)))
+                 (build (when has-build
+                          (subseq string (1+ pos4)))))
+            (make-version :major major
+                          :minor (or minor 0)
+                          :patch (or patch 0)
+                          :prerelease prerelease
+                          :build build
+                          :raw string)))))))
 
 ;;; Comparison
 
@@ -99,8 +103,8 @@ nil sorts higher (release > prerelease)."
 (defun compare-prerelease-part (a b)
   "Compare two prerelease parts.
 Numeric parts sort lower than alphanumeric."
-  (let ((a-num (ignore-errors (parse-integer a)))
-        (b-num (ignore-errors (parse-integer b))))
+  (let ((a-num (when (%all-digits-p a) (parse-integer a)))
+        (b-num (when (%all-digits-p b) (parse-integer b))))
     (cond
       ((and a-num b-num) (- a-num b-num))
       (a-num -1)  ; numeric < alphanumeric

@@ -3588,7 +3588,7 @@ lifecycle belongs to `repl daemon' and the ergonomic `repl eval' path."
           ((eq resp :no-daemon) 2)
           ((eq resp :io-error)
             (cond
-              (kept 0)
+              (kept 3)
               (t
                (log-error "I/O error during debug session") 2)))
           (*bridge-cli-json*

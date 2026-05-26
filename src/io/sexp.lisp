@@ -32,13 +32,15 @@ Only keywords, strings, numbers, and lists thereof are allowed."
                 (check (car x))
                 (check (cdr x)))
                ((symbolp x)
-                (if (member (package-name (symbol-package x))
-                            *allowed-packages*
-                            :test #'string=)
-                    t
-                    (error 'sexp-read-error
-                           :message (format nil "Symbol ~S from package ~A not allowed"
-                                            x (package-name (symbol-package x))))))
+                (let ((pkg (symbol-package x)))
+                  (if (and pkg
+                           (member (package-name pkg)
+                                   *allowed-packages*
+                                   :test #'string=))
+                      t
+                      (error 'sexp-read-error
+                             :message (format nil "Symbol ~S from package ~A not allowed"
+                                              x (if pkg (package-name pkg) "NIL"))))))
                (t
                 (error 'sexp-read-error
                        :message (format nil "Value ~S of type ~A not allowed"

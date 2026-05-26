@@ -119,11 +119,21 @@ return value is what is written. Returns the written struct."
       out)))
 
 (defun plist-merge (base override)
-  "Return a plist that is BASE with OVERRIDE keys applied."
-  (let ((out (copy-list (or base '()))))
-    (loop for (k v) on (or override '()) by #'cddr do
-      (setf (getf out k) v))
-    out))
+  "Return a plist that is BASE with OVERRIDE keys applied, purely functionally."
+  (labels ((remove-from-plist (plist target-key)
+             (loop for (k v) on plist by #'cddr
+                   unless (eq k target-key)
+                     append (list k v)))
+           (merge-lists (b o)
+             (cond
+               ((null o) b)
+               (t
+                (let* ((key (first o))
+                       (val (second o))
+                       (rest-o (cddr o))
+                       (rest-b (remove-from-plist b key)))
+                  (merge-lists (list* key val rest-b) rest-o))))))
+    (merge-lists (copy-list (or base '())) (or override '()))))
 
 (defun merge-project-config (project &key (config (read-config)))
   "Merge CONFIG with PROJECT settings.

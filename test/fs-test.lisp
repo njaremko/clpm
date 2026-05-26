@@ -104,5 +104,20 @@
 
 (format t "  Filesystem walker + tree hash PASSED~%")
 
+#+(and sbcl unix)
+(progn
+  (require :sb-posix)
+  (format t "Testing circular symlink safety...~%")
+  (clpm.store:with-temp-dir (tmp)
+    (let* ((root (merge-pathnames "root/" tmp))
+           (nested (merge-pathnames "dir/" root))
+           (link (merge-pathnames "dir/symlink-back" root)))
+      (ensure-directories-exist nested)
+      (ignore-errors (delete-file link))
+      (sb-posix:symlink (namestring root) (namestring link))
+      (let ((paths (clpm.io.fs:walk-files root)))
+        (assert-true (listp paths) "Expected paths to be returned normally"))))
+  (format t "  Circular symlink safety PASSED~%"))
+
 (format t "~%FS tests PASSED!~%")
 (sb-ext:exit :code 0)

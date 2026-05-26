@@ -13,16 +13,101 @@
 
 ;;; Constraint structure - disjunction of ranges
 
-(defstruct constraint
+(defstruct (constraint (:constructor %make-constraint))
   "A version constraint (union of ranges)."
   (ranges nil :type list)                    ; list of ranges (OR'd together)
   (pinned-source nil))                       ; for :git/:path overrides
+
+;;; Normalization helpers
+
+(defun %lower-bound-less-p (lo1 inc1 lo2 inc2)
+  "True if lower bound 1 is strictly less than lower bound 2."
+  (cond
+    ((and (null lo1) (null lo2)) nil)
+    ((null lo1) t)
+    ((null lo2) nil)
+    (t
+     (let ((cmp (version-compare lo1 lo2)))
+       (cond
+         ((minusp cmp) t)
+         ((plusp cmp) nil)
+         (t (and inc1 (not inc2))))))))
+
+(defun %upper-bound-greater-p (hi1 inc1 hi2 inc2)
+  "True if upper bound 1 is strictly greater than upper bound 2."
+  (cond
+    ((and (null hi1) (null hi2)) nil)
+    ((null hi1) t)
+    ((null hi2) nil)
+    (t
+     (let ((cmp (version-compare hi1 hi2)))
+       (cond
+         ((plusp cmp) t)
+         ((minusp cmp) nil)
+         (t (and inc1 (not inc2))))))))
+
+(defun %ranges-overlap-or-touch-p (r1 r2)
+  "True if sorted range R1 and R2 overlap or touch."
+  (let ((hi1 (range-hi r1))
+        (inc-hi1 (range-hi-inclusive-p r1))
+        (lo2 (range-lo r2))
+        (inc-lo2 (range-lo-inclusive-p r2)))
+    (cond
+      ((null hi1) t)
+      ((null lo2) t)
+      (t
+       (let ((cmp (version-compare lo2 hi1)))
+         (cond
+           ((minusp cmp) t)
+           ((plusp cmp) nil)
+           (t (or inc-hi1 inc-lo2))))))))
+
+(defun %merge-ranges (r1 r2)
+  "Merge overlapping or touching ranges R1 and R2."
+  (let ((lo (range-lo r1))
+        (lo-inc (range-lo-inclusive-p r1))
+        (hi nil)
+        (hi-inc nil))
+    (if (%upper-bound-greater-p (range-hi r1) (range-hi-inclusive-p r1)
+                                (range-hi r2) (range-hi-inclusive-p r2))
+        (setf hi (range-hi r1)
+              hi-inc (range-hi-inclusive-p r1))
+        (setf hi (range-hi r2)
+              hi-inc (range-hi-inclusive-p r2)))
+    (make-range :lo lo :lo-inclusive-p lo-inc
+                :hi hi :hi-inclusive-p hi-inc)))
+
+(defun %normalize-ranges (ranges)
+  "Sort, merge, and clean ranges to obtain a canonical representation."
+  (let ((valid-ranges (remove-if #'range-empty-p ranges)))
+    (unless valid-ranges
+      (return-from %normalize-ranges nil))
+    (setf valid-ranges
+          (sort valid-ranges
+                (lambda (r1 r2)
+                  (%lower-bound-less-p (range-lo r1) (range-lo-inclusive-p r1)
+                                       (range-lo r2) (range-lo-inclusive-p r2)))))
+    (let ((merged '()))
+      (dolist (r valid-ranges)
+        (cond
+          ((null merged)
+           (push r merged))
+          ((%ranges-overlap-or-touch-p (car merged) r)
+           (setf (car merged) (%merge-ranges (car merged) r)))
+          (t
+           (push r merged))))
+      (nreverse merged))))
+
+(defun make-constraint (&key ranges pinned-source)
+  "Public constructor that automatically normalizes ranges."
+  (%make-constraint :ranges (%normalize-ranges ranges)
+                    :pinned-source pinned-source))
 
 ;;; Predefined constraints
 
 (defun any-constraint ()
   "Return a constraint that matches any version."
-  (make-constraint :ranges (list (make-range))))
+  (make-constraint :ranges (list (make-range :lo nil :hi nil))))
 
 (defun none-constraint ()
   "Return a constraint that matches no version."

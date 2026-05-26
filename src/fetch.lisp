@@ -71,25 +71,55 @@ downloader. Tests inject this to simulate failures deterministically.")
       (:wget (fetch-with-wget url dest-path :progress progress :timeout timeout))
       (:powershell (fetch-with-powershell url dest-path :timeout timeout)))))
 
+(defun call-with-retry (action policy &key (error-type 'error) (sleep-fn #'sleep))
+  "Call ACTION (a zero-argument function) repeatedly under POLICY.
+POLICY is a function: (lambda (attempt err) -> (values retry-p delay-seconds)).
+ERROR-TYPE is the type of error that triggers a retry; other conditions
+propagate immediately."
+  (labels ((try (attempt)
+             (handler-case
+                 (funcall action)
+               (condition (err)
+                 (if (typep err error-type)
+                     (multiple-value-bind (retry-p delay)
+                         (funcall policy attempt err)
+                       (if retry-p
+                           (progn
+                             (funcall sleep-fn delay)
+                             (try (1+ attempt)))
+                           (error err)))
+                     (error err))))))
+    (try 1)))
+
+(defun quadratic-backoff-policy (max-attempts backoff-base)
+  "Create a policy that retries up to MAX-ATTEMPTS with quadratic backoff."
+  (lambda (attempt err)
+    (declare (ignore err))
+    (if (< attempt max-attempts)
+        (values t (* backoff-base attempt attempt))
+        (values nil 0))))
+
 (defun fetch-url (url dest-path &key (progress t))
   "Fetch URL to DEST-PATH using available downloader.
 
 Retries transient failures up to `*fetch-retries*' times with quadratic
 backoff (`*fetch-backoff-base*' * (N-1)^2 seconds between attempts). Each
 attempt enforces a per-request timeout of `*fetch-timeout*' seconds."
-  (let ((retries (%effective-retries))
-        (timeout (%effective-timeout))
-        (last-error nil))
-    (loop for attempt from 1 to retries do
-      (handler-case
-          (progn
-            (%fetch-once url dest-path :progress progress :timeout timeout)
-            (return-from fetch-url))
-        (clpm.errors:clpm-fetch-error (c)
-          (setf last-error c)
-          (when (< attempt retries)
-            (%fetch-sleep (* *fetch-backoff-base* attempt attempt))))))
-    (error last-error)))
+  (let* ((retries (%effective-retries))
+         (timeout (%effective-timeout))
+         (policy (quadratic-backoff-policy retries *fetch-backoff-base*))
+         (sleep-fn (lambda (seconds)
+                     (when (plusp seconds)
+                       (if *fetch-sleep-fn*
+                           (funcall *fetch-sleep-fn* seconds)
+                           (sleep seconds))))))
+    (call-with-retry
+     (lambda ()
+       (%fetch-once url dest-path :progress progress :timeout timeout))
+     policy
+     :error-type 'clpm.errors:clpm-fetch-error
+     :sleep-fn sleep-fn)))
+
 
 (defun fetch-with-curl (url dest-path &key progress timeout)
   "Fetch URL using curl."

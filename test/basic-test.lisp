@@ -132,6 +132,16 @@
   (assert (eq (car form) :project))
   (assert (string= (getf (cdr form) :name) "test"))
   (assert (string= (getf (cdr form) :version) "1.0")))
+
+;; Ensure uninterned symbols trigger a clean sexp-read-error instead of a type-error
+(let ((failed nil))
+  (handler-case
+      (clpm.io.sexp:read-safe-sexp-from-string
+       "(:project :name #:test)")
+    (clpm.io.sexp::sexp-read-error ()
+      (setf failed t)))
+  (assert failed))
+
 (format t "  S-expression reader PASSED~%")
 
 ;;; Test canonical writer

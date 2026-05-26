@@ -337,7 +337,7 @@
                          (rb-cli-debug-keep-target 7))"
                        "--debug" "--keep"))
                   (declare (ignore stdout))
-                  (assert-eql 0 rc)
+                  (assert-eql 3 rc)
                   (assert-contains stderr "session:")
                   (assert-contains stderr "RB-CLI-DEBUG-KEEP-TARGET"))
                (multiple-value-bind (rc stdout)

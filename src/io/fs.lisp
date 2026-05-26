@@ -71,13 +71,18 @@ EXCLUDE is a list of entry names (strings) to ignore (directories or files)."
 REL-PATH is a deterministic, slash-separated string, sorted lexicographically."
   (let ((root (uiop:ensure-directory-pathname
                (truename (uiop:ensure-directory-pathname root))))
-        (files '()))
+        (files '())
+        (visited (make-hash-table :test 'equal)))
     (labels ((walk (dir)
-               (dolist (entry (list-directory-entries dir :exclude exclude))
-                 (cond
-                   ((uiop:directory-pathname-p entry)
-                    (walk entry))
-                   (t
-                    (push (cons (%rel-unix-path root entry) entry) files))))))
+               (let ((true-dir (handler-case (namestring (truename dir))
+                                 (error () nil))))
+                 (when (and true-dir (not (gethash true-dir visited)))
+                   (setf (gethash true-dir visited) t)
+                   (dolist (entry (list-directory-entries dir :exclude exclude))
+                     (cond
+                       ((uiop:directory-pathname-p entry)
+                        (walk entry))
+                       (t
+                        (push (cons (%rel-unix-path root entry) entry) files))))))))
       (walk root))
     (sort files #'string< :key #'car)))

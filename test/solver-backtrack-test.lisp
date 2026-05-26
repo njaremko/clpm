@@ -227,5 +227,46 @@
           (sb-posix:setenv "CLPM_HOME" old-home 1)
           (sb-posix:unsetenv "CLPM_HOME")))))
 
+(format t "Testing algebraic constraint laws...~%")
+(let* ((c1 (clpm.solver.constraint:parse-constraint '(:semver ">=1.0.0 <2.0.0")))
+       (c2 (clpm.solver.constraint:parse-constraint '(:semver ">=1.5.0 <3.0.0")))
+       (c3 (clpm.solver.constraint:parse-constraint '(:semver "^2.5.0")))
+       (any (clpm.solver.constraint:any-constraint))
+       (none (clpm.solver.constraint:none-constraint)))
+  (labels ((c= (a b)
+             (string= (clpm.solver.constraint:constraint-to-string a)
+                      (clpm.solver.constraint:constraint-to-string b))))
+    ;; Identity: A ^ Any = A
+    (assert-true (c= (clpm.solver.constraint:constraint-intersect c1 any) c1) "Identity law failed")
+    ;; Annihilator: A ^ None = None
+    (assert-true (c= (clpm.solver.constraint:constraint-intersect c1 none) none) "Annihilator law failed")
+    ;; Idempotence: A ^ A = A
+    (assert-true (c= (clpm.solver.constraint:constraint-intersect c1 c1) c1) "Idempotence law failed")
+    ;; Commutativity: A ^ B = B ^ A
+    (assert-true (c= (clpm.solver.constraint:constraint-intersect c1 c2)
+                     (clpm.solver.constraint:constraint-intersect c2 c1))
+                 "Commutativity law failed")
+    ;; Associativity: (A ^ B) ^ C = A ^ (B ^ C)
+    (assert-true (c= (clpm.solver.constraint:constraint-intersect
+                      (clpm.solver.constraint:constraint-intersect c1 c2) c3)
+                     (clpm.solver.constraint:constraint-intersect
+                      c1 (clpm.solver.constraint:constraint-intersect c2 c3)))
+                 "Associativity law failed")))
+(format t "  Algebraic constraint laws PASSED~%")
+
+(format t "Testing circular dependency detection...~%")
+(let* ((res (clpm.solver::make-resolution
+             :graph '(("a" . ("b"))
+                      ("b" . ("c"))
+                      ("c" . ("a"))))))
+  (let ((failed nil))
+    (handler-case
+        (clpm.solver:topological-sort res)
+      (clpm.errors:clpm-resolve-error (c)
+        (declare (ignore c))
+        (setf failed t)))
+    (assert-true failed "Expected circular dependency error to be signaled")))
+(format t "  Circular dependency detection PASSED~%")
+
 (format t "~%Solver backtracking tests PASSED!~%")
 (sb-ext:exit :code 0)

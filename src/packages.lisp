@@ -322,6 +322,7 @@
            #:constraint-intersect
            #:constraint-empty-p
            #:any-constraint
+           #:none-constraint
            #:exact-constraint
            #:constraint-to-string))
 
