@@ -9227,6 +9227,203 @@ caller diff source-form strings."
                (error () "<unprintable>"))
    "source" (%compile-source-json condition)))
 
+(defun %sexpr-ci-search (needle haystack)
+  (and (stringp needle)
+       (stringp haystack)
+       (search needle haystack :test #'char-equal)))
+
+(defun %sexpr-token-after-marker (message marker)
+  (let ((start (%sexpr-ci-search marker message)))
+    (when start
+      (let* ((token-start (+ start (length marker)))
+             (trimmed-start
+               (position-if-not
+                (lambda (ch)
+                  (member ch '(#\Space #\Tab #\Newline #\: #\') :test #'char=))
+                message :start token-start)))
+        (when trimmed-start
+          (let ((end (or (position-if
+                          (lambda (ch)
+                            (member ch '(#\Space #\Tab #\Newline #\, #\. #\)
+                                         #\()
+                                    :test #'char=))
+                          message :start trimmed-start)
+                         (length message))))
+            (string-right-trim '(#\. #\, #\:)
+                               (subseq message trimmed-start end))))))))
+
+(defun %sexpr-condition-classification (message)
+  (cond
+    ((%sexpr-ci-search "undefined variable" message)
+     "unbound_variable")
+    ((%sexpr-ci-search "undefined function" message)
+     "undefined_function")
+    ((or (%sexpr-ci-search "too few arguments" message)
+         (%sexpr-ci-search "too many arguments" message)
+         (%sexpr-ci-search "invalid number of arguments" message))
+     "argument_count_mismatch")
+    ((or (%sexpr-ci-search "does not designate any package" message)
+         (%sexpr-ci-search "package" message))
+     "package_error")
+    (t nil)))
+
+(defun %sexpr-condition-symbol-token (classification message)
+  (cond
+    ((string= classification "unbound_variable")
+     (or (%sexpr-token-after-marker message "undefined variable")
+         (%sexpr-token-after-marker message "variable")))
+    ((string= classification "undefined_function")
+     (or (%sexpr-token-after-marker message "undefined function")
+         (%sexpr-token-after-marker message "function")))
+    (t nil)))
+
+(defun %sexpr-repair-visible-bindings (document path)
+  (handler-case
+      (when (and document (%json-object-p path)
+                 (not (eq (%sexpr-child-path path) :invalid)))
+        (let ((forms (%sexpr-selected-forms document path)))
+          (when (= 1 (length forms))
+            (let* ((source-form (first forms))
+                   (child-path (%sexpr-child-path path))
+                   (scope (%sexpr-scope-at-child-path
+                           (clpm.sexpr-edit:source-form-form source-form)
+                           child-path)))
+              (getf scope :lexical)))))
+    (error () nil)))
+
+(defun %sexpr-symbol-name-prefix (name)
+  (let ((pos (position #\- name)))
+    (if pos (subseq name 0 pos) name)))
+
+(defun %sexpr-similar-symbol-name-p (wanted candidate)
+  (let ((wanted-up (string-upcase wanted))
+        (candidate-up (string-upcase candidate)))
+    (or (%string-prefix-p wanted-up candidate-up)
+        (%string-prefix-p candidate-up wanted-up)
+        (let ((wanted-prefix (%sexpr-symbol-name-prefix wanted-up))
+              (candidate-prefix (%sexpr-symbol-name-prefix candidate-up)))
+          (and (>= (length wanted-prefix) 4)
+               (string= wanted-prefix candidate-prefix))))))
+
+(defun %sexpr-source-rename-candidates (document token server)
+  (let ((token-name (let ((pos (position #\: token :from-end t)))
+                      (if pos (subseq token (1+ pos)) token))))
+    (loop for source-form in (and document
+                                  (clpm.sexpr-edit:source-document-forms
+                                   document))
+          for symbol = (%sexpr-source-definition-symbol source-form)
+          when (and symbol
+                    (%sexpr-similar-symbol-name-p token-name
+                                                  (symbol-name symbol)))
+            collect (%json-object
+                     "name" (symbol-name symbol)
+                     "package" (%public-package-name
+                                (symbol-package symbol) server)
+                     "path"
+                     (%sexpr-path-json
+                      (namestring
+                       (clpm.sexpr-edit:source-document-pathname document))
+                      source-form)))))
+
+(defun %sexpr-unbound-variable-repairs (token visible-bindings)
+  (append
+   (list (%json-object
+          "kind" "add_parameter"
+          "symbol" token
+          "message" "Add the missing name to the enclosing lambda list.")
+         (%json-object
+          "kind" "introduce_let"
+          "symbol" token
+          "message" "Bind the missing name near the failing form."))
+   (mapcar
+    (lambda (binding)
+      (%json-object
+       "kind" "replace_symbol"
+       "from" token
+       "to" (%json-getf binding "name")
+       "message" "Replace the missing name with a visible lexical binding."))
+    visible-bindings)))
+
+(defun %sexpr-undefined-function-repairs (token rename-candidates)
+  (append
+   (list (%json-object
+          "kind" "define_function"
+          "symbol" token
+          "message" "Define the missing function.")
+         (%json-object
+          "kind" "import_symbol"
+          "symbol" token
+          "message" "Import or qualify the function from the package that owns it."))
+   (mapcar
+    (lambda (candidate)
+      (%json-object
+       "kind" "rename_symbol"
+       "from" token
+       "to" (%json-getf candidate "name")
+       "candidate" candidate
+       "message" "A similar source definition exists."))
+    rename-candidates)))
+
+(defun %sexpr-argument-count-repairs (token)
+  (list (%json-object
+         "kind" "change_lambda_list"
+         "symbol" token
+         "message" "Change the callee lambda list to accept this call shape.")
+        (%json-object
+         "kind" "update_call_site"
+         "symbol" token
+         "message" "Update the call site to match the callee lambda list.")))
+
+(defun %sexpr-package-error-repairs (token)
+  (list (%json-object
+         "kind" "update_defpackage"
+         "symbol" token
+         "message" "Add, import, export, or shadow the package symbol intentionally.")
+        (%json-object
+         "kind" "qualify_symbol"
+         "symbol" token
+         "message" "Use an explicit package prefix if the reference is intentional.")))
+
+(defun %sexpr-repair-condition-json (condition document path server)
+  (let* ((message (handler-case (princ-to-string condition)
+                    (error () "<unprintable>")))
+         (classification (%sexpr-condition-classification message))
+         (token (and classification
+                     (%sexpr-condition-symbol-token classification message)))
+         (visible-bindings (%sexpr-repair-visible-bindings document path))
+         (rename-candidates
+           (and token
+                (string= classification "undefined_function")
+                (%sexpr-source-rename-candidates document token server)))
+         (suggestions
+           (cond
+             ((and token (string= classification "unbound_variable"))
+              (%sexpr-unbound-variable-repairs token visible-bindings))
+             ((and token (string= classification "undefined_function"))
+              (%sexpr-undefined-function-repairs token rename-candidates))
+             ((string= (or classification "") "argument_count_mismatch")
+              (%sexpr-argument-count-repairs token))
+             ((string= (or classification "") "package_error")
+              (%sexpr-package-error-repairs token))
+             (t nil))))
+    (%json-object
+     "diagnostic" (%compile-diagnostic-json condition)
+     "classification" classification
+     "symbol" token
+     "visible_bindings" (%json-array visible-bindings)
+     "rename_candidates" (%json-array rename-candidates)
+     "suggestions" (%json-array suggestions)
+     "available_restarts"
+     (%json-array (mapcar #'%restart-json
+                          (compute-restarts condition))))))
+
+(defun %sexpr-repair-flat-suggestions (conditions)
+  (mapcan (lambda (condition)
+            (copy-list
+             (%json-array-items (or (%json-getf condition "suggestions")
+                                    (%json-array nil)))))
+          conditions))
+
 (defun %sexpr-validation-success-p (value)
   (if value t :false))
 
@@ -9438,6 +9635,69 @@ caller diff source-form strings."
                          "validation_steps" (%json-array steps))
            "steps" (%json-array (nreverse results)))))))))
 
+(defun %dispatch-sexpr-repair-suggestions (server params id)
+  (let ((file (%json-getf params "file"))
+        (path (%json-getf params "path")))
+    (cond
+      ((not (stringp file))
+       (%error-response id "protocol-error" "missing `file' param"))
+      ((and path (not (%json-object-p path)))
+       (%error-response id "protocol-error" "`path' must be an object"))
+      (t
+       (handler-case
+           (let* ((document
+                    (clpm.sexpr-edit:read-source-document
+                     file
+                     :initial-package-name
+                     (%sexpr-current-package-name server)))
+                  (actual-file
+                    (namestring
+                     (clpm.sexpr-edit:source-document-pathname document)))
+                  (conditions '())
+                  (failure-p nil)
+                  (warnings-p nil))
+             (handler-case
+                 (let ((handler
+                         (lambda (condition)
+                           (push (%sexpr-repair-condition-json
+                                  condition document path server)
+                                 conditions)))
+                       (*error-output* (make-broadcast-stream))
+                       (*package* (%reader-package-for-server server nil)))
+                   (multiple-value-bind (output warnings failure)
+                       (handler-bind ((condition handler))
+                         (compile-file actual-file :verbose nil :print nil))
+                     (declare (ignore output))
+                     (setf warnings-p warnings
+                           failure-p failure)))
+               (error (c)
+                 (setf failure-p t)
+                 (push (%sexpr-repair-condition-json c document path server)
+                       conditions)))
+             (let* ((ordered (nreverse conditions))
+                    (suggestions (%sexpr-repair-flat-suggestions ordered)))
+               (%success-response
+                id
+                (%json-object
+                 "file" actual-file
+                 "success" (%sexpr-validation-success-p (not failure-p))
+                 "warnings_p" (%sexpr-validation-success-p warnings-p)
+                 "failure_p" (%sexpr-validation-success-p failure-p)
+                 "conditions" (%json-array ordered)
+                 "suggestions" (%json-array suggestions)
+                 "suggestion_count" (length suggestions)
+                 "provenance"
+                 (%json-object
+                  "created_by" "sexpr-edit"
+                  "timestamp_universal" (get-universal-time)
+                  "reason" "condition repair analysis"
+                  "operations" (%json-array
+                                (list "repair-suggestions"))
+                  "committed" :false
+                  "source_comments_inserted" :false)))))
+         (error (c)
+           (%error-response id "eval-error" (princ-to-string c))))))))
+
 (%register-method
  (make-method-spec
   :name "compile-file"
@@ -9491,6 +9751,25 @@ step transcript and stops after the first failing step."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-validate-edit server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-repair-suggestions"
+  :summary "Analyze compiler conditions as edit-oriented repair candidates."
+  :doc "Required: `file'. Optional: `path' supplies source scope for
+unbound-variable repairs. The method compiles the file under HANDLER-BIND,
+captures conditions and available restarts, and returns semantic repair
+candidates such as add-parameter, introduce-let, replace-symbol,
+define-function, import-symbol, rename-symbol, change-lambda-list, or
+update-call-site. It never invokes restarts and never writes source."
+  :params (list (list :name "file" :type :string :required t
+                      :description "Source file to compile for condition analysis.")
+                (list :name "path" :type :object :required nil
+                      :description "Optional source path for binding-aware repairs."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-repair-suggestions server params id))))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Introspection

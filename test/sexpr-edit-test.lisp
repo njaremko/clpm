@@ -372,6 +372,24 @@
 ")
     path))
 
+(defun make-repair-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-repair-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "repair.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defun repair-known-helper (cell)
+  cell)
+
+(defun repair-unbound (cell env)
+  (list store cell env))
+
+(defun repair-undefined (cell)
+  (repair-known-helpr cell))
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -531,6 +549,9 @@
                    "sexpr-affected-files missing from methods")
       (assert-true (member "sexpr-validate-edit" method-names :test #'string=)
                    "sexpr-validate-edit missing from methods")
+      (assert-true (member "sexpr-repair-suggestions" method-names
+                            :test #'string=)
+                   "sexpr-repair-suggestions missing from methods")
       (let* ((list-resp
                (clpm.repl:send-request
                 sock "sexpr-list-top-level-forms"
@@ -919,6 +940,104 @@
             (ignore-errors
              (let ((fasl (make-pathname :type "fasl"
                                         :defaults ok-path)))
+               (when (probe-file fasl) (delete-file fasl))))))
+        (let* ((repair-path (make-repair-source-file))
+               (repair-file (namestring repair-path))
+               (repair-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-repair-suggestions"
+                  :params (json-object
+                           "file" repair-file
+                           "path" (json-object
+                                   "file" repair-file
+                                   "kind" "defun"
+                                   "name" "repair-unbound"
+                                   "child_path"
+                                   (list :array (list 3))))))
+               (repair-result (lookup repair-resp "result"))
+               (conditions
+                 (array-items (lookup repair-result "conditions")))
+               (suggestions
+                 (array-items (lookup repair-result "suggestions"))))
+          (unwind-protect
+               (progn
+                 (assert-true repair-result
+                              "repair suggestions failed: ~S" repair-resp)
+                 (let* ((unbound
+                          (find "unbound_variable" conditions
+                                :key (lambda (condition)
+                                       (lookup condition "classification"))
+                                :test #'string=))
+                        (undefined
+                          (find "undefined_function" conditions
+                                :key (lambda (condition)
+                                       (lookup condition "classification"))
+                                :test #'string=))
+                        (visible
+                          (and unbound
+                               (array-items
+                                (lookup unbound "visible_bindings"))))
+                        (visible-names
+                          (mapcar (lambda (binding)
+                                    (lookup binding "name"))
+                                  visible))
+                        (add-parameter
+                          (find "add_parameter" suggestions
+                                :key (lambda (suggestion)
+                                       (lookup suggestion "kind"))
+                                :test #'string=))
+                        (replace-symbol
+                          (find "replace_symbol" suggestions
+                                :key (lambda (suggestion)
+                                       (lookup suggestion "kind"))
+                                :test #'string=))
+                        (define-function
+                          (find "define_function" suggestions
+                                :key (lambda (suggestion)
+                                       (lookup suggestion "kind"))
+                                :test #'string=))
+                        (rename-helper
+                          (find-if
+                           (lambda (suggestion)
+                             (and (string= "rename_symbol"
+                                           (lookup suggestion "kind"))
+                                  (string= "REPAIR-KNOWN-HELPER"
+                                           (lookup suggestion "to"))))
+                           suggestions)))
+                   (assert-true unbound
+                                "missing unbound-variable repair condition: ~S"
+                                conditions)
+                   (assert-true undefined
+                                "missing undefined-function repair condition: ~S"
+                                conditions)
+                   (assert-true (member "CELL" visible-names :test #'string=)
+                                "repair should include visible CELL binding: ~S"
+                                visible)
+                   (assert-true (member "ENV" visible-names :test #'string=)
+                                "repair should include visible ENV binding: ~S"
+                                visible)
+                   (assert-true add-parameter
+                                "missing add-parameter repair: ~S"
+                                suggestions)
+                   (assert-true replace-symbol
+                                "missing replace-symbol repair: ~S"
+                                suggestions)
+                   (assert-true define-function
+                                "missing define-function repair: ~S"
+                                suggestions)
+                   (assert-true rename-helper
+                                "missing rename candidate repair: ~S"
+                                suggestions)
+                   (assert-true
+                    (plusp
+                     (length
+                      (array-items
+                       (lookup (or unbound undefined)
+                               "available_restarts"))))
+                    "repair conditions should include available restarts")))
+            (ignore-errors
+             (let ((fasl (make-pathname :type "fasl"
+                                        :defaults repair-path)))
                (when (probe-file fasl) (delete-file fasl))))))
         (let* ((macro-path (make-macro-source-file))
                (macro-file (namestring macro-path))

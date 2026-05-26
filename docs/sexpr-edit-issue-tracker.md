@@ -312,7 +312,7 @@ Acceptance evidence:
 
 ### SE-021: Condition And Restart-Aware Repair Suggestions
 
-Status: open
+Status: in-progress
 
 Convert Common Lisp conditions into edit-oriented repair candidates. For undefined variables, undefined functions, package errors, and argument count mismatches, return likely semantic fixes with enough context for an agent to choose safely.
 
