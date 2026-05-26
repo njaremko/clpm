@@ -4741,13 +4741,14 @@ macroexpands|specializes). Returns
                         (clpm.sexpr-edit:edit-change-removed-argument-texts
                          change))))
 
-(defun %sexpr-edit-result-json (result)
+(defun %sexpr-edit-result-json (result &key dry-run)
   (let ((form (clpm.sexpr-edit:edit-result-form result))
         (file (clpm.sexpr-edit:edit-result-file result)))
     (%json-object
      "file" file
      "operation" (clpm.sexpr-edit:edit-result-operation result)
      "changed" t
+     "dry_run" (and dry-run t)
      "form" (%sexpr-form-summary-json file form)
      "before_text" (clpm.sexpr-edit:edit-result-before-text result)
      "structural_diff" (%json-array
@@ -4760,7 +4761,7 @@ macroexpands|specializes). Returns
                             (clpm.sexpr-edit:edit-result-diagnostics
                              result))))))
 
-(defun %dispatch-sexpr-apply-edit (server params id)
+(defun %dispatch-sexpr-edit-transaction (server params id edit-function dry-run)
   (let ((operation (%json-getf params "operation"))
         (path (%json-getf params "path"))
         (text (%json-getf params "text")))
@@ -4779,14 +4780,16 @@ macroexpands|specializes). Returns
                 (%success-response
                  id
                  (%sexpr-edit-result-json
-                  (clpm.sexpr-edit:apply-source-edit
+                  (funcall
+                   edit-function
                    file operation
                    :root (and server (server-project-root server))
                    :initial-package-name (%sexpr-current-package-name server)
                    :top-level (%sexpr-path-field path "top_level")
                    :kind (%sexpr-selector-kind path)
                    :name (%sexpr-path-field path "name")
-                   :text text)))
+                   :text text)
+                  :dry-run dry-run))
               (clpm.sexpr-edit:source-edit-error (c)
                 (%error-response
                  id "eval-error"
@@ -4800,6 +4803,14 @@ macroexpands|specializes). Returns
                             c))))))
               (clpm.sexpr-edit:source-path-error (c)
                 (%error-response id "eval-error" (princ-to-string c)))))))))))
+
+(defun %dispatch-sexpr-plan-edit (server params id)
+  (%dispatch-sexpr-edit-transaction
+   server params id #'clpm.sexpr-edit:plan-source-edit t))
+
+(defun %dispatch-sexpr-apply-edit (server params id)
+  (%dispatch-sexpr-edit-transaction
+   server params id #'clpm.sexpr-edit:apply-source-edit nil))
 
 (defun %dispatch-sexpr-macroexpand-at (server params id)
   (let ((path (%json-getf params "path"))
@@ -5132,6 +5143,24 @@ overridden with `package'."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-search-forms server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-plan-edit"
+  :summary "Dry-run one top-level structural source edit."
+  :doc "Required: `operation', `path'. Same edit language as
+`sexpr-apply-edit', but the file is not written. The result includes the same
+structural diff and diagnostics plus `dry_run: true'."
+  :params (list (list :name "operation" :type :string :required t
+                      :description "replace, insert-before, insert-after, delete, wrap, or splice.")
+                (list :name "path" :type :object :required t
+                      :description "Source path object with file plus selector.")
+                (list :name "text" :type :string :required nil
+                      :description "Replacement, insertion, wrapper template, or splice forms."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-plan-edit server params id))))
 
 (%register-method
  (make-method-spec

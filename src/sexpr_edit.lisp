@@ -618,12 +618,9 @@ a load operation."
              :diagnostics (source-document-diagnostics document)))
     document))
 
-(defun apply-source-edit (file operation
-                          &key root initial-package-name top-level kind name text)
-  "Apply one top-level structural edit to FILE.
-
-This is transactional at file granularity: the file is written only after
-the resulting source reads successfully."
+(defun %source-edit-result (file operation write-p
+                            &key root initial-package-name top-level kind name
+                            text)
   (let* ((pathname (%resolve-source-pathname file root))
          (before (%read-file-string pathname))
          (document (%read-source-text pathname before initial-package-name)))
@@ -678,7 +675,8 @@ the resulting source reads successfully."
       (let ((new-document
               (%source-document-readable-or-error pathname after
                                                   initial-package-name)))
-        (%write-file-string pathname after)
+        (when write-p
+          (%write-file-string pathname after))
         (let* ((operation-token (string-downcase (symbol-name op)))
                (after-start-ordinal
                  (case op
@@ -696,3 +694,28 @@ the resulting source reads successfully."
                                                    after-forms package)
                             :diagnostics (source-document-diagnostics
                                           new-document)))))))
+
+(defun plan-source-edit (file operation
+                         &key root initial-package-name top-level kind name text)
+  "Plan one top-level structural edit to FILE without writing it."
+  (%source-edit-result file operation nil
+                       :root root
+                       :initial-package-name initial-package-name
+                       :top-level top-level
+                       :kind kind
+                       :name name
+                       :text text))
+
+(defun apply-source-edit (file operation
+                          &key root initial-package-name top-level kind name text)
+  "Apply one top-level structural edit to FILE.
+
+This is transactional at file granularity: the file is written only after
+the resulting source reads successfully."
+  (%source-edit-result file operation t
+                       :root root
+                       :initial-package-name initial-package-name
+                       :top-level top-level
+                       :kind kind
+                       :name name
+                       :text text))

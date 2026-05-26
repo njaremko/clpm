@@ -215,6 +215,8 @@
                    "sexpr-show-form missing from methods")
       (assert-true (member "sexpr-search-forms" method-names :test #'string=)
                    "sexpr-search-forms missing from methods")
+      (assert-true (member "sexpr-plan-edit" method-names :test #'string=)
+                   "sexpr-plan-edit missing from methods")
       (assert-true (member "sexpr-apply-edit" method-names :test #'string=)
                    "sexpr-apply-edit missing from methods")
       (assert-true (member "sexpr-macroexpand-at" method-names :test #'string=)
@@ -285,6 +287,25 @@
                         "duplicate selector should be ambiguous")
           (assert-equal 2 (length candidates)
                         "ambiguity should return two candidates"))
+        (let* ((before (read-file-string path))
+               (plan-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-plan-edit"
+                  :params (json-object
+                           "operation" "replace"
+                           "path" (json-object "file" file
+                                               "top_level" 2)
+                           "text" "(defun beta () :planned)")))
+               (plan-result (lookup plan-resp "result"))
+               (plan-diff (array-items (lookup plan-result
+                                                "structural_diff"))))
+          (assert-true plan-result "plan edit failed: ~S" plan-resp)
+          (assert-true (lookup plan-result "dry_run")
+                       "plan result should be marked dry-run")
+          (assert-true plan-diff
+                       "plan result should include structural diff")
+          (assert-equal before (read-file-string path)
+                        "dry-run plan changed the file"))
         (let* ((before (read-file-string path))
                (bad-resp
                  (clpm.repl:send-request

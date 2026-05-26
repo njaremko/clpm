@@ -424,7 +424,7 @@ Acceptance evidence:
 
 ### SE-030: Dry-Run Edit Plans
 
-Status: open
+Status: in-progress
 
 Support named edit plans that can be explained before application. A plan should report files touched, symbols changed, package updates, possible captures, validation steps, and rollback strategy.
 

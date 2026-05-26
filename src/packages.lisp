@@ -417,6 +417,7 @@
            #:source-edit-error
            #:source-edit-error-message
            #:source-edit-error-diagnostics
+           #:plan-source-edit
            #:apply-source-edit
            #:edit-result
            #:edit-result-file
