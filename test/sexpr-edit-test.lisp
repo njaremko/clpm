@@ -313,6 +313,18 @@
 ")
     path))
 
+(defun make-extract-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-extract-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "extract.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defun extract-demo (x y)
+  (+ (* x y) 1))
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -426,6 +438,9 @@
                    "sexpr-classify-rewrite missing from methods")
       (assert-true (member "sexpr-introduce-let" method-names :test #'string=)
                    "sexpr-introduce-let missing from methods")
+      (assert-true (member "sexpr-extract-function" method-names
+                           :test #'string=)
+                   "sexpr-extract-function missing from methods")
       (assert-true (member "sexpr-bind-repeated-expression" method-names
                            :test #'string=)
                    "sexpr-bind-repeated-expression missing from methods")
@@ -1303,6 +1318,38 @@
                         "selected expression should appear once")
           (assert-equal 2 (count-substrings "cached" updated-source)
                         "introduced binding should appear twice"))
+        (let* ((extract-path (make-extract-source-file))
+               (extract-file (namestring extract-path))
+               (extract-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-extract-function"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" extract-file
+                                   "top_level" 1
+                                   "child_path"
+                                   (list :array (list 3 1)))
+                           "name" "multiply-values")))
+               (extract-result (lookup extract-resp "result"))
+               (extracted-source (read-file-string extract-path))
+               (lambda-list
+                 (array-items (lookup extract-result "lambda_list"))))
+          (assert-true extract-result
+                       "extract-function failed: ~S" extract-resp)
+          (assert-equal "ok" (lookup extract-result "status")
+                        "extract-function should commit")
+          (assert-equal '("x" "y") lambda-list
+                        "extract-function should compute free variables")
+          (assert-true (search "(defun multiply-values (x y)"
+                               extracted-source)
+                       "extract-function did not insert defun: ~A"
+                       extracted-source)
+          (assert-true (search "(multiply-values x y)"
+                               extracted-source)
+                       "extract-function did not replace selected form: ~A"
+                       extracted-source)
+          (assert-equal 1 (count-substrings "(* x y)" extracted-source)
+                        "selected expression should only remain in new defun"))
         (let* ((bind-path (make-bind-repeated-source-file))
                (bind-file (namestring bind-path))
                (bind-resp

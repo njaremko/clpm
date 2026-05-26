@@ -226,7 +226,7 @@ Acceptance evidence:
 
 ### SE-014: Extract Function
 
-Status: open
+Status: in-progress
 
 Implement `sexpr-extract-function` for a selected body form or contiguous body range. The tool must compute free lexical variables from the syntactic scope model, create a lambda list, insert a new `defun`, and replace the original form with a call. If free variable analysis is uncertain, the operation must stop with a diagnostic.
 
