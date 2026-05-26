@@ -125,6 +125,26 @@
 (format t "  current-package unknown-worker OK~%")
 
 ;;; ----------------------------------------------------------------------------
+;;; Redefinition-log inspection should not create typo'd workers either.
+
+(format t "Test: list-redefinitions rejects unknown named worker~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((resp (do-rpc sock "list-redefinitions"
+                         (list (cons "worker" "ghost"))))
+           (err (lookup resp "error")))
+      (assert-true err "expected unknown-worker error, got ~S" resp)
+      (assert-true (search "no such worker" (lookup err "message"))
+                   "wrong unknown-worker message: ~S" err))
+    (let* ((workers (do-rpc sock "list-workers"))
+           (entries (array-items (lookup (lookup workers "result")
+                                         "entries")))
+           (names (mapcar (lambda (w) (lookup w "name")) entries)))
+      (assert-true (not (find "ghost" names :test #'string=))
+                   "list-redefinitions spawned ghost worker: ~S" names))))
+(format t "  list-redefinitions unknown-worker OK~%")
+
+;;; ----------------------------------------------------------------------------
 ;;; Named workers don't share REPL history bindings.
 
 (format t "Test: named workers keep independent history~%")

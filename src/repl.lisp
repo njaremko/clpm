@@ -2394,6 +2394,18 @@ care about, instead of collapsing them all into a silent T/NIL:
         (lambda () (signal 'user-interrupt)))
        :interrupted))))
 
+(defun %worker-for-inspection (server name)
+  "Return (values WORKER WORKER-NAME) for read-only worker RPCs.
+
+The default worker is part of the public daemon surface and may be lazily
+created. Named workers are user-chosen state, so inspection must not spawn
+them when a caller mistypes a name."
+  (let* ((wname (or name +default-worker-name+))
+         (default? (string= wname +default-worker-name+)))
+    (values (or (%find-worker server wname)
+                (and default? (%ensure-worker server :name wname)))
+            wname)))
+
 (defun server-current-package (server)
   "The persistent eval `*package*' for the default worker. Other named
 workers track their own package in `worker-package'."
@@ -2679,10 +2691,8 @@ worker is created lazily; named workers must already exist."
   :handler
   (lambda (server params id ctx)
     (declare (ignore ctx))
-    (let* ((wname (or (%json-getf params "worker") +default-worker-name+))
-           (default? (string= wname +default-worker-name+))
-           (w (or (%find-worker server wname)
-                  (and default? (%ensure-worker server :name wname)))))
+    (multiple-value-bind (w wname)
+        (%worker-for-inspection server (%json-getf params "worker"))
       (cond
         ((null w)
          (%error-response id "eval-error"
@@ -3032,16 +3042,24 @@ the default worker's log is returned."
   :handler
   (lambda (server params id ctx)
     (declare (ignore ctx))
-    (let* ((wname (or (%json-getf params "worker") +default-worker-name+))
-           (w (%ensure-worker server :name wname)))
-      (%success-response
-       id
-       (%json-object "worker" (worker-name w)
-                     "entries"
-                     (%json-array
-                      (loop for v being the hash-values of
-                            (worker-redefinitions w)
-                            collect (list :object v)))))))))
+    (multiple-value-bind (w wname)
+        (%worker-for-inspection server (%json-getf params "worker"))
+      (cond
+        ((null w)
+         (%error-response id "eval-error"
+                          (format nil "no such worker: ~A" wname)))
+        ((not (clpm.repl.compat:thread-alive-p (worker-thread w)))
+         (%error-response id "eval-error"
+                          (format nil "worker is not alive: ~A" wname)))
+        (t
+         (%success-response
+          id
+          (%json-object "worker" (worker-name w)
+                        "entries"
+                        (%json-array
+                         (loop for v being the hash-values of
+                               (worker-redefinitions w)
+                               collect (list :object v)))))))))))
 
 (%register-method
  (make-method-spec
