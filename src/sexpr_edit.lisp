@@ -772,8 +772,7 @@ the resulting source reads successfully."
     (loop
       (multiple-value-bind (form start end)
           (%read-source-form-span text position package)
-        (when (or (null form)
-                  (>= start (length text))
+        (when (or (>= start (length text))
                   (char= (char text start) #\)))
           (return (nreverse spans)))
         (push (make-source-child-span :start start

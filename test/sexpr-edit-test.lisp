@@ -349,6 +349,29 @@
 ")
     path))
 
+(defun make-structural-move-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-structural-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "structural.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defun splice-demo ()
+  (progn
+    (alpha)
+    (beta))
+  (gamma))
+
+(defun raise-demo (x)
+  (outer (inner x) :done))
+
+(defun transpose-demo ()
+  (first)
+  (second)
+  (third))
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -474,6 +497,23 @@
       (assert-true (member "sexpr-convert-to-keyword-argument" method-names
                             :test #'string=)
                    "sexpr-convert-to-keyword-argument missing from methods")
+      (assert-true (member "sexpr-splice-form" method-names :test #'string=)
+                   "sexpr-splice-form missing from methods")
+      (assert-true (member "sexpr-raise-form" method-names :test #'string=)
+                   "sexpr-raise-form missing from methods")
+      (assert-true (member "sexpr-transpose-forms" method-names
+                            :test #'string=)
+                   "sexpr-transpose-forms missing from methods")
+      (assert-true (member "sexpr-kill-form" method-names :test #'string=)
+                   "sexpr-kill-form missing from methods")
+      (assert-true (member "sexpr-copy-form" method-names :test #'string=)
+                   "sexpr-copy-form missing from methods")
+      (assert-true (member "sexpr-move-form" method-names :test #'string=)
+                   "sexpr-move-form missing from methods")
+      (assert-true (member "sexpr-slurp-forward" method-names :test #'string=)
+                   "sexpr-slurp-forward missing from methods")
+      (assert-true (member "sexpr-barf-forward" method-names :test #'string=)
+                   "sexpr-barf-forward missing from methods")
       (assert-true (member "sexpr-bind-repeated-expression" method-names
                             :test #'string=)
                    "sexpr-bind-repeated-expression missing from methods")
@@ -1458,6 +1498,80 @@
                          after-convert)
             (assert-equal 1 (length dynamic-caveats)
                           "convert should report APPLY as a dynamic caveat")))
+        (let* ((structural-path (make-structural-move-source-file))
+               (structural-file (namestring structural-path))
+               (splice-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-splice-form"
+                  :params (json-object
+                           "path" (json-object
+                                   "file" structural-file
+                                   "kind" "defun"
+                                   "name" "splice-demo"
+                                   "child_path"
+                                   (list :array (list 3))))))
+               (splice-result (lookup splice-resp "result"))
+               (after-splice (read-file-string structural-path)))
+          (assert-true splice-result
+                       "splice-form failed: ~S" splice-resp)
+          (assert-equal "ok" (lookup splice-result "status")
+                        "splice-form should commit")
+          (assert-true (not (search "(progn" after-splice))
+                       "splice-form should remove the PROGN wrapper: ~A"
+                       after-splice)
+          (assert-true (and (search "(alpha)" after-splice)
+                            (search "(beta)" after-splice)
+                            (search "(gamma)" after-splice))
+                       "splice-form should keep all body forms: ~A"
+                       after-splice)
+          (let* ((raise-resp
+                   (clpm.repl:send-request
+                    sock "sexpr-raise-form"
+                    :params (json-object
+                             "path" (json-object
+                                     "file" structural-file
+                                     "kind" "defun"
+                                     "name" "raise-demo"
+                                     "child_path"
+                                     (list :array (list 3 1))))))
+                 (raise-result (lookup raise-resp "result"))
+                 (after-raise (read-file-string structural-path)))
+            (assert-true raise-result
+                         "raise-form failed: ~S" raise-resp)
+            (assert-equal "ok" (lookup raise-result "status")
+                          "raise-form should commit")
+            (assert-true (not (search "(outer" after-raise))
+                         "raise-form should replace the parent: ~A"
+                         after-raise)
+            (assert-true (search "(inner x)" after-raise)
+                         "raise-form should keep the selected child: ~A"
+                         after-raise))
+          (let* ((transpose-resp
+                   (clpm.repl:send-request
+                    sock "sexpr-transpose-forms"
+                    :params (json-object
+                             "path" (json-object
+                                     "file" structural-file
+                                     "kind" "defun"
+                                     "name" "transpose-demo"
+                                     "child_path"
+                                     (list :array (list 3)))
+                             "other_child_path"
+                             (list :array (list 4)))))
+                 (transpose-result (lookup transpose-resp "result"))
+                 (after-transpose (read-file-string structural-path))
+                 (first-pos (search "(first)" after-transpose))
+                 (second-pos (search "(second)" after-transpose))
+                 (third-pos (search "(third)" after-transpose)))
+            (assert-true transpose-result
+                         "transpose-forms failed: ~S" transpose-resp)
+            (assert-equal "ok" (lookup transpose-result "status")
+                          "transpose-forms should commit")
+            (assert-true (and first-pos second-pos third-pos
+                              (< second-pos first-pos)
+                              (< first-pos third-pos))
+                         "transpose-forms should swap sibling extents: ~A"
+                         after-transpose)))
         (let* ((bind-path (make-bind-repeated-source-file))
                (bind-file (namestring bind-path))
                (bind-resp

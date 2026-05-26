@@ -7284,6 +7284,274 @@ macroexpands|specializes). Returns
                   (%sexpr-child-edit-provenance-json operation dry-run path)
                   pairs))))))
 
+(defun %sexpr-join-strings (strings separator)
+  (with-output-to-string (out)
+    (loop for tail on strings
+          do (write-string (first tail) out)
+             (when (rest tail)
+               (write-string separator out)))))
+
+(defun %sexpr-line-prefix (text position)
+  (let ((line-start (position #\Newline text :end position :from-end t)))
+    (subseq text (if line-start (1+ line-start) 0) position)))
+
+(defun %sexpr-child-span-text (document source-form child-path)
+  (let ((span (clpm.sexpr-edit:source-form-child-span source-form
+                                                      child-path))
+        (text (clpm.sexpr-edit:source-document-text document)))
+    (values (subseq text
+                    (clpm.sexpr-edit:source-child-span-start span)
+                    (clpm.sexpr-edit:source-child-span-end span))
+            span)))
+
+(defun %sexpr-progn-splice-text (document source-form child-path selected)
+  (unless (string= "PROGN" (or (%sexpr-form-operator-name selected) ""))
+    (error "splice-form currently requires a PROGN form"))
+  (multiple-value-bind (parent child-index parent-present-p)
+      (%sexpr-parent-at-child-path
+       (clpm.sexpr-edit:source-form-form source-form) child-path)
+    (unless (and parent-present-p
+                 (%sexpr-body-position-p parent child-index))
+      (error "splice-form requires the selected PROGN to be in body position")))
+  (let* ((elements (%sexpr-proper-list-elements selected))
+         (body-indices (loop for index from 1 below (length elements)
+                             collect index)))
+    (unless body-indices
+      (error "cannot splice an empty PROGN body"))
+    (multiple-value-bind (selected-text selected-span)
+        (%sexpr-child-span-text document source-form child-path)
+      (declare (ignore selected-text))
+      (let* ((source-text (clpm.sexpr-edit:source-document-text document))
+             (prefix (%sexpr-line-prefix
+                      source-text
+                      (clpm.sexpr-edit:source-child-span-start
+                       selected-span)))
+             (separator (concatenate 'string (string #\Newline) prefix)))
+        (%sexpr-join-strings
+         (mapcar (lambda (index)
+                   (nth-value
+                    0
+                    (%sexpr-child-span-text
+                     document source-form (append child-path (list index)))))
+                 body-indices)
+         separator)))))
+
+(defun %sexpr-sibling-child-path (child-path delta)
+  (when child-path
+    (let ((parent-path (butlast child-path))
+          (index (car (last child-path))))
+      (when (and (integerp index)
+                 (<= 0 (+ index delta)))
+        (append parent-path (list (+ index delta)))))))
+
+(defun %sexpr-simple-list-insert-before-close (list-text inserted-text)
+  (let ((close (position #\) list-text :from-end t)))
+    (unless close
+      (error "selected form is not a printable list"))
+    (concatenate 'string
+                 (string-right-trim '(#\Space #\Tab #\Newline #\Return)
+                                    (subseq list-text 0 close))
+                 " "
+                 inserted-text
+                 (subseq list-text close))))
+
+(defun %sexpr-remove-child-from-list-text (list-text list-start child-span)
+  (let* ((relative-start
+           (- (clpm.sexpr-edit:source-child-span-start child-span)
+              list-start))
+         (relative-end
+           (- (clpm.sexpr-edit:source-child-span-end child-span)
+              list-start))
+         (without-child
+           (%sexpr-replace-source-range list-text relative-start
+                                        relative-end ""))
+         (close (position #\) without-child :from-end t)))
+    (unless close
+      (error "selected form is not a printable list"))
+    (concatenate 'string
+                 (string-right-trim '(#\Space #\Tab #\Newline #\Return)
+                                    (subseq without-child 0 close))
+                 (subseq without-child close))))
+
+(defun %sexpr-json-int-array (raw)
+  (cond
+    ((and (%json-array-p raw)
+          (every #'integerp (cadr raw)))
+     (cadr raw))
+    (t :invalid)))
+
+(defun %sexpr-structural-operation-after (operation document source-form
+                                                    child-path params)
+  (let* ((before (clpm.sexpr-edit:source-document-text document))
+         (top-form (clpm.sexpr-edit:source-form-form source-form)))
+    (multiple-value-bind (selected present-p)
+        (%sexpr-form-at-child-path top-form child-path)
+      (unless present-p
+        (error "child_path does not resolve to a source form"))
+      (multiple-value-bind (selected-text selected-span)
+          (%sexpr-child-span-text document source-form child-path)
+        (let ((start (clpm.sexpr-edit:source-child-span-start selected-span))
+              (end (clpm.sexpr-edit:source-child-span-end selected-span)))
+          (cond
+            ((string= operation "copy-form")
+             (values before selected-text :copy nil))
+            ((or (string= operation "kill-form")
+                 (string= operation "delete-form"))
+             (values (%sexpr-replace-source-range before start end "")
+                     selected-text :edit nil))
+            ((string= operation "splice-form")
+             (values (%sexpr-replace-source-range
+                      before start end
+                      (%sexpr-progn-splice-text document source-form
+                                                child-path selected))
+                     selected-text :edit nil))
+            ((string= operation "raise-form")
+             (multiple-value-bind (parent child-index parent-present-p)
+                 (%sexpr-parent-at-child-path top-form child-path)
+               (declare (ignore parent child-index))
+               (unless parent-present-p
+                 (error "cannot raise a top-level form"))
+               (let ((parent-path (butlast child-path)))
+                 (multiple-value-bind (parent-text parent-span)
+                     (%sexpr-child-span-text document source-form parent-path)
+                   (declare (ignore parent-text))
+                   (values (%sexpr-replace-source-range
+                            before
+                            (clpm.sexpr-edit:source-child-span-start
+                             parent-span)
+                            (clpm.sexpr-edit:source-child-span-end
+                             parent-span)
+                            selected-text)
+                           selected-text :edit parent-path)))))
+            ((string= operation "transpose-forms")
+             (let ((other-path (%sexpr-json-int-array
+                                (%json-getf params "other_child_path"))))
+               (when (or (eq other-path :invalid) (null other-path))
+                 (error "other_child_path must be an array of integers"))
+               (unless (equal (butlast child-path) (butlast other-path))
+                 (error "transpose requires sibling forms"))
+               (multiple-value-bind (other-text other-span)
+                   (%sexpr-child-span-text document source-form other-path)
+                 (let ((replacements
+                         (list (list start end other-text)
+                               (list (clpm.sexpr-edit:source-child-span-start
+                                      other-span)
+                                     (clpm.sexpr-edit:source-child-span-end
+                                      other-span)
+                                     selected-text))))
+                   (values (%sexpr-apply-replacements before replacements)
+                           selected-text :edit other-path)))))
+            ((string= operation "move-form")
+             (let ((target-path (%sexpr-json-int-array
+                                 (%json-getf params "target_child_path")))
+                   (position (or (%json-getf params "position") "before")))
+               (when (or (eq target-path :invalid) (null target-path))
+                 (error "target_child_path must be an array of integers"))
+               (unless (member position '("before" "after") :test #'string=)
+                 (error "position must be before or after"))
+               (multiple-value-bind (target-text target-span)
+                   (%sexpr-child-span-text document source-form target-path)
+                 (declare (ignore target-text))
+                 (let* ((insert-at
+                          (if (string= position "before")
+                              (clpm.sexpr-edit:source-child-span-start
+                               target-span)
+                              (clpm.sexpr-edit:source-child-span-end
+                               target-span)))
+                        (replacement-text
+                          (concatenate 'string selected-text
+                                       (string #\Newline)
+                                       (%sexpr-line-prefix before insert-at)))
+                        (replacements
+                          (list (list start end "")
+                                (list insert-at insert-at replacement-text))))
+                   (values (%sexpr-apply-replacements before replacements)
+                           selected-text :edit target-path)))))
+            ((string= operation "slurp-forward")
+             (let ((next-path (%sexpr-sibling-child-path child-path 1)))
+               (unless next-path
+                 (error "slurp-forward requires a following sibling"))
+               (multiple-value-bind (next-text next-span)
+                   (%sexpr-child-span-text document source-form next-path)
+                 (values
+                  (%sexpr-replace-source-range
+                   before start
+                   (clpm.sexpr-edit:source-child-span-end next-span)
+                   (%sexpr-simple-list-insert-before-close selected-text
+                                                           next-text))
+                  selected-text :edit next-path))))
+            ((string= operation "barf-forward")
+             (let* ((elements (%sexpr-proper-list-elements selected))
+                    (last-index (and elements (1- (length elements)))))
+               (unless (and last-index (> last-index 0))
+                 (error "barf-forward requires a list with at least one child to move"))
+               (let ((last-path (append child-path (list last-index))))
+                 (multiple-value-bind (last-text last-span)
+                     (%sexpr-child-span-text document source-form last-path)
+                   (let* ((new-list
+                            (%sexpr-remove-child-from-list-text
+                             selected-text start last-span))
+                          (replacement
+                            (concatenate
+                             'string new-list
+                             (string #\Newline)
+                             (%sexpr-line-prefix before start)
+                             last-text)))
+                     (values (%sexpr-replace-source-range before start end
+                                                          replacement)
+                             selected-text :edit last-path))))))
+            (t
+             (error "unknown structural operation: ~A" operation))))))))
+
+(defun %dispatch-sexpr-structural-operation (server params id operation)
+  (let ((path (%json-getf params "path"))
+        (dry-run (%json-true-p (%json-getf params "dry_run"))))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      ((eq (%sexpr-child-path path) :invalid)
+       (%error-response id "protocol-error"
+                        "`path.child_path' must be an array of integers"))
+      ((null (%sexpr-child-path path))
+       (%error-response id "protocol-error"
+                        "`path.child_path' must select a nested source form"))
+      (t
+       (handler-case
+           (multiple-value-bind (document actual-file pathname source-form pkg
+                                 error-response)
+               (%sexpr-selected-definition-context server path id)
+             (declare (ignore pkg))
+             (or error-response
+                 (let ((child-path (%sexpr-child-path path)))
+                   (multiple-value-bind (after selected-text outcome focus-path)
+                       (%sexpr-structural-operation-after
+                        operation document source-form child-path params)
+                     (let ((result-path
+                             (%sexpr-path-with-child-json
+                              actual-file source-form
+                              (or focus-path child-path))))
+                       (if (eq outcome :copy)
+                           (%success-response
+                            id
+                            (%json-object
+                             "status" "ok"
+                             "file" actual-file
+                             "operation" operation
+                             "path" result-path
+                             "text" selected-text
+                             "committed" :false
+                             "provenance"
+                             (%sexpr-child-edit-provenance-json
+                              operation t result-path)))
+                           (%sexpr-refactor-response
+                            server id pathname actual-file after dry-run
+                            operation result-path
+                            "operation" operation
+                            "path" result-path
+                            "before_form" selected-text)))))))
+         (error (c)
+           (%error-response id "eval-error" (princ-to-string c))))))))
+
 (defun %sexpr-child-edit-provenance-json (operation dry-run path)
   (%json-object
    "created_by" "sexpr-edit"
@@ -8632,6 +8900,142 @@ duplicated effectful LET values, or declaration-scope hazards."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-classify-rewrite server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-splice-form"
+  :summary "Splice a PROGN body into the surrounding body context."
+  :doc "Required: `path'. The path must include `child_path' selecting a
+PROGN in body position. The operation replaces the PROGN with its body
+forms and validates the edited source before writing."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with child_path.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Validate without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-structural-operation
+     server params id "splice-form"))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-raise-form"
+  :summary "Replace a selected form's parent with the selected form."
+  :doc "Required: `path'. The selected nested form is raised over its
+immediate parent using exact source spans, then the file is read-validated."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with child_path.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Validate without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-structural-operation
+     server params id "raise-form"))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-transpose-forms"
+  :summary "Swap two sibling source forms."
+  :doc "Required: `path' and `other_child_path'. Both paths must select
+sibling forms inside the same top-level source form. Only the two selected
+source extents are exchanged."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with child_path.")
+                (list :name "other_child_path" :type :array :required t
+                      :description "Sibling child path to swap with.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Validate without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-structural-operation
+     server params id "transpose-forms"))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-kill-form"
+  :summary "Delete a selected nested source form and return its text."
+  :doc "Required: `path'. The selected child source span is removed after
+read validation. The response includes the killed form text."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with child_path.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Validate without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-structural-operation
+     server params id "kill-form"))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-copy-form"
+  :summary "Return exact source text for a selected nested form."
+  :doc "Required: `path'. This is a read-only structural operation; it
+returns the selected child form text without writing the file."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with child_path."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-structural-operation
+     server params id "copy-form"))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-move-form"
+  :summary "Move a selected form before or after another child form."
+  :doc "Required: `path' and `target_child_path'. Optional `position' is
+`before' or `after' and defaults to `before'. The operation moves exact
+source text and validates the edited source."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with child_path.")
+                (list :name "target_child_path" :type :array :required t
+                      :description "Child path to move before or after.")
+                (list :name "position" :type :string :required nil
+                      :description "before or after.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Validate without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-structural-operation
+     server params id "move-form"))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-slurp-forward"
+  :summary "Move the following sibling into the selected list form."
+  :doc "Required: `path'. The path selects a list form with a following
+sibling; that sibling's exact source text is inserted before the selected
+list's closing parenthesis."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with child_path.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Validate without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-structural-operation
+     server params id "slurp-forward"))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-barf-forward"
+  :summary "Move the selected list's last child out after the list."
+  :doc "Required: `path'. The path selects a list form; its last child is
+removed from the list source and emitted as the following sibling form."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with child_path.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Validate without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-structural-operation
+     server params id "barf-forward"))))
 
 (%register-method
  (make-method-spec

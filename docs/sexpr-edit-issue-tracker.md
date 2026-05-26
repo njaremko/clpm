@@ -262,7 +262,7 @@ Acceptance evidence:
 
 ### SE-017: Structural Movement Operations
 
-Status: open
+Status: in-progress
 
 Expose familiar structural editing operations: slurp, barf, raise, splice, transpose, kill form, copy form, and move form. These operations must work on the CST and preserve surrounding trivia.
 
