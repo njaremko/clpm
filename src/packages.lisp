@@ -384,6 +384,47 @@
            #:activate-project
            #:check-native-deps))
 
+(defpackage #:clpm.sexpr-edit
+  (:use #:cl)
+  (:export #:source-document
+           #:source-document-pathname
+           #:source-document-text
+           #:source-document-forms
+           #:source-document-diagnostics
+           #:source-form
+           #:source-form-ordinal
+           #:source-form-start
+           #:source-form-end
+           #:source-form-line
+           #:source-form-column
+           #:source-form-package
+           #:source-form-kind
+           #:source-form-name
+           #:source-form-operator
+           #:source-form-children-count
+           #:source-form-text
+           #:source-diagnostic
+           #:source-diagnostic-phase
+           #:source-diagnostic-message
+           #:source-diagnostic-position
+           #:source-diagnostic-line
+           #:source-diagnostic-column
+           #:read-source-document
+           #:find-source-forms
+           #:source-path-error
+           #:source-reader-error
+           #:source-edit-error
+           #:source-edit-error-message
+           #:source-edit-error-diagnostics
+           #:apply-source-edit
+           #:edit-result
+           #:edit-result-file
+           #:edit-result-operation
+           #:edit-result-form
+           #:edit-result-before-text
+           #:edit-result-after-text
+           #:edit-result-diagnostics))
+
 (defpackage #:clpm.commands
   (:use #:cl #:clpm.log #:clpm.project #:clpm.registry #:clpm.solver #:clpm.fetch
         #:clpm.build #:clpm.store #:clpm.platform #:clpm.config #:clpm.errors)

@@ -4398,6 +4398,273 @@ macroexpands|specializes). Returns
              (%error-response id "eval-error" (princ-to-string c))))))))))
 
 ;;; ----------------------------------------------------------------------------
+;;; SexprEdit source lenses
+;;; ----------------------------------------------------------------------------
+
+(defun %sexpr-diagnostic-json (diagnostic)
+  (%json-object
+   "phase" (clpm.sexpr-edit:source-diagnostic-phase diagnostic)
+   "message" (clpm.sexpr-edit:source-diagnostic-message diagnostic)
+   "position" (clpm.sexpr-edit:source-diagnostic-position diagnostic)
+   "line" (clpm.sexpr-edit:source-diagnostic-line diagnostic)
+   "column" (clpm.sexpr-edit:source-diagnostic-column diagnostic)))
+
+(defun %sexpr-path-json (file form)
+  (%json-object
+   "file" file
+   "top_level" (clpm.sexpr-edit:source-form-ordinal form)
+   "kind" (clpm.sexpr-edit:source-form-kind form)
+   "name" (clpm.sexpr-edit:source-form-name form)))
+
+(defun %sexpr-form-summary-json (file form)
+  (%json-object
+   "path" (%sexpr-path-json file form)
+   "ordinal" (clpm.sexpr-edit:source-form-ordinal form)
+   "kind" (clpm.sexpr-edit:source-form-kind form)
+   "name" (clpm.sexpr-edit:source-form-name form)
+   "operator" (clpm.sexpr-edit:source-form-operator form)
+   "package" (clpm.sexpr-edit:source-form-package form)
+   "line" (clpm.sexpr-edit:source-form-line form)
+   "column" (clpm.sexpr-edit:source-form-column form)
+   "start" (clpm.sexpr-edit:source-form-start form)
+   "end" (clpm.sexpr-edit:source-form-end form)
+   "children_count" (clpm.sexpr-edit:source-form-children-count form)
+   "snippet" (clpm.sexpr-edit:source-form-text form)))
+
+(defun %sexpr-form-json (file form)
+  (%json-object
+   "path" (%sexpr-path-json file form)
+   "ordinal" (clpm.sexpr-edit:source-form-ordinal form)
+   "kind" (clpm.sexpr-edit:source-form-kind form)
+   "name" (clpm.sexpr-edit:source-form-name form)
+   "operator" (clpm.sexpr-edit:source-form-operator form)
+   "package" (clpm.sexpr-edit:source-form-package form)
+   "line" (clpm.sexpr-edit:source-form-line form)
+   "column" (clpm.sexpr-edit:source-form-column form)
+   "start" (clpm.sexpr-edit:source-form-start form)
+   "end" (clpm.sexpr-edit:source-form-end form)
+   "children_count" (clpm.sexpr-edit:source-form-children-count form)
+   "text" (clpm.sexpr-edit:source-form-text form)))
+
+(defun %sexpr-current-package-name (server)
+  (package-name (or (and server (server-current-package server))
+                    (find-package "COMMON-LISP-USER"))))
+
+(defun %sexpr-read-document (server file id)
+  (handler-case
+      (values
+       (clpm.sexpr-edit:read-source-document
+        file
+        :root (and server (server-project-root server))
+        :initial-package-name (%sexpr-current-package-name server))
+       nil)
+    (clpm.sexpr-edit:source-path-error (c)
+      (values nil (%error-response id "eval-error" (princ-to-string c))))))
+
+(defun %sexpr-path-field (path name)
+  (when (%json-object-p path)
+    (cdr (assoc name (%json-object-alist path) :test #'string=))))
+
+(defun %sexpr-selector-kind (path)
+  (let ((kind (%sexpr-path-field path "kind")))
+    (when (stringp kind)
+      (string-downcase kind))))
+
+(defun %sexpr-selected-forms (document path)
+  (let ((top-level (%sexpr-path-field path "top_level"))
+        (kind (%sexpr-selector-kind path))
+        (name (%sexpr-path-field path "name")))
+    (clpm.sexpr-edit:find-source-forms document
+                                       :top-level top-level
+                                       :kind kind
+                                       :name name)))
+
+(defun %sexpr-diagnostics-json (document)
+  (%json-array
+   (mapcar #'%sexpr-diagnostic-json
+           (clpm.sexpr-edit:source-document-diagnostics document))))
+
+(defun %dispatch-sexpr-list-top-level-forms (server params id)
+  (let ((file (%json-getf params "file")))
+    (cond
+      ((not (stringp file))
+       (%error-response id "protocol-error" "missing `file' param"))
+      (t
+       (multiple-value-bind (document error-response)
+           (%sexpr-read-document server file id)
+         (or error-response
+             (let ((actual-file (namestring
+                                 (clpm.sexpr-edit:source-document-pathname
+                                  document))))
+               (%success-response
+                id
+                (%json-object
+                 "file" actual-file
+                 "forms" (%json-array
+                          (mapcar (lambda (form)
+                                    (%sexpr-form-summary-json actual-file form))
+                                  (clpm.sexpr-edit:source-document-forms
+                                   document)))
+                 "diagnostics" (%sexpr-diagnostics-json document))))))))))
+
+(defun %dispatch-sexpr-show-form (server params id)
+  (let ((path (%json-getf params "path")))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      (t
+       (let ((file (%sexpr-path-field path "file")))
+         (cond
+           ((not (stringp file))
+            (%error-response id "protocol-error" "`path.file' must be a string"))
+           (t
+            (multiple-value-bind (document error-response)
+                (%sexpr-read-document server file id)
+              (or error-response
+                  (let* ((actual-file
+                           (namestring
+                            (clpm.sexpr-edit:source-document-pathname
+                             document)))
+                         (forms (%sexpr-selected-forms document path)))
+                    (cond
+                      ((null forms)
+                       (%error-response id "eval-error"
+                                        "no form matched source path"))
+                      ((rest forms)
+                       (%success-response
+                        id
+                        (%json-object
+                         "status" "ambiguous"
+                         "file" actual-file
+                         "candidates" (%json-array
+                                       (mapcar
+                                        (lambda (form)
+                                          (%sexpr-form-summary-json
+                                           actual-file form))
+                                        forms))
+                         "diagnostics" (%sexpr-diagnostics-json document))))
+                      (t
+                       (%success-response
+                        id
+                        (%json-object
+                         "status" "ok"
+                         "file" actual-file
+                         "form" (%sexpr-form-json actual-file (first forms))
+                         "diagnostics"
+                         (%sexpr-diagnostics-json document)))))))))))))))
+
+(defun %sexpr-edit-result-json (result)
+  (let ((form (clpm.sexpr-edit:edit-result-form result))
+        (file (clpm.sexpr-edit:edit-result-file result)))
+    (%json-object
+     "file" file
+     "operation" (clpm.sexpr-edit:edit-result-operation result)
+     "changed" t
+     "form" (%sexpr-form-summary-json file form)
+     "before_text" (clpm.sexpr-edit:edit-result-before-text result)
+     "diagnostics" (%json-array
+                    (mapcar #'%sexpr-diagnostic-json
+                            (clpm.sexpr-edit:edit-result-diagnostics
+                             result))))))
+
+(defun %dispatch-sexpr-apply-edit (server params id)
+  (let ((operation (%json-getf params "operation"))
+        (path (%json-getf params "path"))
+        (text (%json-getf params "text")))
+    (cond
+      ((not (stringp operation))
+       (%error-response id "protocol-error" "missing `operation' param"))
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      (t
+       (let ((file (%sexpr-path-field path "file")))
+         (cond
+           ((not (stringp file))
+            (%error-response id "protocol-error" "`path.file' must be a string"))
+           (t
+            (handler-case
+                (%success-response
+                 id
+                 (%sexpr-edit-result-json
+                  (clpm.sexpr-edit:apply-source-edit
+                   file operation
+                   :root (and server (server-project-root server))
+                   :initial-package-name (%sexpr-current-package-name server)
+                   :top-level (%sexpr-path-field path "top_level")
+                   :kind (%sexpr-selector-kind path)
+                   :name (%sexpr-path-field path "name")
+                   :text text)))
+              (clpm.sexpr-edit:source-edit-error (c)
+                (%error-response
+                 id "eval-error"
+                 (clpm.sexpr-edit:source-edit-error-message c)
+                 :details
+                 (%json-object
+                  "diagnostics"
+                  (%json-array
+                   (mapcar #'%sexpr-diagnostic-json
+                           (clpm.sexpr-edit:source-edit-error-diagnostics
+                            c))))))
+              (clpm.sexpr-edit:source-path-error (c)
+                (%error-response id "eval-error" (princ-to-string c)))))))))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-list-top-level-forms"
+  :summary "List top-level Lisp forms in a source file without dumping the file."
+  :doc "Required: `file'. Reads the file with *READ-EVAL* bound to NIL and
+returns `{file, forms, diagnostics}'. Each form summary includes a stable
+top-level path, kind, name, package context, source extent, line/column,
+child count, and exact source snippet. Relative files are resolved inside
+the daemon's project root when the daemon owns a project."
+  :params (list (list :name "file" :type :string :required t
+                      :description "Relative or absolute Lisp source path."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-list-top-level-forms server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-show-form"
+  :summary "Return one source form selected by a structural path."
+  :doc "Required: `path' object. The path must include `file' and either
+`top_level' or a semantic selector such as `{kind: \"defun\", name:
+\"foo\"}'. The response returns `{status: \"ok\", form, diagnostics}' for
+a unique match, `{status: \"ambiguous\", candidates, diagnostics}' for
+multiple matches, or an error when no form matches. The form text is the
+exact source substring for the selected top-level form."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object with file plus selector."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-show-form server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-apply-edit"
+  :summary "Apply one top-level structural source edit transactionally."
+  :doc "Required: `operation', `path'. Operations are `replace',
+`insert-before', `insert-after', `delete', `wrap', and `splice'. All
+operations except `delete' require `text'. The path is the same source
+path object accepted by `sexpr-show-form'. The edit is file-transactional:
+CLPM reads the original file, resolves the path uniquely, parses the edit
+text with *READ-EVAL* bound to NIL, validates that the edited file still
+reads, and only then writes the file. Ambiguous paths, unreadable edit text,
+and unreadable edited files return errors and leave the file unchanged."
+  :params (list (list :name "operation" :type :string :required t
+                      :description "replace, insert-before, insert-after, delete, wrap, or splice.")
+                (list :name "path" :type :object :required t
+                      :description "Source path object with file plus selector.")
+                (list :name "text" :type :string :required nil
+                      :description "Replacement, insertion, wrapper template, or splice forms."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-apply-edit server params id))))
+
+;;; ----------------------------------------------------------------------------
 ;;; compile-file / load-file with structured diagnostics
 ;;; ----------------------------------------------------------------------------
 

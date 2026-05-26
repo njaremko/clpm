@@ -50,6 +50,7 @@
       :components
       ((:file "driver")
        (:file "orchestrator")))
+     (:file "sexpr_edit")
      (:file "repl_compat")
      (:file "repl")
      (:file "commands")
