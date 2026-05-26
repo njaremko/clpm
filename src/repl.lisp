@@ -5687,6 +5687,162 @@ macroexpands|specializes). Returns
               id
               (%sexpr-source-call-graph server document))))))))
 
+(defun %sexpr-source-definition-kind (source-form)
+  (let ((kind (clpm.sexpr-edit:source-form-kind source-form)))
+    (cond
+      ((string= kind "defun") :function)
+      ((string= kind "defmacro") :macro)
+      ((string= kind "defgeneric") :generic-function)
+      ((string= kind "defmethod") :method)
+      ((string= kind "defclass") :class)
+      ((string= kind "defstruct") :class)
+      ((member kind '("defvar" "defparameter" "defconstant") :test #'string=)
+       :variable)
+      (t nil))))
+
+(defun %sexpr-source-definition-symbol (source-form)
+  (let ((form (clpm.sexpr-edit:source-form-form source-form)))
+    (when (and (consp form)
+               (symbolp (second form))
+               (%sexpr-source-definition-kind source-form))
+      (second form))))
+
+(defun %sexpr-image-definition-present-p (symbol kind)
+  (case kind
+    ((:function :generic-function :macro :method) (fboundp symbol))
+    (:class (find-class symbol nil))
+    (:variable (boundp symbol))
+    (t nil)))
+
+#+sbcl
+(defun %sexpr-definition-sources (symbol kind)
+  (handler-case
+      (sb-introspect:find-definition-sources-by-name symbol kind)
+    (error () nil)))
+
+#-sbcl
+(defun %sexpr-definition-sources (symbol kind)
+  (declare (ignore symbol kind))
+  nil)
+
+#+sbcl
+(defun %sexpr-source-newer-p (pathname file-write-date symbol kind)
+  (some
+   (lambda (source)
+     (let ((source-path (sb-introspect:definition-source-pathname source))
+           (source-date
+             (sb-introspect:definition-source-file-write-date source)))
+       (and source-path
+            source-date
+            file-write-date
+            (equal (truename pathname)
+                   (ignore-errors (truename source-path)))
+            (> file-write-date source-date))))
+   (%sexpr-definition-sources symbol kind)))
+
+#-sbcl
+(defun %sexpr-source-newer-p (pathname file-write-date symbol kind)
+  (declare (ignore pathname file-write-date symbol kind))
+  nil)
+
+(defun %sexpr-sync-definition-json (file source-form symbol kind &rest pairs)
+  (apply #'%json-object
+         "name" (symbol-name symbol)
+         "kind" (string-downcase (symbol-name kind))
+         "path" (%sexpr-path-json file source-form)
+         pairs))
+
+(defun %sexpr-image-only-definitions (package source-symbols server)
+  (let ((entries '()))
+    (do-symbols (symbol package)
+      (when (and (eq package (symbol-package symbol))
+                 (not (member symbol source-symbols))
+                 (or (fboundp symbol)
+                     (find-class symbol nil)
+                     (and (boundp symbol)
+                          (not (constantp symbol)))))
+        (push (%json-object
+               "name" (symbol-name symbol)
+               "package" (%public-package-name package server)
+               "kinds" (%symbol-kinds-json symbol))
+              entries)))
+    (sort entries #'string<
+          :key (lambda (entry) (%json-getf entry "name")))))
+
+(defun %dispatch-sexpr-compare-image-source (server params id)
+  (let ((file (%json-getf params "file"))
+        (package-name (%json-getf params "package")))
+    (cond
+      ((not (stringp file))
+       (%error-response id "protocol-error" "missing `file' param"))
+      ((and package-name (not (stringp package-name)))
+       (%error-response id "protocol-error" "`package' must be a string"))
+      (t
+       (multiple-value-bind (document error-response)
+           (%sexpr-read-document server file id)
+         (or error-response
+             (let* ((actual-file
+                      (namestring
+                       (clpm.sexpr-edit:source-document-pathname document)))
+                    (pathname
+                      (clpm.sexpr-edit:source-document-pathname document))
+                    (file-write-date (file-write-date pathname))
+                    (package
+                      (or (and package-name
+                               (%resolve-package-for-server server
+                                                            package-name))
+                          (find-package
+                           (or (loop for form in
+                                     (clpm.sexpr-edit:source-document-forms
+                                      document)
+                                     thereis
+                                     (clpm.sexpr-edit:source-form-package
+                                      form))
+                               "COMMON-LISP-USER"))))
+                    (source-only '())
+                    (source-newer '())
+                    (source-symbols '()))
+               (unless package
+                 (return-from %dispatch-sexpr-compare-image-source
+                   (%error-response id "eval-error"
+                                    (format nil "no such package: ~A"
+                                            package-name))))
+               (dolist (source-form
+                        (clpm.sexpr-edit:source-document-forms document))
+                 (let ((kind (%sexpr-source-definition-kind source-form))
+                       (symbol (%sexpr-source-definition-symbol source-form)))
+                   (when (and kind symbol)
+                     (pushnew symbol source-symbols)
+                     (cond
+                       ((not (%sexpr-image-definition-present-p symbol kind))
+                        (push (%sexpr-sync-definition-json
+                               actual-file source-form symbol kind
+                               "reason" "no_image_definition")
+                              source-only))
+                       ((%sexpr-source-newer-p pathname file-write-date
+                                               symbol kind)
+                        (push (%sexpr-sync-definition-json
+                               actual-file source-form symbol kind
+                               "reason" "file_write_date_newer_than_image")
+                              source-newer))))))
+               (let ((image-only
+                       (%sexpr-image-only-definitions package source-symbols
+                                                      server)))
+                 (%success-response
+                  id
+                  (%json-object
+                   "file" actual-file
+                   "package" (%public-package-name package server)
+                   "source_newer_than_image"
+                   (%json-array (nreverse source-newer))
+                   "source_only" (%json-array (nreverse source-only))
+                   "image_only" (%json-array image-only)
+                   "summary" (%json-object
+                              "source_newer_than_image"
+                              (length source-newer)
+                              "source_only" (length source-only)
+                              "image_only" (length image-only))))))))))))
+
 (defun %sexpr-child-path (path)
   (let ((raw (%sexpr-path-field path "child_path")))
     (cond
@@ -6121,6 +6277,23 @@ than guessed."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-call-graph server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-compare-image-source"
+  :summary "Compare source definitions with the live Lisp image."
+  :doc "Required: `file'. Optional: `package'. Reports definitions whose
+source file is newer than the image definition source, source definitions
+missing from the image, and package-local image definitions not present in the
+file. SBCL definition-source write dates are used when available."
+  :params (list (list :name "file" :type :string :required t
+                      :description "Relative or absolute Lisp source path.")
+                (list :name "package" :type :string :required nil
+                      :description "Package used to search image-only definitions."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-compare-image-source server params id))))
 
 (%register-method
  (make-method-spec

@@ -203,6 +203,21 @@
 ")
     path))
 
+(defun make-sync-source-file (function-name value)
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-sync-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "sync.lisp" dir)))
+    (write-file path
+                (format nil "(in-package #:cl-user)
+
+(defun ~A ()
+  ~S)
+"
+                        (string-downcase function-name)
+                        value))
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -302,6 +317,9 @@
                    "sexpr-source-origin missing from methods")
       (assert-true (member "sexpr-call-graph" method-names :test #'string=)
                    "sexpr-call-graph missing from methods")
+      (assert-true (member "sexpr-compare-image-source" method-names
+                           :test #'string=)
+                   "sexpr-compare-image-source missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
                    "sexpr-bindings-at missing from methods")
       (assert-true (member "sexpr-symbol-info" method-names :test #'string=)
@@ -837,6 +855,66 @@
                        graph-result)
           (assert-equal "function_value" (lookup dynamic-call "reason")
                         "funcall should be classified as dynamic"))
+        (let* ((suffix (random (expt 2 32)))
+               (sync-name (format nil "SEXPR-SYNC-~A" suffix))
+               (image-only-name
+                 (format nil "SEXPR-IMAGE-ONLY-~A" suffix))
+               (sync-path (make-sync-source-file sync-name :loaded))
+               (load-resp
+                 (clpm.repl:send-request
+                  sock "eval"
+                  :params (json-object
+                           "form"
+                           (format nil "(load ~S :verbose nil :print nil)"
+                                   (namestring sync-path))))))
+          (assert-true (lookup load-resp "result")
+                       "sync source load failed: ~S" load-resp)
+          (sleep 1)
+          (write-file sync-path
+                      (format nil "(in-package #:cl-user)
+
+(defun ~A ()
+  :edited)
+"
+                              (string-downcase sync-name)))
+          (let* ((image-resp
+                   (clpm.repl:send-request
+                    sock "eval"
+                    :params (json-object
+                             "form"
+                             (format nil "(defun ~A () :image)"
+                                     (string-downcase
+                                      image-only-name)))))
+                 (compare-resp
+                   (clpm.repl:send-request
+                    sock "sexpr-compare-image-source"
+                    :params (json-object
+                             "file" (namestring sync-path)
+                             "package" "CL-USER")))
+                 (compare-result (lookup compare-resp "result"))
+                 (source-newer
+                   (array-items
+                    (lookup compare-result
+                            "source_newer_than_image")))
+                 (image-only
+                   (array-items (lookup compare-result "image_only"))))
+            (assert-true (lookup image-resp "result")
+                         "image-only setup failed: ~S" image-resp)
+            (assert-true compare-result
+                         "source/image compare failed: ~S"
+                         compare-resp)
+            (assert-true (find sync-name source-newer
+                               :key (lambda (entry)
+                                      (lookup entry "name"))
+                               :test #'string=)
+                         "edited loaded function should be source-newer: ~S"
+                         compare-result)
+            (assert-true (find image-only-name image-only
+                               :key (lambda (entry)
+                                      (lookup entry "name"))
+                               :test #'string=)
+                         "eval-defined function should be image-only: ~S"
+                         compare-result)))
         (let* ((scope-path (make-scope-source-file))
                (scope-file (namestring scope-path))
                (bindings-resp

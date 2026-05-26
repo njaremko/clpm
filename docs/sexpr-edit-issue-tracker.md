@@ -336,7 +336,7 @@ Acceptance evidence:
 
 ### SE-023: Source/Image Synchronization
 
-Status: open
+Status: in-progress
 
 Expose source-vs-image synchronization checks: source newer than image, image-only definitions, source-only definitions, and stale ASDF components. The tool should integrate with existing CLPM `load-system`, `compile-file`, and redefinition logs.
 
