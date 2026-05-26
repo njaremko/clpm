@@ -4961,6 +4961,22 @@ recorded by ASDF, plus its declared and resolved dependencies."
         (*print-pretty* nil))
     (%safe-prin1 value)))
 
+(defun %hash-table-inspector-entries (table)
+  "Return hash-table entries in a deterministic inspector order.
+
+Each entry is `(KEY VALUE KEY-REPR VALUE-REPR)'. The Common Lisp standard
+does not specify hash-table iteration order, so every operation that maps an
+inspector index back to a hash entry must use this same sorted view."
+  (let ((entries '()))
+    (maphash
+     (lambda (key value)
+       (push (list key value
+                   (%inspect-part-repr key)
+                   (%inspect-part-repr value))
+             entries))
+     table)
+    (stable-sort entries #'string< :key #'third)))
+
 (defun %proper-list-length (x)
   "Return X's length when X is a proper list, otherwise NIL.
 
@@ -4994,11 +5010,13 @@ slices [offset, offset+page-size)."
        (let* ((len proper-list-length)
                (start (max 0 (min offset len)))
                (end (min (+ start page) len))
-               (parts (loop for i from start below end
+               (tail (nthcdr start value))
+               (parts (loop for cell on tail
+                           for i from start below end
                            collect (%json-object
                                     "i" i
                                     "label" (princ-to-string i)
-                                    "repr" (%inspect-part-repr (nth i value))
+                                    "repr" (%inspect-part-repr (car cell))
                                     "kind" "elem"))))
          (values parts "list" len)))
       ;; Dotted pair: car/cdr.
@@ -5038,17 +5056,17 @@ slices [offset, offset+page-size)."
        (hash-table
        (let ((entries '())
              (i 0))
-         (maphash
-          (lambda (k v)
-            (when (and (>= i offset) (< i (+ offset page)))
-              (push (%json-object
-                     "i" i
-                     "label" (%inspect-part-repr k)
-                     "repr" (%inspect-part-repr v)
-                     "kind" "kv")
-                    entries))
-            (incf i))
-          value)
+         (dolist (entry (%hash-table-inspector-entries value))
+           (when (and (>= i offset) (< i (+ offset page)))
+             (destructuring-bind (_key _value key-repr value-repr) entry
+               (declare (ignore _key _value))
+               (push (%json-object
+                      "i" i
+                      "label" key-repr
+                      "repr" value-repr
+                      "kind" "kv")
+                     entries)))
+           (incf i))
          (values (nreverse entries) "hash-table" (hash-table-count value))))
       (symbol
        (let* ((parts
@@ -5139,56 +5157,49 @@ slices [offset, offset+page-size)."
   "Push the i-th part of the current focus onto the stack. Returns the
 new focus, or :no-part on out-of-range."
   (let ((focus (%inspector-current sess)))
-    (typecase focus
-      (cons (case i
-              (0 (push (car focus) (inspector-session-stack sess))
-                 (car focus))
-              (1 (push (cdr focus) (inspector-session-stack sess))
-                 (cdr focus))
-              (t :no-part)))
-      (string
-       (cond ((and (integerp i) (<= 0 i (1- (length focus))))
-              (push (char focus i) (inspector-session-stack sess))
-              (char focus i))
-             (t :no-part)))
-      (vector
-       (cond ((and (integerp i) (<= 0 i (1- (length focus))))
-              (push (aref focus i) (inspector-session-stack sess))
-              (aref focus i))
-             (t :no-part)))
-      (list
-       (cond ((and (integerp i) (<= 0 i (1- (length focus))))
-              (push (nth i focus) (inspector-session-stack sess))
-              (nth i focus))
-             (t :no-part)))
-      (hash-table
-       (let ((found :no-part))
-         (let ((j 0))
-           (maphash (lambda (k v)
-                      (when (= j i)
-                        (push (cons k v) (inspector-session-stack sess))
-                        (setf found (cons k v)))
-                      (incf j))
-                    focus))
-         found))
-      (standard-object
-       #+sbcl
-       (handler-case
-           (let* ((class (class-of focus))
-                  (slots (progn (sb-mop:finalize-inheritance class)
-                                (sb-mop:class-slots class))))
-             (cond
-               ((and (integerp i) (< i (length slots)))
-                (let* ((slot (nth i slots))
-                       (name (sb-mop:slot-definition-name slot))
-                       (v (if (slot-boundp focus name)
-                              (slot-value focus name)
-                              :unbound)))
-                  (push v (inspector-session-stack sess))
-                  v))
+    (labels ((descend (value)
+               (push value (inspector-session-stack sess))
+               value))
+      (cond
+        ((not (and (integerp i) (<= 0 i)))
+         :no-part)
+        ((let ((len (%proper-list-length focus)))
+           (and len (< i len)))
+         (descend (car (nthcdr i focus))))
+        ((consp focus)
+         (case i
+           (0 (descend (car focus)))
+           (1 (descend (cdr focus)))
+           (t :no-part)))
+        ((stringp focus)
+         (cond ((< i (length focus)) (descend (char focus i)))
                (t :no-part)))
-         (error () :no-part)))
-      (t :no-part))))
+        ((vectorp focus)
+         (cond ((< i (length focus)) (descend (aref focus i)))
+               (t :no-part)))
+        ((hash-table-p focus)
+         (let ((entry (nth i (%hash-table-inspector-entries focus))))
+           (cond
+             (entry (descend (second entry)))
+             (t :no-part))))
+        ((or (typep focus 'standard-object)
+             (typep focus 'structure-object))
+         #+sbcl
+         (handler-case
+             (let* ((class (class-of focus))
+                    (slots (progn (sb-mop:finalize-inheritance class)
+                                  (sb-mop:class-slots class))))
+               (cond
+                 ((< i (length slots))
+                  (let* ((slot (nth i slots))
+                         (name (sb-mop:slot-definition-name slot)))
+                    (descend (if (slot-boundp focus name)
+                                 (slot-value focus name)
+                                 :unbound))))
+                 (t :no-part)))
+           (error () :no-part))
+         #-sbcl :no-part)
+        (t :no-part)))))
 
 (defun %inspector-render (sess)
   "Build the v2 JSON payload describing SESS's current view."
@@ -5212,6 +5223,52 @@ new focus, or :no-part on out-of-range."
                             '("mutate"))
                           '("close")))
        "depth" (length (inspector-session-stack sess))))))
+
+(defun %set-inspector-part (focus i new-value)
+  "Set displayed part I of FOCUS to NEW-VALUE.
+
+Returns true when a part existed and was updated. This mirrors
+`%inspector-parts' and `%inspector-into', so action indices mean the same
+thing across render, navigation, and mutation."
+  (cond
+    ((not (and (integerp i) (<= 0 i))) nil)
+    ((let ((len (%proper-list-length focus)))
+       (and len (< i len)))
+     (setf (car (nthcdr i focus)) new-value)
+     t)
+    ((consp focus)
+     (case i
+       (0 (setf (car focus) new-value) t)
+       (1 (setf (cdr focus) new-value) t)
+       (t nil)))
+    ((stringp focus)
+     (when (< i (length focus))
+       (setf (char focus i) new-value)
+       t))
+    ((vectorp focus)
+     (when (< i (length focus))
+       (setf (aref focus i) new-value)
+       t))
+    ((hash-table-p focus)
+     (let ((entry (nth i (%hash-table-inspector-entries focus))))
+       (when entry
+         (setf (gethash (first entry) focus) new-value)
+         t)))
+    ((or (typep focus 'standard-object)
+         (typep focus 'structure-object))
+     #+sbcl
+     (handler-case
+         (let* ((class (class-of focus))
+                (slots (progn (sb-mop:finalize-inheritance class)
+                              (sb-mop:class-slots class))))
+           (when (< i (length slots))
+             (setf (slot-value focus
+                               (sb-mop:slot-definition-name (nth i slots)))
+                   new-value)
+             t))
+       (error () nil))
+     #-sbcl nil)
+    (t nil)))
 
 ;;; ----------------------------------------------------------------------------
 ;;; Image and ASDF management (#190-#194)
@@ -5645,31 +5702,12 @@ been opened with `mutable: true'. Returns the refreshed view."
                                (%read-form form-text)))
                      (new-value (let ((*package* pkg))
                                   (eval parsed))))
-               (typecase focus
-                 (cons (case i
-                         (0 (setf (car focus) new-value))
-                         (1 (setf (cdr focus) new-value))))
-                 (vector (setf (aref focus i) new-value))
-                 (hash-table
-                  (let ((j 0) (target-key nil))
-                    (maphash (lambda (k v)
-                               (declare (ignore v))
-                               (when (= j i) (setf target-key k))
-                               (incf j))
-                             focus)
-                    (when target-key
-                      (setf (gethash target-key focus) new-value))))
-                 (standard-object
-                  #+sbcl
-                  (let* ((class (class-of focus))
-                         (slots (progn (sb-mop:finalize-inheritance class)
-                                       (sb-mop:class-slots class))))
-                    (when (< i (length slots))
-                      (setf (slot-value focus
-                                        (sb-mop:slot-definition-name
-                                         (nth i slots)))
-                            new-value)))))
-               (%success-response id (%inspector-render sess)))
+                (cond
+                  ((%set-inspector-part focus i new-value)
+                   (%success-response id (%inspector-render sess)))
+                  (t
+                   (%error-response id "eval-error"
+                                    (format nil "no part ~A" i)))))
            (error (c)
              (%error-response id "eval-error" (princ-to-string c))))))))))
 

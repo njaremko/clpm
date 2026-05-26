@@ -140,6 +140,22 @@
                      (lookup po-result "value_repr"))))))
 (format t "  into/pop OK~%")
 
+(format t "Test: inspect-into follows displayed proper-list indices~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((initial (do-rpc sock "inspect"
+                             (list (cons "form" "(list :a :b :c)"))))
+           (sid (lookup (lookup initial "result") "session"))
+           (into (do-rpc sock "inspect-into"
+                          (list (cons "session" sid)
+                                (cons "i" 2))))
+           (result (lookup into "result")))
+      (assert-true result
+                   "inspect-into should accept displayed list index 2: ~S"
+                   into)
+      (assert-equal-string ":C" (lookup result "value_repr")))))
+(format t "  proper-list into OK~%")
+
 ;;; ----------------------------------------------------------------------------
 ;;; #122: inspect-eval gets * bound to focus.
 
@@ -178,6 +194,55 @@
                      (lookup (lookup view "result") "parts"))))
         (assert-equal-string "42" (lookup (second parts) "repr"))))))
 (format t "  mutate OK~%")
+
+(format t "Test: inspect-mutate follows displayed proper-list indices~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((init (do-rpc sock "inspect"
+                          (list (cons "form" "(list :a :b :c)")
+                                (cons "mutable" t))))
+           (sid (lookup (lookup init "result") "session"))
+           (mutate (do-rpc sock "inspect-mutate"
+                           (list (cons "session" sid)
+                                 (cons "i" 2)
+                                 (cons "form" ":z")))))
+      (assert-true (lookup mutate "result")
+                   "inspect-mutate should accept displayed list index 2: ~S"
+                   mutate)
+      (let* ((parts (array-items (lookup (lookup mutate "result") "parts"))))
+        (assert-equal-string ":Z" (lookup (third parts) "repr"))))))
+(format t "  proper-list mutate OK~%")
+
+(format t "Test: inspect hash-table indices are stable and support NIL keys~%")
+(with-daemon
+  (lambda (sock)
+    (let* ((init (do-rpc sock "inspect"
+                          (list (cons "form"
+                                      "(let ((h (make-hash-table)))
+                                         (setf (gethash nil h) :nil-value
+                                               (gethash :other h) :other-value)
+                                         h)")
+                                (cons "mutable" t))))
+           (sid (lookup (lookup init "result") "session"))
+           (parts (array-items (lookup (lookup init "result") "parts")))
+           (nil-part (find "NIL" parts
+                           :key (lambda (part) (lookup part "label"))
+                           :test #'string=)))
+      (assert-true nil-part "hash inspector did not render NIL key: ~S" parts)
+      (let* ((index (lookup nil-part "i"))
+             (mutate (do-rpc sock "inspect-mutate"
+                             (list (cons "session" sid)
+                                   (cons "i" index)
+                                   (cons "form" "99"))))
+             (new-parts (array-items (lookup (lookup mutate "result")
+                                             "parts")))
+             (new-nil-part (find "NIL" new-parts
+                                 :key (lambda (part) (lookup part "label"))
+                                 :test #'string=)))
+        (assert-true (lookup mutate "result")
+                     "hash-table mutate failed: ~S" mutate)
+        (assert-equal-string "99" (lookup new-nil-part "repr"))))))
+(format t "  hash-table NIL-key mutate OK~%")
 
 (format t "Test: inspect-mutate reads forms in the current package~%")
 (with-daemon
