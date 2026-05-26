@@ -6904,6 +6904,386 @@ macroexpands|specializes). Returns
                   arguments)))
     (format nil "(~A~{ ~A~})" name-token argument-tokens)))
 
+(defun %sexpr-read-form-in-package (text package)
+  (let ((*package* package)
+        (*read-eval* nil))
+    (%read-form text)))
+
+(defun %sexpr-lambda-list-text (lambda-list package)
+  (let ((*package* package)
+        (*print-case* :downcase)
+        (*print-pretty* nil)
+        (*print-circle* t))
+    (prin1-to-string lambda-list)))
+
+(defun %sexpr-symbol-same-name-package-p (left right)
+  (and (symbolp left)
+       (symbolp right)
+       (string= (symbol-name left) (symbol-name right))
+       (eq (symbol-package left) (symbol-package right))))
+
+(defun %sexpr-function-designator-symbol (form)
+  (cond
+    ((symbolp form) form)
+    ((let ((elements (%sexpr-proper-list-elements form)))
+       (and (= (length elements) 2)
+            (symbolp (first elements))
+            (member (symbol-name (first elements)) '("FUNCTION" "QUOTE")
+                    :test #'string=)
+            (symbolp (second elements))
+            (second elements))))))
+
+(defun %sexpr-function-definition-symbol (source-form)
+  (let ((form (clpm.sexpr-edit:source-form-form source-form)))
+    (when (and (consp form)
+               (member (clpm.sexpr-edit:source-form-kind source-form)
+                       '("defun" "defgeneric")
+                       :test #'string=)
+               (symbolp (second form)))
+      (second form))))
+
+(defun %sexpr-call-site-json (file site server)
+  (let* ((source-form (getf site :source-form))
+         (package (or (and (clpm.sexpr-edit:source-form-package source-form)
+                           (find-package
+                            (clpm.sexpr-edit:source-form-package
+                             source-form)))
+                      (find-package "COMMON-LISP-USER"))))
+    (%json-object
+     "kind" (getf site :kind)
+     "caller" (clpm.sexpr-edit:source-form-name source-form)
+     "operator" (and (getf site :operator)
+                     (%sexpr-callee-json (getf site :operator) server))
+     "path" (%sexpr-path-with-child-json file source-form
+                                         (getf site :child-path))
+     "argument_count" (getf site :argument-count)
+     "form" (%sexpr-print-form-json (getf site :form) package)
+     "reason" (getf site :reason))))
+
+(defun %sexpr-function-call-sites (document function-symbol)
+  (let ((direct-sites '())
+        (dynamic-sites '()))
+    (labels ((record-direct (source-form path form elements)
+               (push (list :kind "direct"
+                           :source-form source-form
+                           :child-path path
+                           :form form
+                           :operator (first elements)
+                           :argument-count (1- (length elements)))
+                     direct-sites))
+             (record-dynamic (source-form path form operator elements)
+               (let ((designator (second elements)))
+                 (when (%sexpr-symbol-same-name-package-p
+                        (%sexpr-function-designator-symbol designator)
+                        function-symbol)
+                   (push (list :kind "dynamic"
+                               :source-form source-form
+                               :child-path path
+                               :form form
+                               :operator operator
+                               :argument-count (max 0 (- (length elements) 2))
+                               :reason "function_designator_flow")
+                         dynamic-sites))))
+             (walk (source-form form path)
+               (let ((elements (%sexpr-proper-list-elements form)))
+                 (when elements
+                   (let* ((operator (first elements))
+                          (operator-name (and (symbolp operator)
+                                              (symbol-name operator))))
+                     (cond
+                       ((member operator-name '("QUOTE" "FUNCTION" "DECLARE")
+                                :test #'string=)
+                        nil)
+                       (t
+                        (when (%sexpr-symbol-same-name-package-p
+                               operator function-symbol)
+                          (record-direct source-form path form elements))
+                        (when (and (member operator-name
+                                           '("APPLY" "FUNCALL"
+                                             "SYMBOL-FUNCTION")
+                                           :test #'string=)
+                                   (rest elements))
+                          (record-dynamic source-form path form operator
+                                          elements))
+                        (loop for child in elements
+                              for index from 0
+                              do (walk source-form child
+                                       (append path (list index)))))))))))
+      (dolist (source-form (clpm.sexpr-edit:source-document-forms document))
+        (walk source-form
+              (clpm.sexpr-edit:source-form-form source-form)
+              nil)))
+    (values (nreverse direct-sites) (nreverse dynamic-sites))))
+
+(defun %sexpr-lambda-list-child-index (source-form)
+  (let ((kind (clpm.sexpr-edit:source-form-kind source-form)))
+    (cond
+      ((member kind '("defun" "defgeneric") :test #'string=) 2)
+      (t nil))))
+
+(defun %sexpr-lambda-list-shape (lambda-list)
+  (let ((required-count 0)
+        (optional-count 0)
+        (restp nil)
+        (keyp nil)
+        (mode :required))
+    (dolist (item lambda-list)
+      (cond
+        ((%lambda-list-keyword-p item)
+         (let ((name (symbol-name item)))
+           (cond
+             ((string= name "&OPTIONAL") (setf mode :optional))
+             ((member name '("&REST" "&BODY") :test #'string=)
+              (setf mode :rest
+                    restp t))
+             ((string= name "&KEY")
+              (setf mode :key
+                    keyp t))
+             ((string= name "&ALLOW-OTHER-KEYS")
+              (setf keyp t))
+             ((string= name "&AUX")
+              (setf mode :aux)))))
+        ((eq mode :required)
+         (incf required-count))
+        ((eq mode :optional)
+         (incf optional-count))))
+    (values required-count
+            (and (not restp)
+                 (not keyp)
+                 (+ required-count optional-count))
+            restp
+            keyp)))
+
+(defun %sexpr-broken-call-sites (direct-sites lambda-list)
+  (multiple-value-bind (minimum maximum)
+      (%sexpr-lambda-list-shape lambda-list)
+    (loop for site in direct-sites
+          for arg-count = (getf site :argument-count)
+          for reason = (cond
+                         ((< arg-count minimum) "too_few_arguments")
+                         ((and maximum (> arg-count maximum))
+                          "too_many_arguments"))
+          when reason
+            collect (append site (list :reason reason)))))
+
+(defun %sexpr-lambda-list-facts-json (lambda-list)
+  (multiple-value-bind (minimum maximum restp keyp)
+      (%sexpr-lambda-list-shape lambda-list)
+    (%json-object
+     "minimum_arguments" minimum
+     "maximum_arguments" maximum
+     "rest" (%sexpr-boolean-json restp)
+     "key" (%sexpr-boolean-json keyp))))
+
+(defun %sexpr-keyword-symbol (parameter keyword-text package)
+  (cond
+    (keyword-text
+     (let ((keyword (%sexpr-read-form-in-package keyword-text package)))
+       (unless (keywordp keyword)
+         (error "keyword must read as a keyword symbol"))
+       keyword))
+    (t
+     (intern (symbol-name parameter) "KEYWORD"))))
+
+(defun %sexpr-key-parameter-form (parameter keyword default default-present-p)
+  (let ((varspec (if (string= (symbol-name parameter)
+                              (symbol-name keyword))
+                     parameter
+                     (list keyword parameter))))
+    (if default-present-p
+        (list varspec default)
+        varspec)))
+
+(defun %sexpr-add-key-parameter (lambda-list key-parameter)
+  (let ((has-key nil)
+        (inserted nil)
+        (result '()))
+    (dolist (item lambda-list)
+      (when (and (symbolp item)
+                 (string= "&KEY" (symbol-name item)))
+        (setf has-key t))
+      (when (and (not inserted)
+                 (symbolp item)
+                 (member (symbol-name item) '("&ALLOW-OTHER-KEYS" "&AUX")
+                         :test #'string=))
+        (unless has-key
+          (push (intern "&KEY" "COMMON-LISP") result)
+          (setf has-key t))
+        (push key-parameter result)
+        (setf inserted t))
+      (push item result))
+    (unless inserted
+      (unless has-key
+        (push (intern "&KEY" "COMMON-LISP") result))
+      (push key-parameter result))
+    (nreverse result)))
+
+(defun %sexpr-required-lambda-prefix (lambda-list)
+  (let ((required '())
+        (tail lambda-list))
+    (loop while tail
+          for item = (first tail)
+          do (cond
+               ((%lambda-list-keyword-p item)
+                (return))
+               ((symbolp item)
+                (push item required)
+                (setf tail (rest tail)))
+               (t
+                (error "conversion only supports simple required parameters"))))
+    (values (nreverse required) tail)))
+
+(defun %sexpr-convert-required-arg-to-key (lambda-list position keyword)
+  (multiple-value-bind (required tail)
+      (%sexpr-required-lambda-prefix lambda-list)
+    (unless (and (integerp position)
+                 (<= 0 position)
+                 (< position (length required)))
+      (error "argument_position must select a required parameter"))
+    (let* ((parameter (nth position required))
+           (remaining (loop for parameter in required
+                            for index from 0
+                            unless (= index position)
+                              collect parameter))
+           (key-parameter (%sexpr-key-parameter-form parameter keyword nil nil)))
+      (values (append remaining
+                      (%sexpr-add-key-parameter tail key-parameter))
+              parameter))))
+
+(defun %sexpr-source-range-text (text span)
+  (subseq text
+          (clpm.sexpr-edit:source-child-span-start span)
+          (clpm.sexpr-edit:source-child-span-end span)))
+
+(defun %sexpr-call-source-simple-p (text)
+  (not (or (find #\Newline text)
+           (find #\Return text)
+           (find #\; text))))
+
+(defun %sexpr-converted-call-replacement (site position keyword-token source-text)
+  (let* ((source-form (getf site :source-form))
+         (call-path (getf site :child-path))
+         (call-span (clpm.sexpr-edit:source-form-child-span source-form
+                                                            call-path))
+         (call-text (%sexpr-source-range-text source-text call-span)))
+    (cond
+      ((<= (getf site :argument-count) position)
+       (values nil
+               (append site (list :reason "too_few_arguments_for_conversion"))))
+      ((not (%sexpr-call-source-simple-p call-text))
+       (values nil
+               (append site (list :reason "unsupported_call_layout"))))
+      (t
+       (let* ((operator-span
+                (clpm.sexpr-edit:source-form-child-span
+                 source-form (append call-path (list 0))))
+              (operator-text (%sexpr-source-range-text source-text
+                                                       operator-span))
+              (argument-texts
+                (loop for index from 0 below (getf site :argument-count)
+                      for span = (clpm.sexpr-edit:source-form-child-span
+                                  source-form
+                                  (append call-path (list (1+ index))))
+                      collect (%sexpr-source-range-text source-text span)))
+              (selected (nth position argument-texts))
+              (remaining (loop for argument in argument-texts
+                               for index from 0
+                               unless (= index position)
+                                 collect argument))
+              (replacement
+                (format nil "(~A~{ ~A~})"
+                        operator-text
+                        (append remaining
+                                (list keyword-token selected)))))
+         (values (list (clpm.sexpr-edit:source-child-span-start call-span)
+                       (clpm.sexpr-edit:source-child-span-end call-span)
+                       replacement)
+                 nil))))))
+
+(defun %sexpr-apply-replacements (text replacements)
+  (let ((result text))
+    (dolist (replacement (sort (copy-list replacements) #'> :key #'first)
+                         result)
+      (setf result
+            (%sexpr-replace-source-range result
+                                        (first replacement)
+                                        (second replacement)
+                                        (third replacement))))))
+
+(defun %sexpr-selected-definition-context (server path id)
+  (let ((file (%sexpr-path-field path "file")))
+    (cond
+      ((not (stringp file))
+       (values nil nil nil nil nil
+               (%error-response id "protocol-error"
+                                "`path.file' must be a string")))
+      (t
+       (multiple-value-bind (document error-response)
+           (%sexpr-read-document server file id)
+         (if error-response
+             (values nil nil nil nil nil error-response)
+             (let* ((actual-file
+                      (namestring
+                       (clpm.sexpr-edit:source-document-pathname document)))
+                    (pathname
+                      (clpm.sexpr-edit:source-document-pathname document))
+                    (forms (%sexpr-selected-forms document path)))
+               (cond
+                 ((null forms)
+                  (values nil nil nil nil nil
+                          (%error-response id "eval-error"
+                                           "no form matched source path")))
+                 ((rest forms)
+                  (values nil nil nil nil nil
+                          (%success-response
+                           id
+                           (%json-object
+                            "status" "ambiguous"
+                            "file" actual-file
+                            "candidates"
+                            (%json-array
+                             (mapcar
+                              (lambda (form)
+                                (%sexpr-form-summary-json actual-file form))
+                              forms))))))
+                 (t
+                  (let* ((source-form (first forms))
+                         (pkg-name
+                           (clpm.sexpr-edit:source-form-package source-form))
+                         (pkg (%reader-package-for-server server pkg-name)))
+                    (if pkg
+                        (values document actual-file pathname source-form pkg
+                                nil)
+                        (values nil nil nil nil nil
+                                (%error-response
+                                 id "eval-error"
+                                 (format nil "no such package: ~A"
+                                         pkg-name))))))))))))))
+
+(defun %sexpr-refactor-response (server id pathname actual-file after dry-run
+                                 operation path &rest pairs)
+  (let ((checked (%sexpr-edited-source-document pathname after server)))
+    (if (clpm.sexpr-edit:source-document-diagnostics checked)
+        (%success-response
+         id
+         (%json-object
+          "status" "invalid"
+          "file" actual-file
+          "committed" :false
+          "diagnostics" (%sexpr-diagnostics-json checked)))
+        (progn
+          (unless dry-run
+            (%sexpr-write-source-text pathname after))
+          (%success-response
+           id
+           (apply #'%json-object
+                  "status" "ok"
+                  "file" actual-file
+                  "committed" (%sexpr-boolean-json (not dry-run))
+                  "provenance"
+                  (%sexpr-child-edit-provenance-json operation dry-run path)
+                  pairs))))))
+
 (defun %sexpr-child-edit-provenance-json (operation dry-run path)
   (%json-object
    "created_by" "sexpr-edit"
@@ -7225,6 +7605,297 @@ macroexpands|specializes). Returns
                               (error (c)
                                 (%error-response id "eval-error"
                                                  (princ-to-string c)))))))))))))))))))
+
+(defun %dispatch-sexpr-change-lambda-list (server params id)
+  (let ((path (%json-getf params "path"))
+        (lambda-list-text (%json-getf params "lambda_list"))
+        (dry-run (%json-true-p (%json-getf params "dry_run"))))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      ((not (stringp lambda-list-text))
+       (%error-response id "protocol-error" "missing `lambda_list' param"))
+      (t
+       (handler-case
+           (multiple-value-bind (document actual-file pathname source-form pkg
+                                 error-response)
+               (%sexpr-selected-definition-context server path id)
+             (or error-response
+                 (let* ((lambda-index
+                          (%sexpr-lambda-list-child-index source-form))
+                        (function-symbol
+                          (%sexpr-function-definition-symbol source-form)))
+                   (unless lambda-index
+                     (error "selected form does not have a supported lambda list"))
+                   (unless function-symbol
+                     (error "selected form is not a supported function definition"))
+                   (let* ((new-lambda-list
+                            (%sexpr-read-form-in-package lambda-list-text pkg))
+                          (before
+                            (clpm.sexpr-edit:source-document-text document))
+                          (span
+                            (clpm.sexpr-edit:source-form-child-span
+                             source-form (list lambda-index)))
+                          (new-lambda-list-text
+                            (%sexpr-lambda-list-text new-lambda-list pkg))
+                          (after
+                            (%sexpr-replace-source-range
+                             before
+                             (clpm.sexpr-edit:source-child-span-start span)
+                             (clpm.sexpr-edit:source-child-span-end span)
+                             new-lambda-list-text)))
+                     (unless (listp new-lambda-list)
+                       (error "lambda_list must read as a list"))
+                     (multiple-value-bind (direct-sites dynamic-sites)
+                         (%sexpr-function-call-sites document function-symbol)
+                       (let ((broken
+                               (%sexpr-broken-call-sites direct-sites
+                                                         new-lambda-list)))
+                         (%sexpr-refactor-response
+                          server id pathname actual-file after dry-run
+                          "change-lambda-list"
+                          (%sexpr-path-json actual-file source-form)
+                          "path" (%sexpr-path-json actual-file source-form)
+                          "lambda_list" new-lambda-list-text
+                          "lambda_list_facts"
+                          (%sexpr-lambda-list-facts-json new-lambda-list)
+                          "broken_call_sites"
+                          (%json-array
+                           (mapcar
+                            (lambda (site)
+                              (%sexpr-call-site-json actual-file site server))
+                            broken))
+                          "dynamic_caveats"
+                          (%json-array
+                           (mapcar
+                            (lambda (site)
+                              (%sexpr-call-site-json actual-file site server))
+                            dynamic-sites)))))))))
+         (error (c)
+           (%error-response id "eval-error" (princ-to-string c))))))))
+
+(defun %dispatch-sexpr-add-keyword-arg (server params id)
+  (let ((path (%json-getf params "path"))
+        (name (%json-getf params "name"))
+        (keyword-text (%json-getf params "keyword"))
+        (default-text (%json-getf params "default"))
+        (dry-run (%json-true-p (%json-getf params "dry_run"))))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      ((not (stringp name))
+       (%error-response id "protocol-error" "missing `name' param"))
+      ((and keyword-text (not (stringp keyword-text)))
+       (%error-response id "protocol-error" "`keyword' must be a string"))
+      ((and default-text (not (stringp default-text)))
+       (%error-response id "protocol-error" "`default' must be a string"))
+      (t
+       (handler-case
+           (multiple-value-bind (document actual-file pathname source-form pkg
+                                 error-response)
+               (%sexpr-selected-definition-context server path id)
+             (or error-response
+                 (let* ((lambda-index
+                          (%sexpr-lambda-list-child-index source-form))
+                        (function-symbol
+                          (%sexpr-function-definition-symbol source-form)))
+                   (unless lambda-index
+                     (error "selected form does not have a supported lambda list"))
+                   (unless function-symbol
+                     (error "selected form is not a supported function definition"))
+                   (let* ((lambda-list
+                            (third (clpm.sexpr-edit:source-form-form
+                                    source-form)))
+                          (parameter (%sexpr-read-binding-symbol name pkg))
+                          (keyword (%sexpr-keyword-symbol parameter
+                                                          keyword-text pkg))
+                          (default (and default-text
+                                        (%sexpr-read-form-in-package
+                                         default-text pkg)))
+                          (key-parameter
+                            (%sexpr-key-parameter-form
+                             parameter keyword default
+                             (and default-text t)))
+                          (new-lambda-list
+                            (%sexpr-add-key-parameter lambda-list
+                                                       key-parameter))
+                          (new-lambda-list-text
+                            (%sexpr-lambda-list-text new-lambda-list pkg))
+                          (before
+                            (clpm.sexpr-edit:source-document-text document))
+                          (span
+                            (clpm.sexpr-edit:source-form-child-span
+                             source-form (list lambda-index)))
+                          (after
+                            (%sexpr-replace-source-range
+                             before
+                             (clpm.sexpr-edit:source-child-span-start span)
+                             (clpm.sexpr-edit:source-child-span-end span)
+                             new-lambda-list-text)))
+                     (multiple-value-bind (direct-sites dynamic-sites)
+                         (%sexpr-function-call-sites document function-symbol)
+                       (let ((broken
+                               (%sexpr-broken-call-sites direct-sites
+                                                         new-lambda-list)))
+                         (%sexpr-refactor-response
+                          server id pathname actual-file after dry-run
+                          "add-keyword-arg"
+                          (%sexpr-path-json actual-file source-form)
+                          "path" (%sexpr-path-json actual-file source-form)
+                          "parameter" (%sexpr-symbol-token parameter pkg)
+                          "keyword" (%sexpr-symbol-token keyword pkg)
+                          "lambda_list" new-lambda-list-text
+                          "lambda_list_facts"
+                          (%sexpr-lambda-list-facts-json new-lambda-list)
+                          "broken_call_sites"
+                          (%json-array
+                           (mapcar
+                            (lambda (site)
+                              (%sexpr-call-site-json actual-file site server))
+                            broken))
+                          "dynamic_caveats"
+                          (%json-array
+                           (mapcar
+                            (lambda (site)
+                              (%sexpr-call-site-json actual-file site server))
+                            dynamic-sites)))))))))
+         (error (c)
+           (%error-response id "eval-error" (princ-to-string c))))))))
+
+(defun %dispatch-sexpr-convert-to-keyword-argument (server params id)
+  (let ((path (%json-getf params "path"))
+        (position (%json-getf params "argument_position"))
+        (keyword-text (%json-getf params "keyword"))
+        (dry-run (%json-true-p (%json-getf params "dry_run"))))
+    (cond
+      ((not (%json-object-p path))
+       (%error-response id "protocol-error" "missing `path' object param"))
+      ((not (and (integerp position) (<= 0 position)))
+       (%error-response id "protocol-error"
+                        "`argument_position' must be a non-negative integer"))
+      ((and keyword-text (not (stringp keyword-text)))
+       (%error-response id "protocol-error" "`keyword' must be a string"))
+      (t
+       (handler-case
+           (multiple-value-bind (document actual-file pathname source-form pkg
+                                 error-response)
+               (%sexpr-selected-definition-context server path id)
+             (or error-response
+                 (let* ((lambda-index
+                          (%sexpr-lambda-list-child-index source-form))
+                        (function-symbol
+                          (%sexpr-function-definition-symbol source-form)))
+                   (unless lambda-index
+                     (error "selected form does not have a supported lambda list"))
+                   (unless function-symbol
+                     (error "selected form is not a supported function definition"))
+                   (let* ((lambda-list
+                            (third (clpm.sexpr-edit:source-form-form
+                                    source-form))))
+                     (multiple-value-bind (direct-sites dynamic-sites)
+                         (%sexpr-function-call-sites document function-symbol)
+                       (multiple-value-bind (required)
+                           (%sexpr-required-lambda-prefix lambda-list)
+                         (let* ((parameter (and (< position (length required))
+                                                (nth position required)))
+                                (keyword
+                                  (%sexpr-keyword-symbol
+                                   (or parameter function-symbol)
+                                   keyword-text pkg)))
+                           (multiple-value-bind (new-lambda-list
+                                                 converted-parameter)
+                               (%sexpr-convert-required-arg-to-key
+                                lambda-list position keyword)
+                             (let ((replacements '())
+                                   (broken '()))
+                               (dolist (site direct-sites)
+                                 (multiple-value-bind (replacement broken-site)
+                                     (%sexpr-converted-call-replacement
+                                      site position
+                                      (%sexpr-symbol-token keyword pkg)
+                                      (clpm.sexpr-edit:source-document-text
+                                       document))
+                                   (cond
+                                     (replacement (push replacement
+                                                        replacements))
+                                     (broken-site (push broken-site broken)))))
+                               (if broken
+                                   (%success-response
+                                    id
+                                    (%json-object
+                                     "status" "rejected"
+                                     "file" actual-file
+                                     "committed" :false
+                                     "reason" "broken direct call sites"
+                                     "broken_call_sites"
+                                     (%json-array
+                                      (mapcar
+                                       (lambda (site)
+                                         (%sexpr-call-site-json
+                                          actual-file site server))
+                                       (nreverse broken)))
+                                     "dynamic_caveats"
+                                     (%json-array
+                                      (mapcar
+                                       (lambda (site)
+                                         (%sexpr-call-site-json
+                                          actual-file site server))
+                                       dynamic-sites))))
+                                   (let* ((before
+                                            (clpm.sexpr-edit:source-document-text
+                                             document))
+                                          (span
+                                            (clpm.sexpr-edit:source-form-child-span
+                                             source-form (list lambda-index)))
+                                          (new-lambda-list-text
+                                            (%sexpr-lambda-list-text
+                                             new-lambda-list pkg))
+                                          (all-replacements
+                                            (cons
+                                             (list
+                                              (clpm.sexpr-edit:source-child-span-start
+                                               span)
+                                              (clpm.sexpr-edit:source-child-span-end
+                                               span)
+                                              new-lambda-list-text)
+                                             replacements))
+                                          (after
+                                            (%sexpr-apply-replacements
+                                             before all-replacements)))
+                                     (%sexpr-refactor-response
+                                      server id pathname actual-file after
+                                      dry-run
+                                      "convert-to-keyword-argument"
+                                      (%sexpr-path-json actual-file source-form)
+                                      "path"
+                                      (%sexpr-path-json actual-file source-form)
+                                      "parameter"
+                                      (%sexpr-symbol-token converted-parameter
+                                                           pkg)
+                                      "keyword"
+                                      (%sexpr-symbol-token keyword pkg)
+                                      "argument_position" position
+                                      "updated_call_sites"
+                                      (%json-array
+                                       (mapcar
+                                        (lambda (site)
+                                          (%sexpr-call-site-json
+                                           actual-file site server))
+                                        direct-sites))
+                                      "dynamic_caveats"
+                                      (%json-array
+                                       (mapcar
+                                        (lambda (site)
+                                          (%sexpr-call-site-json
+                                           actual-file site server))
+                                        dynamic-sites))
+                                      "lambda_list"
+                                      new-lambda-list-text
+                                      "lambda_list_facts"
+                                      (%sexpr-lambda-list-facts-json
+                                       new-lambda-list)))))))))))))
+         (error (c)
+           (%error-response id "eval-error" (princ-to-string c))))))))
 
 (defun %dispatch-sexpr-bind-repeated-expression (server params id)
   (let ((path (%json-getf params "path"))
@@ -8000,6 +8671,73 @@ writing. Optional `dry_run' reports the edit without writing."
   (lambda (server params id ctx)
     (declare (ignore ctx))
     (%dispatch-sexpr-extract-function server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-change-lambda-list"
+  :summary "Replace a function lambda list and report affected call sites."
+  :doc "Required: `path' and `lambda_list'. The path selects a supported
+function definition. The new lambda list is read in the definition package,
+the source span for the existing lambda list is replaced, and direct call
+sites are checked against the new arity. Dynamic calls through APPLY,
+FUNCALL, or SYMBOL-FUNCTION are reported as caveats."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object selecting a function definition.")
+                (list :name "lambda_list" :type :string :required t
+                      :description "Replacement lambda list source.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Validate without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-change-lambda-list server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-add-keyword-arg"
+  :summary "Add a keyword parameter while preserving existing direct calls."
+  :doc "Required: `path' and `name'. The path selects a supported function
+definition. The parameter is added under &KEY, preserving existing direct
+calls by construction; the response still reports arity diagnostics and
+dynamic caveats. Optional `keyword' may provide a distinct keyword symbol,
+and optional `default' supplies an init form."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object selecting a function definition.")
+                (list :name "name" :type :string :required t
+                      :description "Parameter name read in the source package.")
+                (list :name "keyword" :type :string :required nil
+                      :description "Keyword symbol, such as :store.")
+                (list :name "default" :type :string :required nil
+                      :description "Optional default init form.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Validate without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-add-keyword-arg server params id))))
+
+(%register-method
+ (make-method-spec
+  :name "sexpr-convert-to-keyword-argument"
+  :summary "Convert one required positional argument to a keyword argument."
+  :doc "Required: `path' and zero-based `argument_position'. The selected
+required parameter is removed from the positional prefix, added under &KEY,
+and simple direct calls are rewritten by moving that argument to the keyword
+tail. Direct calls that are too short or have unsupported source layout are
+reported as broken. APPLY/FUNCALL/SYMBOL-FUNCTION uses are reported as
+dynamic caveats."
+  :params (list (list :name "path" :type :object :required t
+                      :description "Source path object selecting a function definition.")
+                (list :name "argument_position" :type :integer :required t
+                      :description "Zero-based required positional argument index.")
+                (list :name "keyword" :type :string :required nil
+                      :description "Keyword symbol to use; defaults from the parameter name.")
+                (list :name "dry_run" :type :boolean :required nil
+                      :description "Validate without writing the file."))
+  :handler
+  (lambda (server params id ctx)
+    (declare (ignore ctx))
+    (%dispatch-sexpr-convert-to-keyword-argument server params id))))
 
 (%register-method
  (make-method-spec

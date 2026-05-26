@@ -325,6 +325,30 @@
 ")
     path))
 
+(defun make-lambda-refactor-source-file ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "/tmp/clpm-sexpr-edit-lambda-~A/"
+                       (random (expt 2 32)))))
+         (path (merge-pathnames "lambda.lisp" dir)))
+    (write-file path "(in-package #:cl-user)
+
+(defun optional-target (x)
+  x)
+
+(defun optional-caller ()
+  (optional-target 1))
+
+(defun api-target (cell formula env)
+  (list cell formula env))
+
+(defun api-caller (cell formula env)
+  (api-target cell formula env))
+
+(defun api-dynamic (args)
+  (apply #'api-target args))
+")
+    path))
+
 (defun entry-names (array)
   (loop for entry in (array-items array)
         collect (lookup entry "name")))
@@ -439,10 +463,19 @@
       (assert-true (member "sexpr-introduce-let" method-names :test #'string=)
                    "sexpr-introduce-let missing from methods")
       (assert-true (member "sexpr-extract-function" method-names
-                           :test #'string=)
+                            :test #'string=)
                    "sexpr-extract-function missing from methods")
+      (assert-true (member "sexpr-change-lambda-list" method-names
+                            :test #'string=)
+                   "sexpr-change-lambda-list missing from methods")
+      (assert-true (member "sexpr-add-keyword-arg" method-names
+                            :test #'string=)
+                   "sexpr-add-keyword-arg missing from methods")
+      (assert-true (member "sexpr-convert-to-keyword-argument" method-names
+                            :test #'string=)
+                   "sexpr-convert-to-keyword-argument missing from methods")
       (assert-true (member "sexpr-bind-repeated-expression" method-names
-                           :test #'string=)
+                            :test #'string=)
                    "sexpr-bind-repeated-expression missing from methods")
       (assert-true (member "sexpr-bindings-at" method-names :test #'string=)
                    "sexpr-bindings-at missing from methods")
@@ -1348,8 +1381,83 @@
                                extracted-source)
                        "extract-function did not replace selected form: ~A"
                        extracted-source)
-          (assert-equal 1 (count-substrings "(* x y)" extracted-source)
-                        "selected expression should only remain in new defun"))
+           (assert-equal 1 (count-substrings "(* x y)" extracted-source)
+                         "selected expression should only remain in new defun"))
+        (let* ((lambda-path (make-lambda-refactor-source-file))
+               (lambda-file (namestring lambda-path))
+               (optional-path
+                 (json-object "file" lambda-file
+                              "kind" "defun"
+                              "name" "optional-target"))
+               (add-resp
+                 (clpm.repl:send-request
+                  sock "sexpr-add-keyword-arg"
+                  :params (json-object
+                           "path" optional-path
+                           "name" "context")))
+               (add-result (lookup add-resp "result"))
+               (after-add (read-file-string lambda-path))
+               (add-broken
+                 (array-items (lookup add-result "broken_call_sites"))))
+          (assert-true add-result
+                       "add-keyword-arg failed: ~S" add-resp)
+          (assert-equal "ok" (lookup add-result "status")
+                        "add-keyword-arg should commit")
+          (assert-equal 0 (length add-broken)
+                        "adding a keyword argument should preserve old call sites")
+          (assert-true (search "(defun optional-target (x &key context)"
+                               after-add)
+                       "add-keyword-arg did not update lambda list: ~A"
+                       after-add)
+          (assert-true (search "(optional-target 1)" after-add)
+                       "add-keyword-arg should leave old direct calls valid: ~A"
+                       after-add)
+          (let* ((change-resp
+                   (clpm.repl:send-request
+                    sock "sexpr-change-lambda-list"
+                    :params (json-object
+                             "path" optional-path
+                             "lambda_list" "(x &optional context)")))
+                 (change-result (lookup change-resp "result"))
+                 (change-broken
+                   (array-items (lookup change-result
+                                        "broken_call_sites"))))
+            (assert-true change-result
+                         "change-lambda-list failed: ~S" change-resp)
+            (assert-equal "ok" (lookup change-result "status")
+                          "change-lambda-list should commit")
+            (assert-equal 0 (length change-broken)
+                          "adding an optional argument should preserve old call sites"))
+          (let* ((convert-resp
+                   (clpm.repl:send-request
+                    sock "sexpr-convert-to-keyword-argument"
+                    :params (json-object
+                             "path" (json-object
+                                     "file" lambda-file
+                                     "kind" "defun"
+                                     "name" "api-target")
+                             "argument_position" 1
+                             "keyword" ":formula")))
+                 (convert-result (lookup convert-resp "result"))
+                 (after-convert (read-file-string lambda-path))
+                 (dynamic-caveats
+                   (array-items (lookup convert-result
+                                        "dynamic_caveats"))))
+            (assert-true convert-result
+                         "convert-to-keyword-argument failed: ~S"
+                         convert-resp)
+            (assert-equal "ok" (lookup convert-result "status")
+                          "convert-to-keyword-argument should commit")
+            (assert-true (search "(defun api-target (cell env &key formula)"
+                                 after-convert)
+                         "convert did not update lambda list: ~A"
+                         after-convert)
+            (assert-true (search "(api-target cell env :formula formula)"
+                                 after-convert)
+                         "convert did not update direct call site: ~A"
+                         after-convert)
+            (assert-equal 1 (length dynamic-caveats)
+                          "convert should report APPLY as a dynamic caveat")))
         (let* ((bind-path (make-bind-repeated-source-file))
                (bind-file (namestring bind-path))
                (bind-resp

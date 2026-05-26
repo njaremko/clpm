@@ -250,7 +250,7 @@ Acceptance evidence:
 
 ### SE-016: Lambda List And Call-Site Refactors
 
-Status: open
+Status: in-progress
 
 Support `change-lambda-list`, `add-keyword-arg`, and `convert-to-keyword-argument` for functions. The tool must update compatible call sites and return broken call-site diagnostics for the rest.
 
