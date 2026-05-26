@@ -94,6 +94,44 @@
       (assert-true (lookup un "result") "untrace returned error: ~S" un))))
 (format t "  trace/untrace OK~%")
 
+(format t "Test: trace survives function redefinition without stale untrace~%")
+(with-daemon
+  (lambda (sock)
+    (do-rpc sock "eval"
+            (list (cons "form" "(defun trace-redef-target () :old)")))
+    (let ((tr (do-rpc sock "trace"
+                       (list (cons "symbols"
+                                    (list :array
+                                          (list "trace-redef-target")))))))
+      (assert-true (lookup tr "result") "trace returned error: ~S" tr))
+    (let ((redef (do-rpc sock "eval"
+                         (list (cons "form"
+                                     "(defun trace-redef-target () :new)")))))
+      (assert-true (lookup redef "result") "redefinition failed: ~S" redef))
+    (let* ((call (do-rpc sock "eval"
+                         (list (cons "form" "(trace-redef-target)"))))
+           (result (lookup call "result"))
+           (output (and result (lookup result "output"))))
+      (assert-true result "traced redefined call failed: ~S" call)
+      (assert-true (string= ":NEW" (lookup result "value"))
+                   "redefined function did not run: ~S" result)
+      (assert-true (and (stringp output)
+                        (search "TRACE-REDEF-TARGET" output
+                                :test #'char-equal))
+                   "trace vanished after redefinition: ~S" output))
+    (let ((un (do-rpc sock "untrace"
+                       (list (cons "symbols"
+                                    (list :array
+                                          (list "trace-redef-target")))))))
+      (assert-true (lookup un "result") "untrace returned error: ~S" un))
+    (let* ((call (do-rpc sock "eval"
+                         (list (cons "form" "(trace-redef-target)"))))
+           (result (lookup call "result")))
+      (assert-true result "untraced redefined call failed: ~S" call)
+      (assert-true (string= ":NEW" (lookup result "value"))
+                   "untrace restored stale function: ~S" result))))
+(format t "  trace redefinition OK~%")
+
 ;;; ----------------------------------------------------------------------------
 ;;; Eval-shaped timing/profile aliases are not public RPCs.
 

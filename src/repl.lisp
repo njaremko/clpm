@@ -967,6 +967,7 @@ it to the server that owns that thread.")
 
 (defstruct local-trace-entry
   original
+  wrapper
   servers)
 
 (defvar *local-trace-registry* (make-hash-table :test 'eq)
@@ -2044,7 +2045,8 @@ sessions."
                        (when record
                          (setf redefined record)))
                      (setf returned-values
-                           (multiple-value-list (eval form)))))
+                           (multiple-value-list (eval form)))
+                     (%refresh-local-trace-registry)))
               (%with-repl-history (history)
               (let* ((record-signals? (getf options :record-signals))
                      (debug? (and job (getf options :debug)))
@@ -5488,6 +5490,46 @@ directory."
 (defun %local-trace-enabled-p (entry server)
   (and entry server (gethash server (local-trace-entry-servers entry))))
 
+(defun %make-local-trace-wrapper (sym original)
+  (lambda (&rest args)
+    (%local-trace-call sym original args)))
+
+(defun %install-local-trace-wrapper (sym original entry)
+  (let ((wrapper (%make-local-trace-wrapper sym original)))
+    (setf (local-trace-entry-original entry) original
+          (local-trace-entry-wrapper entry) wrapper
+          (fdefinition sym) wrapper)))
+
+(defun %refresh-local-trace-entry (sym entry)
+  (handler-case
+      (cond
+        ((not (fboundp sym)) :unbound)
+        (t
+         (let ((current (fdefinition sym)))
+           (cond
+             ((eq current (local-trace-entry-wrapper entry)) :unchanged)
+             (t
+              (%install-local-trace-wrapper sym current entry)
+              :refreshed)))))
+    (error () :unbound)))
+
+(defun %drop-local-trace-entry (sym entry)
+  (maphash (lambda (server _enabled)
+             (declare (ignore _enabled))
+             (remhash sym (server-traces server)))
+           (local-trace-entry-servers entry))
+  (remhash sym *local-trace-registry*))
+
+(defun %refresh-local-trace-registry ()
+  (clpm.repl.compat:with-mutex (*local-trace-registry-mutex*)
+    (let ((unbound '()))
+      (maphash (lambda (sym entry)
+                 (when (eq (%refresh-local-trace-entry sym entry) :unbound)
+                   (push (cons sym entry) unbound)))
+               *local-trace-registry*)
+      (dolist (pair unbound)
+        (%drop-local-trace-entry (car pair) (cdr pair))))))
+
 (defun %local-trace-call (sym original args)
   (let ((enabled? nil)
         (server *server*))
@@ -5524,12 +5566,13 @@ directory."
                (setf entry
                      (make-local-trace-entry
                       :original original
+                      :wrapper nil
                       :servers (make-hash-table :test 'eq)))
+               (%install-local-trace-wrapper sym original entry)
                (setf (gethash sym *local-trace-registry*) entry)
-               (setf (fdefinition sym)
-                     (let ((captured-original original))
-                       (lambda (&rest args)
-                         (%local-trace-call sym captured-original args))))))
+               entry))
+           (when entry
+             (%refresh-local-trace-entry sym entry))
            (setf (gethash server (local-trace-entry-servers entry)) t)
            (setf (gethash sym (server-traces server)) t)))
        t))))
@@ -5547,7 +5590,10 @@ directory."
               (remhash server (local-trace-entry-servers entry))
               (remhash sym (server-traces server))
               (when (zerop (hash-table-count (local-trace-entry-servers entry)))
-                (setf (fdefinition sym) (local-trace-entry-original entry))
+                (when (and (fboundp sym)
+                           (eq (fdefinition sym)
+                               (local-trace-entry-wrapper entry)))
+                  (setf (fdefinition sym) (local-trace-entry-original entry)))
                 (remhash sym *local-trace-registry*))
               t))))))))
 
